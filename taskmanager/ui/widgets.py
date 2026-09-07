@@ -341,79 +341,86 @@ PILL_HEIGHT = 20
 PILL_PADDING = 6
 
 
+def text_width(widget, text: str) -> int:
+    """Ширина текста у уже стилизованного виджета.
+
+    QLabel не учитывает отступы из таблицы стилей в подсказке размера, а сама
+    таблица может подменить шрифт и межбуквенный интервал — поэтому меряем после
+    ensurePolished и берём большее из двух измерений.
+    """
+    widget.ensurePolished()
+    metrics = widget.fontMetrics()
+    return max(metrics.horizontalAdvance(text), metrics.boundingRect(text).width())
+
+
 class Pill(QLabel):
     """Компактная метка: срок, ключ Jira, приоритет, продукт, простой.
 
-    Высота фиксированная, текст выравнивается по центру: у моноширинных шрифтов
-    запас под нижние выносные элементы разный, и без этого надпись съезжает вниз.
+    Высота фиксированная, текст по центру: у моноширинных шрифтов запас под
+    нижние выносные элементы разный, и без этого надпись съезжает вниз.
     """
 
-    def __init__(self, text: str, color: str, strong: bool = False, parent=None) -> None:
+    def __init__(
+        self,
+        text: str,
+        color: str,
+        strong: bool = False,
+        left_padding: int = PILL_PADDING,
+        parent=None,
+    ) -> None:
         super().__init__(text, parent)
-        font = theme.small_font()
-        self.setFont(font)
+        self.setFont(theme.small_font())
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setFixedHeight(PILL_HEIGHT)
         self.setStyleSheet(
             "color: %s; background: %s; border: 1px solid %s;"
-            "border-radius: %dpx; padding: 0 %dpx; %s"
+            "border-radius: %dpx; padding-left: %dpx; padding-right: %dpx; %s"
             % (
                 color,
                 theme.tint(color, 0.20 if strong else 0.12),
                 theme.tint(color, 0.34),
                 theme.radius("pill"),
+                left_padding,
                 PILL_PADDING,
                 theme.small_font_css(),
             )
         )
-        # QLabel не учитывает отступы из таблицы стилей в подсказке размера,
-        # поэтому ширину задаём сами: текст плюс ровно два отступа и рамка.
-        # Ширину меряем у уже стилизованного виджета: таблица стилей добавляет
-        # межбуквенный интервал, о котором метрики исходного шрифта не знают.
-        self.ensurePolished()
-        metrics = self.fontMetrics()
-        ink = max(metrics.horizontalAdvance(text), metrics.boundingRect(text).width())
-        self.setFixedWidth(ink + PILL_PADDING * 2 + 4)
+        self.setFixedWidth(text_width(self, text) + left_padding + PILL_PADDING + 4)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
 
-class ProductPill(QWidget):
-    """Метка продукта: цветная точка плюс название."""
+class ProductPill(Pill):
+    """Метка продукта: та же «пилюля», но с цветным кружком слева.
+
+    Кружок рисуется, а не кладётся в раскладку: так расстояние от него до текста
+    одинаково у любого названия, а отступы совпадают с обычными метками.
+    """
+
+    DOT = 6
+    DOT_GAP = 6
 
     def __init__(self, name: str, color: str, parent=None) -> None:
-        super().__init__(parent)
-        self.setFixedHeight(PILL_HEIGHT)
-        layout = QHBoxLayout(self)
-        # Отступы те же, что у обычной метки, чтобы продукт не выбивался из ряда.
-        layout.setContentsMargins(PILL_PADDING, 0, PILL_PADDING, 0)
-        layout.setSpacing(5)
+        self._dot_color = color
+        super().__init__(
+            name,
+            color,
+            left_padding=PILL_PADDING + self.DOT + self.DOT_GAP,
+            parent=parent,
+        )
 
-        dot = QLabel()
-        dot.setFixedSize(6, 6)
-        dot.setStyleSheet(
-            "background: %s; border-radius: %dpx;" % (color, 0 if theme.is_pixel() else 3)
-        )
-        layout.addWidget(dot)
-
-        label = QLabel(name)
-        font = theme.small_font()
-        label.setFont(font)
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        label.setStyleSheet(
-            "color: %s; background: transparent; %s" % (color, theme.small_font_css())
-        )
-        label.ensurePolished()
-        metrics = label.fontMetrics()
-        label.setFixedWidth(
-            max(metrics.horizontalAdvance(name), metrics.boundingRect(name).width()) + 2
-        )
-        layout.addWidget(label)
-
-        self.setStyleSheet(
-            "background: %s; border: 1px solid %s; border-radius: %dpx;"
-            % (theme.tint(color, 0.12), theme.tint(color, 0.30), theme.radius("pill"))
-        )
-        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, not theme.is_pixel())
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(self._dot_color))
+        top = (self.height() - self.DOT) / 2.0
+        box = QRectF(PILL_PADDING + 1, top, self.DOT, self.DOT)
+        if theme.is_pixel():
+            painter.drawRect(box)
+        else:
+            painter.drawEllipse(box)
+        painter.end()
 
 
 def _due_text(task: Task) -> str:
@@ -472,7 +479,8 @@ class TaskRow(Card):
                 self.set_bar(c[theme.PRIORITY_COLOR_KEYS[task.priority]])
 
         inner = QHBoxLayout(self)
-        inner.setContentsMargins(16, 11, 14, 11)
+        gap = theme.line_extra()
+        inner.setContentsMargins(16, 11 + gap // 2, 14, 11 + gap // 2)
         inner.setSpacing(12)
 
         self.check = CheckCircle(task.is_done, c)
@@ -481,7 +489,7 @@ class TaskRow(Card):
 
         text_col = QVBoxLayout()
         text_col.setContentsMargins(0, 0, 0, 0)
-        text_col.setSpacing(7)
+        text_col.setSpacing(7 + theme.line_extra())
         inner.addLayout(text_col, 1)
 
         self.title = QLabel(task.title)

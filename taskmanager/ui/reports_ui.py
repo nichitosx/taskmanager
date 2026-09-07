@@ -244,6 +244,7 @@ class WeeklyReportDialog(QDialog):
             with_jira=self.jira_enabled,
         )
         self.text_edit.setPlainText(text)
+        theme.apply_text_spacing(self.text_edit)
         self._sync_grouping_buttons()
         self._sync_navigation()
         self._fill_jira_list()
@@ -498,6 +499,7 @@ class HistoryDialog(QDialog):
         if self.kind_box.currentData() == "daily":
             report = self.storage.get_daily_report(value)
             self.view.setPlainText(render_daily(report, self.storage) if report else "")
+            theme.apply_text_spacing(self.view)
         else:
             content = self.storage.get_weekly_report(value)
             if not content:
@@ -510,6 +512,7 @@ class HistoryDialog(QDialog):
                     with_jira=bool(self.settings.get("jira.enabled", True)),
                 )
             self.view.setPlainText(content)
+            theme.apply_text_spacing(self.view)
 
 
 class AllWeeksDialog(QDialog):
@@ -614,6 +617,7 @@ class AllWeeksDialog(QDialog):
                 self.storage, self.grouping, self.settings.get_int("stale_days", 5)
             )
         )
+        theme.apply_text_spacing(self.text_edit)
         for key, button in self.grouping_buttons.items():
             button.setProperty("active", "true" if key == self.grouping else "false")
             button.style().unpolish(button)

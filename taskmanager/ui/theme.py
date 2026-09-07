@@ -227,6 +227,48 @@ def small_font_css() -> str:
     )
 
 
+def line_height_percent() -> int:
+    """Межстрочный интервал в процентах от высоты строки.
+
+    Пиксельные шрифты плотные, строки слипаются — в этом стиле их разводим.
+    """
+    return 150 if is_pixel() else 100
+
+
+def line_extra() -> int:
+    """Дополнительный воздух между строками внутри карточек, в пикселях."""
+    return 4 if is_pixel() else 0
+
+
+def multiline(text: str) -> str:
+    """Многострочный текст с нужным межстрочным интервалом.
+
+    В таблицах стилей Qt нет line-height, зато он есть в разметке — поэтому в
+    пиксельном стиле текст отдаётся как HTML.
+    """
+    if not is_pixel():
+        return text
+    body = text.replace("&", "&amp;").replace("<", "&lt;").replace("\n", "<br>")
+    return '<div style="line-height: %d%%">%s</div>' % (line_height_percent(), body)
+
+
+def apply_text_spacing(edit) -> None:
+    """Разводит строки в текстовом поле (отчёты, выгрузки)."""
+    if not is_pixel():
+        return
+    from PySide6.QtGui import QTextBlockFormat, QTextCursor
+
+    cursor = edit.textCursor()
+    cursor.select(QTextCursor.SelectionType.Document)
+    block = QTextBlockFormat()
+    block.setLineHeight(
+        line_height_percent(), QTextBlockFormat.LineHeightTypes.ProportionalHeight.value
+    )
+    cursor.mergeBlockFormat(block)
+    cursor.clearSelection()
+    edit.setTextCursor(cursor)
+
+
 def tint(color: str, alpha: float) -> str:
     """Полупрозрачная версия цвета для подложек «пилюль» и рамок.
 
@@ -291,6 +333,7 @@ def stylesheet(theme: str, style: str | None = None) -> str:
     c["r_small"] = radius("small")
     c["r_nav"] = radius("nav")
     c["font_size"] = 13
+    c["item_gap"] = 7 + line_extra()
     pattern = pattern_image(theme) if is_pixel() else ""
     # Только сокращённая запись background замащивает картинку: с отдельным
     # background-image Qt рисует плитку один раз в углу.
@@ -431,7 +474,7 @@ QListWidget {
     border: none;
     outline: none;
 }
-QListWidget::item { border: none; margin: 0 0 7px 0; }
+QListWidget::item { border: none; margin: 0 0 %(item_gap)dpx 0; }
 QListWidget::item:selected { background: transparent; }
 
 /* --- Прочее --- */

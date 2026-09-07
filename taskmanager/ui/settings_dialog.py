@@ -10,6 +10,7 @@ from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QColorDialog,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -767,7 +768,9 @@ class ProductDialog(QDialog):
     def __init__(self, product: products_module.Product, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Продукт")
-        self.setMinimumWidth(460)
+        self.setMinimumWidth(520)
+        owner = parent.settings if parent is not None and hasattr(parent, "settings") else None
+        self.settings_theme = owner.get("theme", "dark") if owner is not None else "dark"
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 20, 22, 18)
@@ -782,6 +785,34 @@ class ProductDialog(QDialog):
         self.keywords_edit = QLineEdit(", ".join(product.keywords))
         self.keywords_edit.setPlaceholderText("лк, кабинет, профиль — через запятую")
         layout.addWidget(self.keywords_edit)
+
+        layout.addWidget(section_label("цвет метки"))
+        self.color = product.color
+        self._swatches: dict[str, QPushButton] = {}
+        colors_row = QHBoxLayout()
+        colors_row.setSpacing(6)
+
+        auto = _button("Авто", "flat")
+        auto.setToolTip("Цвет назначится сам, по порядку в справочнике")
+        auto.clicked.connect(lambda: self._choose_color(""))
+        self._swatches[""] = auto
+        colors_row.addWidget(auto)
+
+        for value in products_module.PALETTE:
+            swatch = QPushButton()
+            swatch.setFixedSize(24, 24)
+            swatch.setCursor(Qt.CursorShape.PointingHandCursor)
+            swatch.setToolTip(value)
+            swatch.clicked.connect(lambda _=False, c=value: self._choose_color(c))
+            self._swatches[value] = swatch
+            colors_row.addWidget(swatch)
+
+        custom = _button("Свой…", "flat")
+        custom.clicked.connect(self._pick_custom_color)
+        colors_row.addWidget(custom)
+        colors_row.addStretch(1)
+        layout.addLayout(colors_row)
+        self._sync_swatches()
 
         hint = QLabel(
             "Если слово встретится в названии или заметках задачи, продукт "
@@ -803,8 +834,37 @@ class ProductDialog(QDialog):
         buttons.addWidget(save)
         layout.addLayout(buttons)
 
-        self.color = product.color
         self.name_edit.setFocus()
+
+    def _choose_color(self, value: str) -> None:
+        self.color = value
+        self._sync_swatches()
+
+    def _pick_custom_color(self) -> None:
+        start = QColor(self.color) if self.color else QColor("#D97757")
+        chosen = QColorDialog.getColor(start, self, "Цвет метки продукта")
+        if chosen.isValid():
+            self._choose_color(chosen.name())
+
+    def _sync_swatches(self) -> None:
+        """Обводим выбранный цвет, чтобы было видно, что именно выбрано."""
+        for value, button in self._swatches.items():
+            if not value:
+                button.setProperty("active", "true" if not self.color else "false")
+                button.style().unpolish(button)
+                button.style().polish(button)
+                continue
+            selected = value.lower() == (self.color or "").lower()
+            button.setStyleSheet(
+                "background: %s; border: %s; border-radius: %dpx;"
+                % (
+                    value,
+                    ("2px solid %s" % theme.palette(self.settings_theme)["text"])
+                    if selected
+                    else "1px solid rgba(0, 0, 0, 60)",
+                    theme.radius("small"),
+                )
+            )
 
     def result_product(self) -> products_module.Product:
         keywords = [k.strip() for k in self.keywords_edit.text().split(",") if k.strip()]

@@ -144,8 +144,10 @@ class TaskDetail(QWidget):
         hint_layout.addWidget(art)
 
         text = QLabel(
-            "Выберите задачу слева.\n\nДвойной клик открывает карточку,\n"
-            "правая кнопка — быстрые действия."
+            theme.multiline(
+                "Выберите задачу слева.\n\nДвойной клик открывает карточку,\n"
+                "правая кнопка — быстрые действия."
+            )
         )
         text.setProperty("faint", "true")
         text.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -588,12 +590,14 @@ class MainWindow(QMainWindow):
         layout.addWidget(section_label("шпаргалка ввода"))
         layout.addSpacing(2)
         hint = QLabel(
-            "!!  срочно\n"
-            "@завтра  срок\n"
-            "@кмес  конец месяца\n"
-            ">15.10  начать позже\n"
-            "#тег  метка\n"
-            "PROJ-142  ключ jira"
+            theme.multiline(
+                "!!  срочно\n"
+                "@завтра  срок\n"
+                "@кмес  конец месяца\n"
+                ">15.10  начать позже\n"
+                "#тег  метка\n"
+                "PROJ-142  ключ jira"
+            )
         )
         hint.setWordWrap(True)
         hint.setFont(theme.mono_font(8))
@@ -1045,7 +1049,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(line, 1)
 
         item = QListWidgetItem()
-        item.setSizeHint(QSize(0, 30))
+        # В пиксельном стиле строки выше — черта тоже должна занять больше места.
+        item.setSizeHint(QSize(0, 30 + theme.line_extra() * 2))
         item.setFlags(Qt.ItemFlag.NoItemFlags)
         self.list.addItem(item)
         self.list.setItemWidget(item, holder)
