@@ -8,7 +8,7 @@ from __future__ import annotations
 import struct
 from pathlib import Path
 
-from PySide6.QtCore import QBuffer, Qt
+from PySide6.QtCore import QBuffer, QRectF, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 
 ACCENT = "#D97757"
@@ -16,25 +16,48 @@ BACKGROUND = "#131211"
 MUTED = "#6B665F"
 
 
+def _rounded(painter: QPainter, x, y, w, h, radius) -> None:
+    painter.drawRoundedRect(QRectF(x, y, w, h), radius, radius)
+
+
 def make_pixmap(size: int = 64, accent: str = ACCENT, background: str = BACKGROUND) -> QPixmap:
-    """Квадратная иконка: скруглённая плашка и три «строки списка»."""
+    """Иконка приложения: плашка со списком и галочкой.
+
+    Для мелких размеров рисуем по пиксельной сетке без сглаживания — иначе на
+    16×16 всё превращается в мутное пятно. Крупные рисуем векторно.
+    """
+    if size <= 32:
+        return make_pixel_pixmap(size, accent, background)
+
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.GlobalColor.transparent)
-    scale = size / 64.0
-
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    painter.scale(scale, scale)
-    painter.setBrush(QColor(background))
+    painter.scale(size / 64.0, size / 64.0)
     painter.setPen(Qt.PenStyle.NoPen)
-    painter.drawRoundedRect(2, 2, 60, 60, 16, 16)
-    painter.setBrush(QColor(accent))
-    for index, y in enumerate((18, 32, 46)):
-        painter.drawEllipse(16, y - 4, 8, 8)
-        width = 26 if index != 2 else 16
-        painter.setBrush(QColor(accent if index == 0 else MUTED))
-        painter.drawRoundedRect(30, y - 3, width, 6, 3, 3)
-        painter.setBrush(QColor(accent))
+
+    # Плашка с тонкой акцентной обводкой — иконка не сливается с тёмным фоном.
+    painter.setBrush(QColor(background))
+    _rounded(painter, 2, 2, 60, 60, 14)
+    painter.setPen(QPen(QColor(accent), 2))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    _rounded(painter, 3, 3, 58, 58, 13)
+    painter.setPen(Qt.PenStyle.NoPen)
+
+    # Две строки списка и крупная галочка поверх — узнаётся даже мелко.
+    painter.setBrush(QColor(MUTED))
+    _rounded(painter, 14, 20, 22, 5, 2.5)
+    _rounded(painter, 14, 31, 14, 5, 2.5)
+
+    check = QPainterPath()
+    check.moveTo(15, 44)
+    check.lineTo(25, 53)
+    check.lineTo(50, 20)
+    pen = QPen(QColor(accent), 7)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    painter.drawPath(check)
     painter.end()
     return pixmap
 
@@ -45,14 +68,23 @@ def make_pixel_pixmap(size: int = 64, accent: str = ACCENT, background: str = BA
     base.fill(Qt.GlobalColor.transparent)
     painter = QPainter(base)
     painter.setPen(Qt.PenStyle.NoPen)
+
     painter.setBrush(QColor(background))
     painter.drawRect(0, 0, 16, 16)
-    for index, y in enumerate((3, 7, 11)):
-        painter.setBrush(QColor(accent))
-        painter.drawRect(3, y, 2, 2)
-        painter.setBrush(QColor(accent if index == 0 else MUTED))
-        painter.drawRect(7, y, 6 if index != 2 else 3, 2)
+    painter.setBrush(QColor(accent))
+    for x, y, w, h in ((1, 0, 14, 1), (1, 15, 14, 1), (0, 1, 1, 14), (15, 1, 1, 14)):
+        painter.drawRect(x, y, w, h)
+
+    painter.setBrush(QColor(MUTED))
+    painter.drawRect(3, 4, 7, 2)
+    painter.drawRect(3, 8, 4, 2)
+
+    # Галочка по клеткам: три ступеньки вниз и четыре вверх.
+    painter.setBrush(QColor(accent))
+    for x, y in ((3, 10), (4, 11), (5, 12), (6, 11), (7, 10), (8, 9), (9, 8), (10, 7), (11, 6)):
+        painter.drawRect(x, y, 2, 2)
     painter.end()
+
     return base.scaled(
         size,
         size,
@@ -66,7 +98,7 @@ def make_icon(
 ) -> QIcon:
     draw = make_pixel_pixmap if pixel else make_pixmap
     icon = QIcon()
-    for size in (16, 32, 48, 64, 128, 256):
+    for size in (16, 24, 32, 48, 64, 128, 256):
         icon.addPixmap(draw(size, accent, background))
     return icon
 
@@ -116,7 +148,7 @@ def write_ico(path: Path, accent: str = ACCENT, background: str = BACKGROUND) ->
     таблица кадров и сами PNG подряд. Windows понимает PNG внутри .ico начиная
     с Vista, так что этого достаточно.
     """
-    sizes = [16, 32, 48, 64, 128, 256]
+    sizes = [16, 20, 24, 32, 40, 48, 64, 128, 256]
     frames = [(size, _png_bytes(size, accent, background)) for size in sizes]
 
     header = struct.pack("<HHH", 0, 1, len(frames))

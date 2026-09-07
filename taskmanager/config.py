@@ -21,6 +21,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Стиль оформления: "soft" — скруглённый, "pixel" — прямоугольный пиксельный.
     "ui_style": "soft",
     "stale_days": 5,
+    # Спрашивать ли подтверждение, когда задачу отмечают выполненной.
+    "confirm_done": True,
     # Jira: ручная привязка. Ссылка собирается как <base_url>/browse/<KEY>.
     "jira": {
         "enabled": True,

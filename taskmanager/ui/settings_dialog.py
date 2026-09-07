@@ -130,6 +130,8 @@ class SettingsDialog(QDialog):
         style_note.setProperty("faint", "true")
         layout.addWidget(style_note)
 
+        self.confirm_check = QCheckBox("Спрашивать подтверждение при отметке «выполнено»")
+        layout.addWidget(self.confirm_check)
         self.tray_check = QCheckBox("Сворачивать в трей вместо закрытия")
         layout.addWidget(self.tray_check)
         self.autostart_check = QCheckBox("Запускать при входе в Windows")
@@ -625,6 +627,7 @@ class SettingsDialog(QDialog):
         index = self.style_box.findData(s.get("ui_style", theme.STYLE_SOFT))
         self.style_box.setCurrentIndex(max(index, 0))
         self.stale_spin.setValue(s.get_int("stale_days", 5))
+        self.confirm_check.setChecked(bool(s.get("confirm_done", True)))
         self.tray_check.setChecked(bool(s.get("minimize_to_tray", True)))
         self.autostart_check.setChecked(autostart.is_enabled())
 
@@ -716,6 +719,7 @@ class SettingsDialog(QDialog):
         s.set("theme", self.theme_box.currentData())
         s.set("ui_style", self.style_box.currentData())
         s.set("stale_days", self.stale_spin.value())
+        s.set("confirm_done", self.confirm_check.isChecked())
         s.set("minimize_to_tray", self.tray_check.isChecked())
 
         s.set("eod.enabled", self.eod_check.isChecked())

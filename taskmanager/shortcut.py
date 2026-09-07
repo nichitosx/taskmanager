@@ -20,14 +20,26 @@ DESKTOP = "desktop"
 START_MENU = "startmenu"
 
 
+# Номер версии иконки в имени файла: Windows кеширует значки по пути, и без
+# смены имени обновлённая иконка на старом ярлыке не появится.
+ICON_VERSION = 2
+
+
 def icon_path() -> Path:
     """Путь к .ico рядом с данными. Файл создаётся при первом обращении."""
-    path = data_dir() / "TaskManager.ico"
-    if not path.exists():
-        try:
-            write_ico(path)
-        except Exception:  # без иконки ярлык всё равно рабочий
-            return Path()
+    path = data_dir() / ("TaskManager-%d.ico" % ICON_VERSION)
+    if path.exists():
+        return path
+    try:
+        write_ico(path)
+    except Exception:  # без иконки ярлык всё равно рабочий
+        return Path()
+    for stale in data_dir().glob("TaskManager*.ico"):
+        if stale != path:
+            try:
+                stale.unlink()
+            except OSError:
+                pass
     return path
 
 

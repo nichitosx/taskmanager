@@ -17,6 +17,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QFrame,
     QGraphicsOpacityEffect,
     QScrollArea,
@@ -42,7 +43,13 @@ from .. import quickadd
 from .. import recurrence
 from ..appicon import make_icon, make_watermark
 from ..config import Settings
-from ..horizons import HORIZON_HINTS, HORIZON_LABELS, in_horizon, start_text
+from ..horizons import (
+    HORIZON_HINTS,
+    HORIZON_LABELS,
+    default_due,
+    in_horizon,
+    start_text,
+)
 from ..integrations import jira
 from ..integrations.jira import JiraClient, JiraConfig, JiraError
 from ..models import (
@@ -1121,6 +1128,9 @@ class MainWindow(QMainWindow):
         if not text:
             return
         task = quickadd.parse(text)
+        # Срок из выбранного списка, если в самой строке его не указали.
+        if task.due_date is None and task.start_date is None:
+            task.due_date = default_due(self.filter)
         products_module.apply_to_task(task, self.settings)
         created = self.storage.add_task(task)
         self.quick_add.clear()
@@ -1131,6 +1141,9 @@ class MainWindow(QMainWindow):
         self.refresh()
 
         parts = ["Добавлено: %s" % created.title]
+        if created.due_date and quickadd.parse(text).due_date is None:
+            parts.append("срок %s — по списку «%s»"
+                         % (fmt_date(created.due_date), self._filter_title()))
         if created.product:
             parts.append("продукт «%s»" % created.product)
         if created.is_planned:
@@ -1149,10 +1162,56 @@ class MainWindow(QMainWindow):
 
     def _toggle_task(self, task_id: int, done: bool) -> None:
         task = self.storage.get_task(task_id)
+        if done and task is not None and not self._confirm_done(task):
+            self._reset_check(task_id)
+            return
         self.storage.set_status(task_id, STATUS_DONE if done else STATUS_ACTIVE)
         if done and task is not None:
             self._spawn_next_occurrence(task)
         QTimer.singleShot(120, lambda: self.refresh(keep_selection=True))
+
+    def done_dialog(self, task: Task) -> QMessageBox:
+        """Собирает окно подтверждения (отдельно от показа — так его видно тестам)."""
+        text = "Отметить «%s» выполненной?" % task.title
+        following = recurrence.next_occurrence(task)
+        if following is not None:
+            when = following.due_date or following.start_date
+            text += "\n\nЗадача повторяется: следующая появится на %s." % (
+                fmt_date(when) if when else "ближайшую дату"
+            )
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Выполнено")
+        box.setText(text)
+        # Системная иконка вопроса синяя и выбивается из палитры — обходимся текстом.
+        box.setIcon(QMessageBox.Icon.NoIcon)
+        yes = box.addButton("Выполнена", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(yes)
+        box.setCheckBox(QCheckBox("Больше не спрашивать"))
+        box.setProperty("acceptButton", id(yes))
+        return box
+
+    def _confirm_done(self, task: Task) -> bool:
+        """Спрашивает подтверждение перед отметкой «выполнено»."""
+        if not self.settings.get("confirm_done", True):
+            return True
+        box = self.done_dialog(task)
+        box.exec()
+        if box.checkBox().isChecked():
+            self.settings.set("confirm_done", False)
+            self.settings.save()
+        return id(box.clickedButton()) == box.property("acceptButton")
+
+    def _reset_check(self, task_id: int) -> None:
+        """Возвращает отметку в списке обратно, если выполнение не подтвердили."""
+        row = self.rows.get(task_id)
+        if row is None:
+            return
+        row.check.blockSignals(True)
+        row.check.setChecked(False)
+        row.check.blockSignals(False)
+        row.check.update()
 
     def _spawn_next_occurrence(self, task: Task) -> None:
         """Для повторяющейся задачи заводит следующий раз с новыми датами."""

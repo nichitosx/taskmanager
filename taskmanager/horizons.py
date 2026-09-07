@@ -37,10 +37,36 @@ def week_end(today: date | None = None) -> date:
     return today + timedelta(days=6 - today.weekday())
 
 
+def week_deadline(today: date | None = None) -> date:
+    """Пятница текущей недели — разумный срок для задачи «на неделе».
+
+    В субботу и воскресенье пятница уже позади, поэтому берём конец недели.
+    """
+    today = today or date.today()
+    friday = today + timedelta(days=4 - today.weekday())
+    return friday if friday >= today else week_end(today)
+
+
 def month_end(today: date | None = None) -> date:
     """Последний день текущего месяца."""
     today = today or date.today()
     return today.replace(day=calendar.monthrange(today.year, today.month)[1])
+
+
+def default_due(horizon: str, today: date | None = None) -> date | None:
+    """Срок, который подставляется новой задаче в этом списке.
+
+    Логика простая: раз задачу заводят, стоя в списке «На неделе», значит она
+    должна быть сделана на этой неделе.
+    """
+    today = today or date.today()
+    if horizon == HORIZON_TODAY:
+        return today
+    if horizon == HORIZON_WEEK:
+        return week_deadline(today)
+    if horizon == HORIZON_MONTH:
+        return month_end(today)
+    return None
 
 
 def horizon_bound(horizon: str, today: date | None = None) -> date | None:
