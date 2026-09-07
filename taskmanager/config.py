@@ -52,6 +52,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "notify_enabled": True,
         "notify_days": 7,
     },
+    # Сеть: файл корневого сертификата, если трафик проверяет средство защиты.
+    "network": {
+        "ca_file": "",
+    },
     # Справочник продуктов: [{"name": ..., "keywords": [...], "color": "#..."}].
     "products": [],
     "products_autodetect": True,

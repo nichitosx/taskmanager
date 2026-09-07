@@ -202,7 +202,10 @@ class WeeklyReportDialog(QDialog):
         layout.addLayout(buttons)
 
         self.obsidian_button.setEnabled(bool(self.settings.get("obsidian.vault_path", "")))
-        config = ConfluenceConfig.from_settings(self.settings.get("confluence", {}) or {})
+        config = ConfluenceConfig.from_settings(
+            self.settings.get("confluence", {}) or {},
+            self.settings.get("network.ca_file", ""),
+        )
         cf_on = bool(self.settings.get("confluence.enabled", False)) and config.is_configured
         self.confluence_button.setVisible(cf_on)
 
@@ -434,7 +437,10 @@ class WeeklyReportDialog(QDialog):
         self.status.setText("Сохранено: %s" % path)
 
     def _publish_confluence(self) -> None:
-        config = ConfluenceConfig.from_settings(self.settings.get("confluence", {}) or {})
+        config = ConfluenceConfig.from_settings(
+            self.settings.get("confluence", {}) or {},
+            self.settings.get("network.ca_file", ""),
+        )
         title = "Отчёт за неделю %s — %s" % (fmt_date(self.start), fmt_date(self.end))
         answer = QMessageBox.question(
             self,

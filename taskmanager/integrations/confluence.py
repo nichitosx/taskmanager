@@ -16,6 +16,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from . import net
+
 
 class ConfluenceError(RuntimeError):
     """Ошибка обращения к Confluence с человекочитаемым текстом."""
@@ -28,15 +30,20 @@ class ConfluenceConfig:
     token: str = ""
     space_key: str = ""
     parent_id: str = ""
+    ca_file: str = ""
 
     @classmethod
-    def from_settings(cls, data: dict[str, Any]) -> "ConfluenceConfig":
+    def from_settings(cls, data: dict[str, Any], ca_file: str = "") -> "ConfluenceConfig":
+        data = dict(data or {})
+        if ca_file and not data.get("ca_file"):
+            data["ca_file"] = ca_file
         return cls(
             base_url=(data.get("base_url") or "").strip(),
             email=(data.get("email") or "").strip(),
             token=(data.get("token") or "").strip(),
             space_key=(data.get("space_key") or "").strip(),
             parent_id=str(data.get("parent_id") or "").strip(),
+            ca_file=str(data.get("ca_file") or "").strip(),
         )
 
     @property
@@ -155,8 +162,11 @@ class ConfluenceClient:
         request.add_header("Authorization", "Basic " + auth)
         request.add_header("Content-Type", "application/json")
         request.add_header("Accept", "application/json")
+        context = net.ssl_context(self.config.ca_file)
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with urllib.request.urlopen(
+                request, timeout=self.timeout, context=context
+            ) as response:
                 body = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")[:400]
@@ -166,7 +176,9 @@ class ConfluenceClient:
                 ) from exc
             raise ConfluenceError("Confluence вернул ошибку %s: %s" % (exc.code, detail)) from exc
         except urllib.error.URLError as exc:
-            raise ConfluenceError("Не удалось связаться с Confluence: %s" % exc.reason) from exc
+            raise ConfluenceError(
+                "Не удалось связаться с Confluence: %s" % net.describe(exc.reason)
+            ) from exc
         return json.loads(body) if body else {}
 
     # --- Операции -------------------------------------------------------------

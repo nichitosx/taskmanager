@@ -723,7 +723,10 @@ class MainWindow(QMainWindow):
         return item
 
     def _jira_config(self) -> JiraConfig:
-        return JiraConfig.from_settings(self.settings.get("jira", {}) or {})
+        return JiraConfig.from_settings(
+            self.settings.get("jira", {}) or {},
+            self.settings.get("network.ca_file", ""),
+        )
 
     def _jira_ready(self) -> bool:
         config = self._jira_config()

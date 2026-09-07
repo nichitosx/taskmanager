@@ -5,22 +5,17 @@
 
 from __future__ import annotations
 
-import os
-import subprocess
 import sys
 from pathlib import Path
 
+from . import winshell
 from .config import app_dir
 
 SHORTCUT_NAME = "TaskManager.lnk"
 FALLBACK_NAME = "TaskManager.cmd"
 
 
-def startup_dir() -> Path:
-    appdata = os.environ.get("APPDATA")
-    if not appdata:
-        return Path.home() / "Startup"
-    return Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+startup_dir = winshell.startup_dir
 
 
 def _launch_target() -> tuple[str, str]:
@@ -39,27 +34,18 @@ def is_enabled() -> bool:
 
 
 def _create_shortcut(path: Path, executable: str, arguments: str) -> bool:
-    """Создаёт .lnk через WScript.Shell. False, если не получилось."""
-    script = (
-        "$s = (New-Object -ComObject WScript.Shell).CreateShortcut('%s');"
-        "$s.TargetPath = '%s';"
-        "$s.Arguments = '%s';"
-        "$s.WorkingDirectory = '%s';"
-        "$s.WindowStyle = 7;"
-        "$s.Description = 'TaskManager — трекер рабочих задач';"
-        "$s.Save()"
-    ) % (path, executable, arguments.replace("'", "''"), app_dir())
-    try:
-        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-            capture_output=True,
-            timeout=25,
-            creationflags=creationflags,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return result.returncode == 0 and path.exists()
+    """Создаёт .lnk через COM. False, если не получилось."""
+    from .shortcut import icon_path
+
+    icon = icon_path()
+    return winshell.create_shortcut(
+        path,
+        executable,
+        arguments,
+        str(app_dir()),
+        str(icon) if icon and str(icon) else "",
+        "TaskManager — трекер рабочих задач",
+    )
 
 
 def _create_cmd(path: Path, executable: str, arguments: str) -> None:

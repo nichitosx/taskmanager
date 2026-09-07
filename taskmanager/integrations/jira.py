@@ -71,6 +71,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
+
+from . import net
 from datetime import date
 from typing import Any
 
@@ -105,20 +107,24 @@ class JiraConfig:
     token: str = ""
     jql: str = DEFAULT_JQL
     enabled: bool = True
+    ca_file: str = ""
 
     @property
     def is_configured(self) -> bool:
         return bool(self.base_url.strip() and self.email.strip() and self.token.strip())
 
     @classmethod
-    def from_settings(cls, raw: dict[str, Any]) -> "JiraConfig":
-        raw = raw or {}
+    def from_settings(cls, raw: dict[str, Any], ca_file: str = "") -> "JiraConfig":
+        raw = dict(raw or {})
+        if ca_file and not raw.get("ca_file"):
+            raw["ca_file"] = ca_file
         return cls(
             base_url=str(raw.get("base_url", "")).strip(),
             email=str(raw.get("email", "")).strip(),
             token=str(raw.get("token", "")).strip(),
             jql=str(raw.get("jql", "") or DEFAULT_JQL).strip(),
             enabled=bool(raw.get("enabled", True)),
+            ca_file=str(raw.get("ca_file", "")).strip(),
         )
 
 
@@ -148,7 +154,7 @@ class JiraClient:
         request = urllib.request.Request(url)
         request.add_header("Authorization", self._auth_header())
         request.add_header("Accept", "application/json")
-        context = ssl.create_default_context()
+        context = net.ssl_context(self.config.ca_file)
         with urllib.request.urlopen(request, timeout=self.timeout, context=context) as response:
             return json.loads(response.read().decode("utf-8"))
 
@@ -169,8 +175,12 @@ class JiraClient:
                     continue
                 raise JiraError(self._http_message(exc)) from exc
             except urllib.error.URLError as exc:
-                raise JiraError("Не удалось соединиться с Jira: %s" % exc.reason) from exc
-            except (ValueError, ssl.SSLError) as exc:
+                raise JiraError(
+                    "Не удалось соединиться с Jira: %s" % net.describe(exc.reason)
+                ) from exc
+            except ssl.SSLError as exc:
+                raise JiraError("Jira: %s" % net.describe(exc)) from exc
+            except ValueError as exc:
                 raise JiraError("Неожиданный ответ Jira: %s" % exc) from exc
             return [self._issue(item) for item in payload.get("issues", [])]
 

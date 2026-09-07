@@ -1,18 +1,21 @@
-"""Ярлыки Windows: на рабочий стол и в меню «Пуск».
+"""Ярлыки Windows: на рабочий стол, в меню «Пуск» и в папку программы.
 
 Чтобы запускать программу не через run.py, а обычным двойным кликом по значку.
-Права администратора не нужны — пишем только в профиль пользователя.
+Права администратора не нужны — пишем только в профиль пользователя, а сам .lnk
+создаётся внутри процесса через COM (см. winshell), без запуска PowerShell.
 """
 
 from __future__ import annotations
 
-import os
-import subprocess
 import sys
 from pathlib import Path
 
+from . import winshell
 from .appicon import write_ico
 from .config import app_dir, data_dir
+
+desktop_dir = winshell.desktop_dir
+start_menu_dir = winshell.start_menu_dir
 
 SHORTCUT_NAME = "TaskManager.lnk"
 
@@ -42,36 +45,6 @@ def icon_path() -> Path:
             except OSError:
                 pass
     return path
-
-
-def _powershell(script: str) -> subprocess.CompletedProcess | None:
-    try:
-        return subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-            capture_output=True,
-            text=True,
-            timeout=25,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-
-
-def desktop_dir() -> Path:
-    """Рабочий стол пользователя с учётом переезда в OneDrive."""
-    result = _powershell("[Environment]::GetFolderPath('Desktop')")
-    if result is not None and result.returncode == 0:
-        path = Path(result.stdout.strip())
-        if path.is_dir():
-            return path
-    profile = os.environ.get("USERPROFILE") or str(Path.home())
-    return Path(profile) / "Desktop"
-
-
-def start_menu_dir() -> Path:
-    appdata = os.environ.get("APPDATA")
-    base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
-    return base / "Microsoft" / "Windows" / "Start Menu" / "Programs"
 
 
 def target_dir(kind: str) -> Path:
@@ -105,25 +78,16 @@ def create(kind: str = DESKTOP) -> Path:
     executable, arguments = launch_target()
     icon = icon_path()
 
-    script = (
-        "$s = (New-Object -ComObject WScript.Shell).CreateShortcut('%s');"
-        "$s.TargetPath = '%s';"
-        "$s.Arguments = '%s';"
-        "$s.WorkingDirectory = '%s';"
-        "$s.Description = 'TaskManager — трекер рабочих задач';"
-        "%s"
-        "$s.Save()"
-    ) % (
+    created = winshell.create_shortcut(
         path,
         executable,
-        arguments.replace("'", "''"),
-        app_dir(),
-        ("$s.IconLocation = '%s';" % icon) if icon and str(icon) else "",
+        arguments,
+        str(app_dir()),
+        str(icon) if icon and str(icon) else "",
+        "TaskManager — трекер рабочих задач",
     )
-    result = _powershell(script)
-    if result is None or result.returncode != 0 or not path.exists():
-        detail = (result.stderr.strip() if result is not None else "PowerShell недоступен")
-        raise OSError(detail or "не удалось создать ярлык")
+    if not created:
+        raise OSError("не удалось создать ярлык")
     return path
 
 

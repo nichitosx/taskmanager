@@ -363,6 +363,7 @@ class SettingsDialog(QDialog):
             token=self.jira_token.text().strip(),
             jql=self.jira_jql.text().strip() or DEFAULT_JQL,
             enabled=self.jira_check.isChecked(),
+            ca_file=self.ca_edit.text().strip(),
         )
 
     def _check_jira(self) -> None:
@@ -564,6 +565,28 @@ class SettingsDialog(QDialog):
         layout.addWidget(jql_note)
 
         layout.addWidget(hline())
+        layout.addWidget(section_label("сеть"))
+        ca_row = QHBoxLayout()
+        ca_row.setSpacing(8)
+        self.ca_edit = QLineEdit()
+        self.ca_edit.setPlaceholderText("файл корневого сертификата, если он нужен")
+        ca_row.addWidget(self.ca_edit, 1)
+        ca_browse = _button("Выбрать…", "flat")
+        ca_browse.clicked.connect(self._pick_ca_file)
+        ca_row.addWidget(ca_browse)
+        layout.addLayout(ca_row)
+
+        ca_note = QLabel(
+            "Обычно ничего указывать не нужно: программа доверяет сертификатам из "
+            "хранилища Windows. Поле пригодится, если трафик проверяет корпоративная "
+            "защита, а её корневой сертификат в хранилище не попал — тогда Jira и "
+            "Confluence отвечают ошибкой проверки сертификата."
+        )
+        ca_note.setWordWrap(True)
+        ca_note.setProperty("faint", "true")
+        layout.addWidget(ca_note)
+
+        layout.addWidget(hline())
         layout.addWidget(section_label("obsidian"))
         vault_row = QHBoxLayout()
         self.vault_edit = QLineEdit()
@@ -658,6 +681,7 @@ class SettingsDialog(QDialog):
 
         self.jira_check.setChecked(bool(s.get("jira.enabled", True)))
         self.jira_url.setText(s.get("jira.base_url", ""))
+        self.ca_edit.setText(s.get("network.ca_file", ""))
         self.jira_email.setText(s.get("jira.email", ""))
         self.jira_token.setText(s.get("jira.token", ""))
         self.jira_jql.setText(s.get("jira.jql", "") or DEFAULT_JQL)
@@ -681,6 +705,16 @@ class SettingsDialog(QDialog):
         except (ValueError, AttributeError):
             return default_h, default_m
 
+    def _pick_ca_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Корневой сертификат",
+            self.ca_edit.text().strip(),
+            "Сертификаты (*.pem *.crt *.cer);;Все файлы (*)",
+        )
+        if path:
+            self.ca_edit.setText(path)
+
     def _pick_vault(self) -> None:
         path = QFileDialog.getExistingDirectory(
             self, "Папка хранилища Obsidian", self.vault_edit.text() or str(data_dir())
@@ -695,6 +729,7 @@ class SettingsDialog(QDialog):
             token=self.cf_token.text().strip(),
             space_key=self.cf_space.text().strip(),
             parent_id=self.cf_parent.text().strip(),
+            ca_file=self.ca_edit.text().strip(),
         )
 
     def _check_confluence(self) -> None:
@@ -740,6 +775,7 @@ class SettingsDialog(QDialog):
         products_module.save(s, self.products)
 
         s.set("jira.enabled", self.jira_check.isChecked())
+        s.set("network.ca_file", self.ca_edit.text().strip())
         s.set("jira.email", self.jira_email.text().strip())
         s.set("jira.token", self.jira_token.text().strip())
         s.set("jira.jql", self.jira_jql.text().strip() or DEFAULT_JQL)
