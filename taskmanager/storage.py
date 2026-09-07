@@ -297,15 +297,31 @@ class Storage:
             return True
         return bool(self.logs_for_date(log_date))
 
+    # Дни, за которые есть хоть что-то: отметка о работе или непустой комментарий.
+    # Пустая запись отчёта (открыли и закрыли) днём с данными не считается.
+    _FILLED_DAYS = """SELECT log_date FROM daily_reports WHERE trim(note) != ''
+                      UNION SELECT log_date FROM work_logs"""
+
     def report_dates(self, limit: int = 90) -> list[date]:
         rows = self.conn.execute(
-            """SELECT log_date FROM (
-                   SELECT log_date FROM daily_reports
-                   UNION SELECT log_date FROM work_logs
-               ) ORDER BY log_date DESC LIMIT ?""",
+            "SELECT log_date FROM (" + self._FILLED_DAYS + ") ORDER BY log_date DESC LIMIT ?",
             (limit,),
         ).fetchall()
         return [date.fromisoformat(r["log_date"]) for r in rows]
+
+    def weeks_with_activity(self, limit: int = 260) -> list[date]:
+        """Понедельники недель, за которые что-то заполнено, от свежих к старым.
+
+        Недели без единой отметки и без комментариев не возвращаются — их незачем
+        показывать в истории и выгружать.
+        """
+        rows = self.conn.execute(
+            "SELECT DISTINCT date(log_date, 'weekday 0', '-6 days') AS week_start "
+            "FROM (" + self._FILLED_DAYS + ") "
+            "WHERE log_date IS NOT NULL ORDER BY week_start DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [date.fromisoformat(r["week_start"]) for r in rows if r["week_start"]]
 
     # --- Недельный отчёт ------------------------------------------------------
 

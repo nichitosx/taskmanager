@@ -68,19 +68,28 @@ class CheckCircle(QAbstractButton):
 
     def paintEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         c = self.colors
+        pixel = theme.is_pixel()
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        circle = QRectF(1.5, 1.5, self.SIZE - 3, self.SIZE - 3)
+        # В пиксельном стиле сглаживание выключено намеренно: ступеньки на краях
+        # и есть та самая «пиксельность».
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, not pixel)
+        box = QRectF(1.5, 1.5, self.SIZE - 3, self.SIZE - 3)
+
+        def draw_shape() -> None:
+            if pixel:
+                painter.drawRect(box)
+            else:
+                painter.drawEllipse(box)
 
         if self.isChecked():
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(c["success"]))
-            painter.drawEllipse(circle)
+            draw_shape()
             tick = QColor("#FFFFFF")
         else:
             painter.setBrush(QColor(c["surface"]))
             painter.setPen(QPen(QColor(c["accent"] if self._hover else c["border"]), 1.3))
-            painter.drawEllipse(circle)
+            draw_shape()
             tick = QColor(c["text_faint"]) if self._hover else None
 
         if tick is not None:
@@ -88,9 +97,11 @@ class CheckCircle(QAbstractButton):
             path.moveTo(6.0, 10.2)
             path.lineTo(8.8, 13.2)
             path.lineTo(14.2, 6.8)
-            pen = QPen(tick, 1.9)
-            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            pen = QPen(tick, 2.2 if pixel else 1.9)
+            cap = Qt.PenCapStyle.SquareCap if pixel else Qt.PenCapStyle.RoundCap
+            join = Qt.PenJoinStyle.MiterJoin if pixel else Qt.PenJoinStyle.RoundJoin
+            pen.setCapStyle(cap)
+            pen.setJoinStyle(join)
             painter.setPen(pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawPath(path)
@@ -105,8 +116,13 @@ class Pill(QLabel):
         self.setFont(theme.mono_font(8))
         self.setStyleSheet(
             "color: %s; background: %s; border: 1px solid %s;"
-            "border-radius: 9px; padding: 2px 7px;"
-            % (color, theme.tint(color, 0.20 if strong else 0.12), theme.tint(color, 0.34))
+            "border-radius: %dpx; padding: 2px 7px;"
+            % (
+                color,
+                theme.tint(color, 0.20 if strong else 0.12),
+                theme.tint(color, 0.34),
+                theme.radius("pill"),
+            )
         )
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
@@ -122,7 +138,9 @@ class ProductPill(QWidget):
 
         dot = QLabel()
         dot.setFixedSize(7, 7)
-        dot.setStyleSheet("background: %s; border-radius: 3px;" % color)
+        dot.setStyleSheet(
+            "background: %s; border-radius: %dpx;" % (color, 0 if theme.is_pixel() else 3)
+        )
         layout.addWidget(dot)
 
         label = QLabel(name)
@@ -131,8 +149,8 @@ class ProductPill(QWidget):
         layout.addWidget(label)
 
         self.setStyleSheet(
-            "background: %s; border: 1px solid %s; border-radius: 9px;"
-            % (theme.tint(color, 0.12), theme.tint(color, 0.30))
+            "background: %s; border: 1px solid %s; border-radius: %dpx;"
+            % (theme.tint(color, 0.12), theme.tint(color, 0.30), theme.radius("pill"))
         )
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
@@ -168,6 +186,7 @@ class TaskRow(QFrame):
         colors: dict[str, str],
         stale_days: int,
         product_color: str = "",
+        show_jira: bool = True,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -175,6 +194,7 @@ class TaskRow(QFrame):
         self.colors = colors
         self.stale_days = stale_days
         self.product_color = product_color
+        self.show_jira = show_jira
         self.setObjectName("taskRow")
         self._build()
         self._apply_style()
@@ -198,9 +218,10 @@ class TaskRow(QFrame):
                 bar_color = c["danger"]
             elif task.priority >= 2:
                 bar_color = c[theme.PRIORITY_COLOR_KEYS[task.priority]]
+        corner = theme.radius("card")
         self.bar.setStyleSheet(
-            "background: %s; border-top-left-radius: 10px;"
-            "border-bottom-left-radius: 10px;" % bar_color
+            "background: %s; border-top-left-radius: %dpx;"
+            "border-bottom-left-radius: %dpx;" % (bar_color, corner, corner)
         )
         root.addWidget(self.bar)
 
@@ -266,12 +287,13 @@ class TaskRow(QFrame):
             else:
                 pills.append(Pill(due, c["text_dim"]))
 
-        if task.jira_key:
-            pills.append(Pill(task.jira_key, c["info"]))
-        elif task.jira_state == JIRA_NOT_NEEDED:
-            pills.append(Pill("без jira", c["text_faint"]))
-        elif not task.is_done:
-            pills.append(Pill("jira?", c["warning"]))
+        if self.show_jira:
+            if task.jira_key:
+                pills.append(Pill(task.jira_key, c["info"]))
+            elif task.jira_state == JIRA_NOT_NEEDED:
+                pills.append(Pill("без jira", c["text_faint"]))
+            elif not task.is_done:
+                pills.append(Pill("jira?", c["warning"]))
 
         if task.is_stale(self.stale_days):
             pills.append(Pill("тишина %d дн." % task.days_since_activity, c["text_faint"]))
@@ -290,11 +312,19 @@ class TaskRow(QFrame):
         elif self.task.is_overdue:
             border, background = theme.tint(c["danger"], 0.45), c["surface"]
         else:
-            border, background = c["border_soft"], c["surface"]
+            # В пиксельном стиле рамка заметнее: карточка должна читаться коробкой.
+            border = c["border"] if theme.is_pixel() else c["border_soft"]
+            background = c["surface"]
         self.setStyleSheet(
-            "#taskRow { background: %s; border: 1px solid %s; border-radius: 10px; }"
+            "#taskRow { background: %s; border: 1px solid %s; border-radius: %dpx; }"
             "#taskRow:hover { background: %s; border-color: %s; }"
-            % (background, border, c["surface_hover"], c["border"] if not selected else c["accent"])
+            % (
+                background,
+                border,
+                theme.radius("card"),
+                c["surface_hover"],
+                c["border"] if not selected else c["accent"],
+            )
         )
 
     def set_selected(self, selected: bool) -> None:
@@ -344,8 +374,9 @@ class NavItem(QFrame):
         background = c["surface_alt"] if active else "transparent"
         text = c["text"] if active else c["text_dim"]
         self.setStyleSheet(
-            "#navItem { background: %s; border-radius: 7px; }"
-            "#navItem:hover { background: %s; }" % (background, c["surface_alt"])
+            "#navItem { background: %s; border-radius: %dpx; }"
+            "#navItem:hover { background: %s; }"
+            % (background, theme.radius("nav"), c["surface_alt"])
         )
         font = theme.ui_font(10, bold=active)
         self.title.setFont(font)

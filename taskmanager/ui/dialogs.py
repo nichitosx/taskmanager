@@ -185,9 +185,11 @@ class TaskDialog(QDialog):
         layout.addLayout(suggest_row)
         self.title_edit.textChanged.connect(self._sync_product_hint)
 
-        layout.addWidget(hline())
+        self.jira_line = hline()
+        layout.addWidget(self.jira_line)
 
-        layout.addWidget(section_label("jira"))
+        self.jira_caption = section_label("jira")
+        layout.addWidget(self.jira_caption)
         jira_row = QHBoxLayout()
         jira_row.setSpacing(8)
         self.jira_state_box = QComboBox()
@@ -202,7 +204,9 @@ class TaskDialog(QDialog):
         self.open_jira_button = _button("Открыть", "flat")
         self.open_jira_button.clicked.connect(self._open_jira)
         jira_row.addWidget(self.open_jira_button)
-        layout.addLayout(jira_row)
+        self.jira_row_box = QWidget()
+        self.jira_row_box.setLayout(jira_row)
+        layout.addWidget(self.jira_row_box)
 
         self.jira_hint = QLabel()
         self.jira_hint.setProperty("faint", "true")
@@ -334,6 +338,10 @@ class TaskDialog(QDialog):
         self.notes_edit.setPlainText(task.notes)
         self.done_button.setText("Вернуть в работу" if task.is_done else "Выполнена")
         self._sync_jira_controls()
+        # Интеграция выключена — блок Jira просто не показываем.
+        jira_on = bool(self.settings.get("jira.enabled", True))
+        for widget in (self.jira_line, self.jira_caption, self.jira_row_box, self.jira_hint):
+            widget.setVisible(jira_on)
         self._sync_start_hint()
         self._sync_product_hint()
 

@@ -285,6 +285,7 @@ def render_weekly(
     end: date,
     stale_days: int = 5,
     grouping: str = GROUPING_BY_DAYS,
+    with_jira: bool = True,
 ) -> str:
     """Markdown-текст отчёта за неделю.
 
@@ -317,17 +318,20 @@ def render_weekly(
         lines.append("")
 
     # --- Главное: что нужно завести в Jira
-    lines.append("## Нужно завести в Jira")
-    if data["jira_todo"]:
-        for task in data["jira_todo"]:
-            due = ", срок %s" % fmt_date(task.due_date) if task.due_date else ""
+    if with_jira:
+        lines.append("## Нужно завести в Jira")
+        if data["jira_todo"]:
+            for task in data["jira_todo"]:
+                due = ", срок %s" % fmt_date(task.due_date) if task.due_date else ""
+                lines.append(
+                    "- [ ] **%s** (приоритет: %s%s)"
+                    % (task.title, PRIORITY_LABELS.get(task.priority, "обычный"), due)
+                )
+        else:
             lines.append(
-                "- [ ] **%s** (приоритет: %s%s)"
-                % (task.title, PRIORITY_LABELS.get(task.priority, "обычный"), due)
+                "Всё закрыто: по каждой задаче недели либо есть issue, либо она не нужна."
             )
-    else:
-        lines.append("Всё закрыто: по каждой задаче недели либо есть issue, либо она не нужна.")
-    lines.append("")
+        lines.append("")
 
     # --- Хвосты
     active = [t for t in storage.list_tasks(include_done=False)]
@@ -357,6 +361,92 @@ def render_weekly(
     return "\n".join(lines).strip() + "\n"
 
 
+# --- Выгрузка за все заполненные недели ---------------------------------------
+
+
+def _shift_headings(lines: list[str]) -> list[str]:
+    """Опускает заголовки на уровень ниже — блок вкладывается внутрь недели."""
+    return ["#" + line if line.startswith("#") else line for line in lines]
+
+
+def _period_task_summary(storage: Storage, weeks: list[date]) -> list[str]:
+    """Сводка по задачам за весь период: сколько дней и недель заняла каждая."""
+    days: dict[int, set[date]] = {}
+    week_count: dict[int, set[date]] = {}
+    free_days: set[date] = set()
+
+    for week_start in weeks:
+        for log in storage.logs_in_range(week_start, week_start + timedelta(days=6)):
+            if log.task_id is None:
+                free_days.add(log.log_date)
+                continue
+            days.setdefault(log.task_id, set()).add(log.log_date)
+            week_count.setdefault(log.task_id, set()).add(week_start)
+
+    rows = []
+    for task_id, dates in days.items():
+        task = storage.get_task(task_id)
+        if task is None:
+            continue
+        rows.append((len(dates), len(week_count.get(task_id, set())), task))
+    rows.sort(key=lambda item: (-item[0], item[2].title))
+
+    lines = ["## Итого по задачам"]
+    if not rows:
+        lines.append("За период нет ни одной отметки о работе.")
+        lines.append("")
+        return lines
+
+    for day_count, weeks_count, task in rows:
+        key = " (`%s`)" % task.jira_key if task.jira_key else ""
+        parts = ["дней: %d" % day_count, "недель: %d" % weeks_count]
+        if task.product:
+            parts.append(task.product)
+        if task.status == STATUS_DONE:
+            parts.append("завершена")
+        lines.append("- **%s**%s — %s" % (task.title, key, " · ".join(parts)))
+    if free_days:
+        lines.append("- _Работа вне задач_ — дней: %d" % len(free_days))
+    lines.append("")
+    return lines
+
+
+def render_all_weeks(
+    storage: Storage,
+    grouping: str = GROUPING_BY_TASKS,
+    stale_days: int = 5,
+) -> str:
+    """Одна выгрузка по всем неделям, за которые что-то заполнено.
+
+    Недели без отметок и комментариев пропускаются: в такой выгрузке они были бы
+    просто пустыми заголовками.
+    """
+    weeks = sorted(storage.weeks_with_activity())
+    if not weeks:
+        return "# Выгрузка по неделям\n\nПока нет ни одной заполненной недели.\n"
+
+    first, last = weeks[0], weeks[-1] + timedelta(days=6)
+    lines = ["# Задачи по неделям: %s — %s" % (fmt_date(first), fmt_date(last)), ""]
+    lines.append("Заполненных недель: %d" % len(weeks))
+    lines.append("")
+    lines.extend(_period_task_summary(storage, weeks))
+
+    lines.append("## По неделям")
+    lines.append("")
+    for week_start in weeks:
+        week_end = week_start + timedelta(days=6)
+        data = collect_week(storage, week_start, week_end)
+        lines.append("### Неделя %s — %s" % (fmt_date(week_start), fmt_date(week_end)))
+        body = (
+            _render_tasks_body(data)
+            if grouping == GROUPING_BY_TASKS
+            else _render_days_body(data)
+        )
+        lines.extend(_shift_headings(_shift_headings(body)))
+
+    return "\n".join(lines).strip() + "\n"
+
+
 # --- Экспорт ------------------------------------------------------------------
 
 
@@ -375,3 +465,7 @@ def daily_filename(day: date) -> str:
 
 def weekly_filename(start: date, end: date) -> str:
     return "Неделя %s — %s.md" % (start.isoformat(), end.isoformat())
+
+
+def all_weeks_filename(start: date, end: date) -> str:
+    return "Задачи по неделям %s — %s.md" % (start.isoformat(), end.isoformat())

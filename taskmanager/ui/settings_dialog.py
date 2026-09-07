@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import autostart
+from .. import demo
 from .. import products as products_module
 from .. import shortcut
 from ..config import Settings, data_dir, is_portable
@@ -46,9 +47,11 @@ def _button(text: str, kind: str = "") -> QPushButton:
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, settings: Settings, parent=None) -> None:
+    def __init__(self, settings: Settings, parent=None, storage=None) -> None:
         super().__init__(parent)
         self.settings = settings
+        # Хранилище нужно только для кнопки с задачами-примерами.
+        self.storage = storage if storage is not None else getattr(parent, "storage", None)
         self.setWindowTitle("Настройки")
         self.setMinimumSize(660, 620)
         self._build()
@@ -103,12 +106,26 @@ class SettingsDialog(QDialog):
         self.theme_box.addItem("Светлая", "light")
         form.addRow("Оформление", self.theme_box)
 
+        self.style_box = QComboBox()
+        for key, title in theme.STYLE_LABELS.items():
+            self.style_box.addItem(title, key)
+        form.addRow("Стиль", self.style_box)
+
         self.stale_spin = QSpinBox()
         self.stale_spin.setRange(1, 60)
         self.stale_spin.setSuffix(" дн.")
         form.addRow("Считать задачу «без движения» через", self.stale_spin)
 
         layout.addLayout(form)
+
+        style_note = QLabel(
+            "«Мягкий» — скруглённые карточки и системный шрифт. «Пиксельный» — "
+            "прямые углы, моноширинный шрифт и жёсткие рамки. Применяется сразу "
+            "после сохранения."
+        )
+        style_note.setWordWrap(True)
+        style_note.setProperty("faint", "true")
+        layout.addWidget(style_note)
 
         self.tray_check = QCheckBox("Сворачивать в трей вместо закрытия")
         layout.addWidget(self.tray_check)
@@ -122,6 +139,24 @@ class SettingsDialog(QDialog):
         note.setWordWrap(True)
         note.setProperty("faint", "true")
         layout.addWidget(note)
+
+        layout.addWidget(hline())
+        layout.addWidget(section_label("задачи-примеры"))
+        demo_row = QHBoxLayout()
+        demo_row.setSpacing(8)
+        self.demo_button = _button("Добавить задачи-примеры", "flat")
+        self.demo_button.clicked.connect(self._add_demo)
+        demo_row.addWidget(self.demo_button)
+        demo_row.addStretch(1)
+        layout.addLayout(demo_row)
+
+        demo_note = QLabel(
+            "Несколько задач, показывающих сроки, приоритеты, продукты и плановый "
+            "старт. Убрать их можно кнопкой над списком задач."
+        )
+        demo_note.setWordWrap(True)
+        demo_note.setProperty("faint", "true")
+        layout.addWidget(demo_note)
 
         layout.addWidget(hline())
         layout.addWidget(section_label("ярлыки"))
@@ -312,6 +347,21 @@ class SettingsDialog(QDialog):
         layout.addWidget(note)
         return page
 
+    def _sync_integrations(self) -> None:
+        """Гасит поля выключенной интеграции, чтобы не сбивали с толку."""
+        jira_on = self.jira_check.isChecked()
+        self.jira_url.setEnabled(jira_on)
+        cf_on = self.cf_check.isChecked()
+        for widget in (
+            self.cf_url,
+            self.cf_email,
+            self.cf_token,
+            self.cf_space,
+            self.cf_parent,
+            self.cf_check_button,
+        ):
+            widget.setEnabled(cf_on)
+
     # --- Продукты -------------------------------------------------------------
 
     def _fill_products(self) -> None:
@@ -382,6 +432,29 @@ class SettingsDialog(QDialog):
             del self.products[index]
             self._fill_products()
 
+    def _add_demo(self) -> None:
+        if self.storage is None:
+            return
+        created = demo.seed(self.storage, self.settings)
+        self.products = products_module.load(self.settings)
+        self._fill_products()
+        self._sync_demo_button()
+        self.status.setText(
+            "Добавлено задач-примеров: %d. Закройте настройки, чтобы увидеть их в списке."
+            % len(created)
+        )
+
+    def _sync_demo_button(self) -> None:
+        if self.storage is None:
+            self.demo_button.setEnabled(False)
+            self.demo_button.setToolTip("Недоступно вне главного окна")
+            return
+        already = bool(demo.remaining_ids(self.storage))
+        self.demo_button.setEnabled(not already)
+        self.demo_button.setText(
+            "Примеры уже добавлены" if already else "Добавить задачи-примеры"
+        )
+
     def _make_shortcut(self, kind: str) -> None:
         try:
             path = shortcut.create(kind)
@@ -397,11 +470,16 @@ class SettingsDialog(QDialog):
         layout.setSpacing(10)
 
         layout.addWidget(section_label("jira"))
+        self.jira_check = QCheckBox("Использовать Jira")
+        self.jira_check.toggled.connect(self._sync_integrations)
+        layout.addWidget(self.jira_check)
         self.jira_url = QLineEdit()
         self.jira_url.setPlaceholderText("https://mycompany.atlassian.net")
         layout.addWidget(self.jira_url)
         jira_note = QLabel(
-            "Адрес нужен только для ссылок «Открыть в Jira». Ключи задач вы указываете вручную."
+            "Адрес нужен только для ссылок «Открыть в Jira». Ключи задач вы указываете вручную. "
+            "Если выключить — из списков, карточек и отчётов пропадут все упоминания Jira, "
+            "а сами ключи у задач сохранятся."
         )
         jira_note.setWordWrap(True)
         jira_note.setProperty("faint", "true")
@@ -428,6 +506,9 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(hline())
         layout.addWidget(section_label("confluence"))
+        self.cf_check = QCheckBox("Публиковать отчёты в Confluence")
+        self.cf_check.toggled.connect(self._sync_integrations)
+        layout.addWidget(self.cf_check)
         form = QFormLayout()
         form.setSpacing(8)
         self.cf_url = QLineEdit()
@@ -446,15 +527,15 @@ class SettingsDialog(QDialog):
         layout.addLayout(form)
 
         check_row = QHBoxLayout()
-        check = _button("Проверить связь", "flat")
-        check.clicked.connect(self._check_confluence)
-        check_row.addWidget(check)
+        self.cf_check_button = _button("Проверить связь", "flat")
+        self.cf_check_button.clicked.connect(self._check_confluence)
+        check_row.addWidget(self.cf_check_button)
         check_row.addStretch(1)
         layout.addLayout(check_row)
 
         cf_note = QLabel(
             "Токен хранится в settings.json в вашем профиле. Публикация происходит "
-            "только по кнопке в окне недельного отчёта."
+            "только по кнопке в окне недельного отчёта — если выключить, кнопка пропадёт."
         )
         cf_note.setWordWrap(True)
         cf_note.setProperty("faint", "true")
@@ -469,6 +550,8 @@ class SettingsDialog(QDialog):
         s = self.settings
         index = self.theme_box.findData(s.get("theme", "dark"))
         self.theme_box.setCurrentIndex(max(index, 0))
+        index = self.style_box.findData(s.get("ui_style", theme.STYLE_SOFT))
+        self.style_box.setCurrentIndex(max(index, 0))
         self.stale_spin.setValue(s.get_int("stale_days", 5))
         self.tray_check.setChecked(bool(s.get("minimize_to_tray", True)))
         self.autostart_check.setChecked(autostart.is_enabled())
@@ -489,10 +572,12 @@ class SettingsDialog(QDialog):
 
         self.planning_check.setChecked(bool(s.get("planning.notify_enabled", True)))
         self.planning_days.setValue(s.get_int("planning.notify_days", 7))
+        self._sync_demo_button()
         self.products = products_module.load(s)
         self.autodetect_check.setChecked(bool(s.get("products_autodetect", True)))
         self._fill_products()
 
+        self.jira_check.setChecked(bool(s.get("jira.enabled", True)))
         self.jira_url.setText(s.get("jira.base_url", ""))
         self.vault_edit.setText(s.get("obsidian.vault_path", ""))
         self.daily_subdir.setText(s.get("obsidian.daily_subdir", ""))
@@ -503,6 +588,8 @@ class SettingsDialog(QDialog):
         self.cf_token.setText(s.get("confluence.token", ""))
         self.cf_space.setText(s.get("confluence.space_key", ""))
         self.cf_parent.setText(s.get("confluence.parent_id", ""))
+        self.cf_check.setChecked(bool(s.get("confluence.enabled", False)))
+        self._sync_integrations()
 
     @staticmethod
     def _split_time(value: str, default_h: int, default_m: int) -> tuple[int, int]:
@@ -552,6 +639,7 @@ class SettingsDialog(QDialog):
     def _save(self) -> None:
         s = self.settings
         s.set("theme", self.theme_box.currentData())
+        s.set("ui_style", self.style_box.currentData())
         s.set("stale_days", self.stale_spin.value())
         s.set("minimize_to_tray", self.tray_check.isChecked())
 
@@ -568,6 +656,7 @@ class SettingsDialog(QDialog):
         s.set("products_autodetect", self.autodetect_check.isChecked())
         products_module.save(s, self.products)
 
+        s.set("jira.enabled", self.jira_check.isChecked())
         s.set("jira.base_url", self.jira_url.text().strip().rstrip("/"))
         s.set("obsidian.vault_path", self.vault_edit.text().strip())
         s.set("obsidian.daily_subdir", self.daily_subdir.text().strip())
@@ -580,7 +669,8 @@ class SettingsDialog(QDialog):
         s.set("confluence.token", config.token)
         s.set("confluence.space_key", config.space_key)
         s.set("confluence.parent_id", config.parent_id)
-        s.set("confluence.enabled", config.is_configured)
+        # Включённой интеграция считается, только если доступы заполнены.
+        s.set("confluence.enabled", self.cf_check.isChecked() and config.is_configured)
 
         wanted = self.autostart_check.isChecked()
         if wanted != autostart.is_enabled():

@@ -39,10 +39,35 @@ def make_pixmap(size: int = 64, accent: str = ACCENT, background: str = BACKGROU
     return pixmap
 
 
-def make_icon(accent: str = ACCENT, background: str = BACKGROUND) -> QIcon:
+def make_pixel_pixmap(size: int = 64, accent: str = ACCENT, background: str = BACKGROUND) -> QPixmap:
+    """Пиксель-арт вариант: рисуем в сетке 16×16 и увеличиваем без сглаживания."""
+    base = QPixmap(16, 16)
+    base.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(base)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(QColor(background))
+    painter.drawRect(0, 0, 16, 16)
+    for index, y in enumerate((3, 7, 11)):
+        painter.setBrush(QColor(accent))
+        painter.drawRect(3, y, 2, 2)
+        painter.setBrush(QColor(accent if index == 0 else MUTED))
+        painter.drawRect(7, y, 6 if index != 2 else 3, 2)
+    painter.end()
+    return base.scaled(
+        size,
+        size,
+        Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.FastTransformation,
+    )
+
+
+def make_icon(
+    accent: str = ACCENT, background: str = BACKGROUND, pixel: bool = False
+) -> QIcon:
+    draw = make_pixel_pixmap if pixel else make_pixmap
     icon = QIcon()
     for size in (16, 32, 48, 64, 128, 256):
-        icon.addPixmap(make_pixmap(size, accent, background))
+        icon.addPixmap(draw(size, accent, background))
     return icon
 
 

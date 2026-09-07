@@ -59,6 +59,54 @@ PRIORITY_COLOR_KEYS = {
     3: "danger",
 }
 
+# --- Стили оформления ---------------------------------------------------------
+# «Мягкий» — скруглённые карточки и системный шрифт. «Пиксельный» — прямые углы,
+# моноширинный шрифт и жёсткие рамки: ретро-цифровой вид без потери читаемости.
+STYLE_SOFT = "soft"
+STYLE_PIXEL = "pixel"
+
+STYLE_LABELS = {
+    STYLE_SOFT: "Мягкий",
+    STYLE_PIXEL: "Пиксельный",
+}
+
+# Скругления по типам элементов для каждого стиля.
+RADII = {
+    STYLE_SOFT: {"card": 10, "input": 8, "button": 8, "pill": 9, "small": 6, "nav": 7},
+    STYLE_PIXEL: {"card": 0, "input": 0, "button": 0, "pill": 0, "small": 0, "nav": 0},
+}
+
+_style = STYLE_SOFT
+
+
+def set_style(name: str) -> None:
+    """Запоминает выбранный стиль: его читают и виджеты, и таблица стилей."""
+    global _style
+    _style = name if name in STYLE_LABELS else STYLE_SOFT
+
+
+def current_style() -> str:
+    return _style
+
+
+def is_pixel() -> bool:
+    return _style == STYLE_PIXEL
+
+
+def radius(kind: str = "card") -> int:
+    return RADII.get(_style, RADII[STYLE_SOFT]).get(kind, 0)
+
+
+# Пиксельные шрифты, если они вдруг стоят в системе; иначе — обычный
+# моноширинный, который в прямоугольной вёрстке выглядит так же уместно.
+PIXEL_CANDIDATES = [
+    "Pixelify Sans",
+    "Silkscreen",
+    "Press Start 2P",
+    "W95FA",
+    "Perfect DOS VGA 437",
+]
+
 MONO_CANDIDATES = [
     "JetBrains Mono",
     "Cascadia Mono",
@@ -99,7 +147,18 @@ def mono_font(size: int = 9, bold: bool = False, spacing: float = 0.0) -> QFont:
     return font
 
 
+def pixel_family() -> str:
+    """Шрифт для пиксельного стиля: пиксельный, если есть, иначе моноширинный."""
+    return _pick(PIXEL_CANDIDATES, mono_family())
+
+
 def ui_font(size: int = 10, bold: bool = False) -> QFont:
+    if is_pixel():
+        # В пиксельном стиле интерфейсный текст тоже моноширинный — именно это
+        # даёт «цифровой» вид, а размер чуть меньше, чтобы строки не разъехались.
+        font = QFont(pixel_family(), max(size - 1, 7))
+        font.setBold(bold)
+        return font
     font = QFont(ui_family(), size)
     font.setBold(bold)
     return font
@@ -140,10 +199,18 @@ def check_icon() -> str:
     return str(path).replace("\\", "/")
 
 
-def stylesheet(theme: str) -> str:
+def stylesheet(theme: str, style: str | None = None) -> str:
+    if style is not None:
+        set_style(style)
     c = palette(theme)
-    c["ui"] = ui_family()
-    c["mono"] = mono_family()
+    c["ui"] = pixel_family() if is_pixel() else ui_family()
+    c["mono"] = pixel_family() if is_pixel() else mono_family()
+    c["r_input"] = radius("input")
+    c["r_button"] = radius("button")
+    c["r_small"] = radius("small")
+    c["r_nav"] = radius("nav")
+    c["font_size"] = 12 if is_pixel() else 13
+    c["letter_spacing"] = "letter-spacing: 0.4px;" if is_pixel() else ""
     icon = check_icon()
     c["check_rule"] = ('image: url("%s");' % icon) if icon else ""
     return """
@@ -154,7 +221,8 @@ QWidget {
     background: %(bg)s;
     color: %(text)s;
     font-family: "%(ui)s";
-    font-size: 13px;
+    font-size: %(font_size)dpx;
+    %(letter_spacing)s
 }
 QMainWindow, QDialog {
     background: %(bg)s;
@@ -168,12 +236,12 @@ QScrollBar:vertical {
 }
 QScrollBar::handle:vertical {
     background: %(border)s;
-    border-radius: 5px;
+    border-radius: %(r_small)dpx;
     min-height: 40px;
 }
 QScrollBar::handle:vertical:hover { background: %(text_faint)s; }
 QScrollBar:horizontal { background: transparent; height: 10px; }
-QScrollBar::handle:horizontal { background: %(border)s; border-radius: 5px; min-width: 40px; }
+QScrollBar::handle:horizontal { background: %(border)s; border-radius: %(r_small)dpx; min-width: 40px; }
 QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }
 QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
 
@@ -181,7 +249,7 @@ QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
 QLineEdit, QTextEdit, QPlainTextEdit, QDateEdit, QComboBox, QSpinBox, QTimeEdit {
     background: %(surface)s;
     border: 1px solid %(border)s;
-    border-radius: 8px;
+    border-radius: %(r_input)dpx;
     padding: 8px 11px;
     selection-background-color: %(accent)s;
     selection-color: #FFFFFF;
@@ -213,7 +281,7 @@ QTimeEdit::up-button, QTimeEdit::down-button { width: 14px; border: none; }
 QPushButton {
     background: %(surface_alt)s;
     border: 1px solid %(border)s;
-    border-radius: 8px;
+    border-radius: %(r_button)dpx;
     padding: 8px 15px;
     color: %(text)s;
 }
@@ -245,7 +313,7 @@ QPushButton[danger="true"] { color: %(danger)s; }
 QPushButton[nav="true"] {
     background: transparent;
     border: none;
-    border-radius: 6px;
+    border-radius: %(r_nav)dpx;
     padding: 8px 10px;
     text-align: left;
     color: %(text_dim)s;
@@ -283,7 +351,7 @@ QCheckBox { spacing: 8px; }
 QCheckBox::indicator {
     width: 17px; height: 17px;
     border: 1px solid %(border)s;
-    border-radius: 5px;
+    border-radius: %(r_small)dpx;
     background: %(surface)s;
 }
 QCheckBox::indicator:hover { border-color: %(accent)s; }
@@ -303,7 +371,7 @@ QCalendarWidget QWidget#qt_calendar_navigationbar {
 QCalendarWidget QToolButton {
     background: transparent;
     border: none;
-    border-radius: 6px;
+    border-radius: %(r_small)dpx;
     color: %(text)s;
     padding: 6px 10px;
     margin: 3px;
@@ -320,7 +388,7 @@ QCalendarWidget QAbstractItemView:disabled { color: %(text_faint)s; }
 QCalendarWidget QSpinBox {
     background: %(surface)s;
     border: 1px solid %(border)s;
-    border-radius: 6px;
+    border-radius: %(r_small)dpx;
 }
 
 QSplitter::handle { background: %(border_soft)s; }
@@ -347,7 +415,7 @@ QMenu {
     border: 1px solid %(border)s;
     padding: 5px;
 }
-QMenu::item { padding: 7px 22px 7px 14px; border-radius: 4px; }
+QMenu::item { padding: 7px 22px 7px 14px; border-radius: %(r_small)dpx; }
 QMenu::item:selected { background: %(surface_hover)s; }
 QMenu::separator { height: 1px; background: %(border)s; margin: 4px 6px; }
 """ % c

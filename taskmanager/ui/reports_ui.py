@@ -33,9 +33,11 @@ from ..reports import (
     GROUPING_BY_DAYS,
     GROUPING_BY_TASKS,
     GROUPING_LABELS,
+    all_weeks_filename,
     collect_week,
     export_markdown,
     fmt_date,
+    render_all_weeks,
     render_daily,
     render_weekly,
     week_bounds,
@@ -72,6 +74,7 @@ class WeeklyReportDialog(QDialog):
             start, _ = week_bounds()
         self.start = start
         self.end = start + timedelta(days=6)
+        self.jira_enabled = bool(settings.get("jira.enabled", True))
         self.grouping = settings.get("weekly.grouping", GROUPING_BY_DAYS)
         if self.grouping not in GROUPING_LABELS:
             self.grouping = GROUPING_BY_DAYS
@@ -144,6 +147,10 @@ class WeeklyReportDialog(QDialog):
         right_layout.addWidget(self.jira_area, 1)
         splitter.addWidget(right)
         splitter.setSizes([620, 340])
+        # Интеграция выключена — панель «нужно завести в Jira» не нужна.
+        right.setVisible(self.jira_enabled)
+        if not self.jira_enabled:
+            splitter.setSizes([960, 0])
 
         self.status = QLabel("")
         self.status.setProperty("faint", "true")
@@ -161,6 +168,10 @@ class WeeklyReportDialog(QDialog):
         self.confluence_button = _button("В Confluence")
         self.confluence_button.clicked.connect(self._publish_confluence)
         buttons.addWidget(self.confluence_button)
+        all_weeks = _button("Все недели…", "flat")
+        all_weeks.setToolTip("Выгрузка по задачам за все заполненные недели")
+        all_weeks.clicked.connect(self._open_all_weeks)
+        buttons.addWidget(all_weeks)
         buttons.addStretch(1)
         close_button = _button("Готово", "accent")
         close_button.clicked.connect(self._save_and_close)
@@ -169,9 +180,8 @@ class WeeklyReportDialog(QDialog):
 
         self.obsidian_button.setEnabled(bool(self.settings.get("obsidian.vault_path", "")))
         config = ConfluenceConfig.from_settings(self.settings.get("confluence", {}) or {})
-        self.confluence_button.setEnabled(config.is_configured)
-        if not config.is_configured:
-            self.confluence_button.setToolTip("Заполните доступы к Confluence в настройках")
+        cf_on = bool(self.settings.get("confluence.enabled", False)) and config.is_configured
+        self.confluence_button.setVisible(cf_on)
 
     # --- Данные ---------------------------------------------------------------
 
@@ -204,13 +214,20 @@ class WeeklyReportDialog(QDialog):
         stale_days = self.settings.get_int("stale_days", 5)
         saved = None if regenerate else self.storage.get_weekly_report(self.start)
         text = saved or render_weekly(
-            self.storage, self.start, self.end, stale_days, self.grouping
+            self.storage,
+            self.start,
+            self.end,
+            stale_days,
+            self.grouping,
+            with_jira=self.jira_enabled,
         )
         self.text_edit.setPlainText(text)
         self._sync_grouping_buttons()
         self._fill_jira_list()
 
     def _fill_jira_list(self) -> None:
+        if not self.jira_enabled:
+            return
         data = collect_week(self.storage, self.start, self.end)
         tasks = data["jira_todo"]
         container = QWidget()
@@ -307,6 +324,9 @@ class WeeklyReportDialog(QDialog):
         url = jira.create_issue_url(self.settings.get("jira.base_url", ""))
         if url:
             webbrowser.open(url)
+
+    def _open_all_weeks(self) -> None:
+        AllWeeksDialog(self.storage, self.settings, self.grouping, self).exec()
 
     # --- Выгрузка -------------------------------------------------------------
 
@@ -407,6 +427,16 @@ class HistoryDialog(QDialog):
             lambda: QApplication.clipboard().setText(self.view.toPlainText())
         )
         buttons.addWidget(copy_button)
+        all_weeks = _button("Выгрузить все недели")
+        all_weeks.clicked.connect(
+            lambda: AllWeeksDialog(
+                self.storage,
+                self.settings,
+                self.settings.get("weekly.grouping", GROUPING_BY_TASKS),
+                self,
+            ).exec()
+        )
+        buttons.addWidget(all_weeks)
         buttons.addStretch(1)
         close_button = _button("Закрыть", "accent")
         close_button.clicked.connect(self.accept)
@@ -423,7 +453,8 @@ class HistoryDialog(QDialog):
                 item.setData(Qt.ItemDataRole.UserRole, day)
                 self.list.addItem(item)
         else:
-            for start in self.storage.weekly_report_weeks():
+            # Только недели, за которые что-то заполнено: пустые показывать незачем.
+            for start in self.storage.weeks_with_activity():
                 item = QListWidgetItem(
                     "%s — %s" % (fmt_date(start), fmt_date(start + timedelta(days=6)))
                 )
@@ -432,7 +463,10 @@ class HistoryDialog(QDialog):
         if self.list.count():
             self.list.setCurrentRow(0)
         else:
-            self.view.setPlainText("Пока ничего не сохранено.")
+            self.view.setPlainText(
+                "Пока ничего не заполнено — отметьте работу по задачам или "
+                "сохраните отчёт за день."
+            )
 
     def _show(self, current: QListWidgetItem | None, _previous=None) -> None:
         if current is None:
@@ -443,4 +477,165 @@ class HistoryDialog(QDialog):
             self.view.setPlainText(render_daily(report, self.storage) if report else "")
         else:
             content = self.storage.get_weekly_report(value)
-            self.view.setPlainText(content or "")
+            if not content:
+                content = render_weekly(
+                    self.storage,
+                    value,
+                    value + timedelta(days=6),
+                    self.settings.get_int("stale_days", 5),
+                    self.settings.get("weekly.grouping", GROUPING_BY_DAYS),
+                    with_jira=bool(self.settings.get("jira.enabled", True)),
+                )
+            self.view.setPlainText(content)
+
+
+class AllWeeksDialog(QDialog):
+    """Одна выгрузка по всем неделям, за которые что-то заполнено."""
+
+    def __init__(
+        self,
+        storage: Storage,
+        settings: Settings,
+        grouping: str = GROUPING_BY_TASKS,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.storage = storage
+        self.settings = settings
+        self.grouping = grouping if grouping in GROUPING_LABELS else GROUPING_BY_TASKS
+        self.weeks = sorted(storage.weeks_with_activity())
+        self.setWindowTitle("Выгрузка по неделям")
+        self.setMinimumSize(900, 680)
+        self._build()
+        self.refresh()
+
+    def _build(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 18, 22, 16)
+        layout.setSpacing(10)
+
+        self.header = QLabel()
+        self.header.setFont(theme.ui_font(13, bold=True))
+        layout.addWidget(self.header)
+
+        hint = QLabel(
+            "Собрано по всем неделям, где есть отметки о работе или комментарии. "
+            "Пустые недели пропущены."
+        )
+        hint.setProperty("dim", "true")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        head_row = QHBoxLayout()
+        head_row.setSpacing(6)
+        head_row.addWidget(section_label("текст выгрузки"))
+        head_row.addStretch(1)
+        head_row.addWidget(section_label("разрез"))
+        self.grouping_buttons: dict[str, QPushButton] = {}
+        for key in (GROUPING_BY_TASKS, GROUPING_BY_DAYS):
+            button = _button(GROUPING_LABELS[key].capitalize(), "nav")
+            button.clicked.connect(lambda _=False, k=key: self.set_grouping(k))
+            self.grouping_buttons[key] = button
+            head_row.addWidget(button)
+        layout.addLayout(head_row)
+
+        self.text_edit = QPlainTextEdit()
+        self.text_edit.setFont(theme.mono_font(9))
+        layout.addWidget(self.text_edit, 1)
+
+        self.status = QLabel("")
+        self.status.setProperty("faint", "true")
+        self.status.setFont(theme.mono_font(8))
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+
+        buttons = QHBoxLayout()
+        copy_button = _button("Скопировать")
+        copy_button.clicked.connect(self._copy)
+        buttons.addWidget(copy_button)
+        self.obsidian_button = _button("В Obsidian")
+        self.obsidian_button.clicked.connect(self._export_obsidian)
+        self.obsidian_button.setEnabled(bool(self.settings.get("obsidian.vault_path", "")))
+        buttons.addWidget(self.obsidian_button)
+        save_button = _button("Сохранить в файл")
+        save_button.clicked.connect(self._save_file)
+        buttons.addWidget(save_button)
+        buttons.addStretch(1)
+        close_button = _button("Закрыть", "accent")
+        close_button.clicked.connect(self.accept)
+        buttons.addWidget(close_button)
+        layout.addLayout(buttons)
+
+    # --- Данные ---------------------------------------------------------------
+
+    def set_grouping(self, grouping: str) -> None:
+        if grouping == self.grouping:
+            return
+        self.grouping = grouping
+        self.refresh()
+
+    def refresh(self) -> None:
+        if self.weeks:
+            self.header.setText(
+                "Недель с данными: %d  ·  %s — %s"
+                % (
+                    len(self.weeks),
+                    fmt_date(self.weeks[0]),
+                    fmt_date(self.weeks[-1] + timedelta(days=6)),
+                )
+            )
+        else:
+            self.header.setText("Заполненных недель пока нет")
+        self.text_edit.setPlainText(
+            render_all_weeks(
+                self.storage, self.grouping, self.settings.get_int("stale_days", 5)
+            )
+        )
+        for key, button in self.grouping_buttons.items():
+            button.setProperty("active", "true" if key == self.grouping else "false")
+            button.style().unpolish(button)
+            button.style().polish(button)
+
+    def _period(self) -> tuple[date, date]:
+        if not self.weeks:
+            today = date.today()
+            return today, today
+        return self.weeks[0], self.weeks[-1] + timedelta(days=6)
+
+    def _filename(self) -> str:
+        start, end = self._period()
+        return all_weeks_filename(start, end)
+
+    # --- Выгрузка -------------------------------------------------------------
+
+    def _copy(self) -> None:
+        QApplication.clipboard().setText(self.text_edit.toPlainText())
+        self.status.setText("Выгрузка скопирована в буфер обмена")
+
+    def _export_obsidian(self) -> None:
+        vault = self.settings.get("obsidian.vault_path", "")
+        if not vault:
+            QMessageBox.information(self, "Obsidian", "Укажите путь к хранилищу в настройках.")
+            return
+        target = Path(vault) / self.settings.get("obsidian.weekly_subdir", "")
+        try:
+            path = export_markdown(self.text_edit.toPlainText(), target, self._filename())
+        except OSError as exc:
+            QMessageBox.warning(self, "Obsidian", "Не удалось записать файл:\n%s" % exc)
+            return
+        self.status.setText("Сохранено: %s" % path)
+
+    def _save_file(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить выгрузку", self._filename(), "Markdown (*.md);;Все файлы (*)"
+        )
+        if not path:
+            return
+        try:
+            Path(path).write_text(self.text_edit.toPlainText(), encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.warning(self, "Сохранение", "Не удалось записать файл:\n%s" % exc)
+            return
+        self.status.setText("Сохранено: %s" % path)

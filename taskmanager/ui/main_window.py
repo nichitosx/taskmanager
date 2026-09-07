@@ -8,6 +8,7 @@ from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import demo
 from .. import products as products_module
 from .. import quickadd
 from ..appicon import make_icon
@@ -167,10 +169,11 @@ class TaskDetail(QWidget):
             parts.append(start_text(task))
         if task.due_date:
             parts.append("срок %s" % fmt_date(task.due_date))
-        if task.jira_key:
-            parts.append(task.jira_key)
-        else:
-            parts.append("jira: %s" % JIRA_STATE_LABELS.get(task.jira_state, "не решено"))
+        if self.settings.get("jira.enabled", True):
+            if task.jira_key:
+                parts.append(task.jira_key)
+            else:
+                parts.append("jira: %s" % JIRA_STATE_LABELS.get(task.jira_state, "не решено"))
         parts.append("без движения %d дн." % task.days_since_activity)
         if task.tags:
             parts.append(" ".join("#" + t for t in task.tags))
@@ -189,8 +192,10 @@ class TaskDetail(QWidget):
                 "%s  %s" % (log.log_date.strftime("%d.%m"), log.comment or "работа по задаче")
             )
 
+        jira_on = bool(self.settings.get("jira.enabled", True))
+        self.jira_button.setVisible(jira_on)
         self.jira_button.setEnabled(bool(task.jira_key))
-        self.no_jira_button.setVisible(task.jira_state != JIRA_NOT_NEEDED)
+        self.no_jira_button.setVisible(jira_on and task.jira_state != JIRA_NOT_NEEDED)
 
     # --- Действия -------------------------------------------------------------
 
@@ -244,11 +249,12 @@ class MainWindow(QMainWindow):
         self.settings = settings
         self.filter = "active"
         self.selected_id: int | None = None
+        theme.set_style(settings.get("ui_style", theme.STYLE_SOFT))
         self.colors = theme.palette(settings.get("theme", "dark"))
         self._force_quit = False
 
         self.setWindowTitle("TaskManager")
-        self.setWindowIcon(make_icon(self.colors["accent"], self.colors["bg"]))
+        self.setWindowIcon(self._icon())
         self.resize(1180, 760)
         self.setMinimumSize(940, 600)
 
@@ -263,6 +269,7 @@ class MainWindow(QMainWindow):
         self.scheduler.starts_soon.connect(self._on_starts_soon)
         self.scheduler.start()
 
+        demo.seed_if_empty(storage, settings)
         self.refresh()
 
     # --- Интерфейс ------------------------------------------------------------
@@ -293,6 +300,9 @@ class MainWindow(QMainWindow):
         center_layout.setContentsMargins(18, 0, 4, 0)
         center_layout.setSpacing(12)
         splitter.addWidget(center)
+
+        self.demo_bar = self._demo_bar()
+        center_layout.addWidget(self.demo_bar)
 
         self.quick_add = QLineEdit()
         self.quick_add.setPlaceholderText(
@@ -333,6 +343,40 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self.detail)
         splitter.setSizes([700, 380])
         splitter.setCollapsible(0, False)
+
+    def _demo_bar(self) -> QWidget:
+        """Полоса-подсказка про задачи-примеры с кнопкой «убрать»."""
+        c = self.colors
+        bar = QFrame()
+        bar.setObjectName("demoBar")
+        bar.setStyleSheet(
+            "#demoBar { background: %s; border: 1px solid %s; border-radius: %dpx; }"
+            % (theme.tint(c["info"], 0.10), theme.tint(c["info"], 0.30), theme.radius("card"))
+        )
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(13, 8, 10, 8)
+        layout.setSpacing(10)
+
+        label = QLabel(
+            "Это задачи-примеры — посмотрите, как всё устроено, и убирайте."
+        )
+        label.setWordWrap(True)
+        label.setStyleSheet("color: %s; background: transparent;" % c["text_dim"])
+        layout.addWidget(label, 1)
+
+        remove = QPushButton("Убрать примеры")
+        remove.setProperty("flat", "true")
+        remove.setCursor(Qt.CursorShape.PointingHandCursor)
+        remove.clicked.connect(self._remove_demo)
+        layout.addWidget(remove)
+        bar.hide()
+        return bar
+
+    def _remove_demo(self) -> None:
+        removed = demo.remove(self.storage, self.settings)
+        self.selected_id = None
+        self.refresh(keep_selection=False)
+        self.statusBar().showMessage("Примеры убраны (%d шт.)" % removed, 3000)
 
     def _header(self) -> QWidget:
         c = self.colors
@@ -531,9 +575,10 @@ class MainWindow(QMainWindow):
         tasks = self.visible_tasks()
         catalog = products_module.load(self.settings)
 
+        show_jira = bool(self.settings.get("jira.enabled", True))
         for task in tasks:
             color = products_module.color_for(catalog, task.product, self.colors["info"])
-            row = TaskRow(task, self.colors, stale_days, color)
+            row = TaskRow(task, self.colors, stale_days, color, show_jira)
             row.toggled.connect(self._toggle_task)
             row.activated.connect(self.open_task)
             row.clicked.connect(self._select_task)
@@ -557,6 +602,13 @@ class MainWindow(QMainWindow):
         self.chips["jira"].set_value(counters["jira"], self.colors["info"])
 
         searching = bool(self.search.text().strip())
+        jira_on = bool(self.settings.get("jira.enabled", True))
+        self.chips["jira"].setVisible(jira_on)
+        if "jira" in self.nav_items:
+            self.nav_items["jira"].setVisible(jira_on)
+        if not jira_on and self.filter == "jira":
+            self.filter = "active"
+        self.demo_bar.setVisible(bool(demo.remaining_ids(self.storage)))
         for key, chip in self.chips.items():
             chip.set_active(key == self.filter and not searching)
 
@@ -697,13 +749,16 @@ class MainWindow(QMainWindow):
             menu.addAction("Вернуть в работу", lambda: self._toggle_task(task_id, False))
         else:
             menu.addAction("Выполнена", lambda: self._toggle_task(task_id, True))
-        if task.jira_key:
-            menu.addAction(
-                "Открыть в Jira",
-                lambda: jira.open_issue(self.settings.get("jira.base_url", ""), task.jira_key),
-            )
-        if task.jira_state != JIRA_NOT_NEEDED:
-            menu.addAction("Jira не нужна", lambda: self._set_no_jira(task))
+        if self.settings.get("jira.enabled", True):
+            if task.jira_key:
+                menu.addAction(
+                    "Открыть в Jira",
+                    lambda: jira.open_issue(
+                        self.settings.get("jira.base_url", ""), task.jira_key
+                    ),
+                )
+            if task.jira_state != JIRA_NOT_NEEDED:
+                menu.addAction("Jira не нужна", lambda: self._set_no_jira(task))
         menu.addSeparator()
         menu.addAction("Удалить", lambda: self._delete_task(task))
         menu.exec(self.list.viewport().mapToGlobal(position))
@@ -741,18 +796,23 @@ class MainWindow(QMainWindow):
         HistoryDialog(self.storage, self.settings, self).exec()
 
     def open_settings(self) -> None:
-        dialog = SettingsDialog(self.settings, self)
+        dialog = SettingsDialog(self.settings, self, storage=self.storage)
         if dialog.exec() == dialog.DialogCode.Accepted:
             self.apply_theme()
             self.refresh(keep_selection=True)
 
+    def _icon(self):
+        return make_icon(self.colors["accent"], self.colors["bg"], theme.is_pixel())
+
     def apply_theme(self) -> None:
+        """Перекрашивает приложение после смены темы или стиля в настройках."""
         name = self.settings.get("theme", "dark")
+        theme.set_style(self.settings.get("ui_style", theme.STYLE_SOFT))
         self.colors = theme.palette(name)
         app = QApplication.instance()
         if app is not None:
-            app.setStyleSheet(theme.stylesheet(name))
-        icon = make_icon(self.colors["accent"], self.colors["bg"])
+            app.setStyleSheet(theme.stylesheet(name, theme.current_style()))
+        icon = self._icon()
         self.setWindowIcon(icon)
         self.tray.setIcon(icon)
         # Виджеты, которые красятся кодом, а не таблицей стилей.

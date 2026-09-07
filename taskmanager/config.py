@@ -18,9 +18,12 @@ APP_NAME = "TaskManager"
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "theme": "dark",
+    # Стиль оформления: "soft" — скруглённый, "pixel" — прямоугольный пиксельный.
+    "ui_style": "soft",
     "stale_days": 5,
     # Jira: ручная привязка. Ссылка собирается как <base_url>/browse/<KEY>.
     "jira": {
+        "enabled": True,
         "base_url": "",
         "auto_detect_keys": True,
     },

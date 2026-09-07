@@ -54,7 +54,9 @@ def main() -> int:
         )
         return 1
 
-    app.setStyleSheet(theme.stylesheet(settings.get("theme", "dark")))
+    app.setStyleSheet(
+        theme.stylesheet(settings.get("theme", "dark"), settings.get("ui_style", "soft"))
+    )
 
     window = MainWindow(storage, settings)
     geometry = settings.get("window_geometry", "")
