@@ -40,7 +40,7 @@ from .. import demo
 from .. import products as products_module
 from .. import quickadd
 from .. import recurrence
-from ..appicon import make_icon
+from ..appicon import make_icon, make_watermark
 from ..config import Settings
 from ..horizons import HORIZON_HINTS, HORIZON_LABELS, in_horizon, start_text
 from ..integrations import jira
@@ -61,7 +61,16 @@ from . import theme
 from .dialogs import DailyReportDialog, LogWorkDialog, TaskDialog, UpcomingTasksDialog
 from .reports_ui import HistoryDialog, WeeklyReportDialog
 from .settings_dialog import SettingsDialog
-from .widgets import Card, JiraIssueRow, NavItem, TaskRow, hline, section_label
+from .widgets import (
+    Card,
+    DayIndicator,
+    headline,
+    JiraIssueRow,
+    NavItem,
+    TaskRow,
+    hline,
+    section_label,
+)
 
 # Боковое меню делится на две части: «когда» — горизонты планирования,
 # «состояние» — то, что требует внимания независимо от сроков.
@@ -121,13 +130,29 @@ class TaskDetail(QWidget):
         layout.setContentsMargins(18, 16, 4, 12)
         layout.setSpacing(10)
 
-        self.placeholder = QLabel(
+        colors = theme.palette(self.settings.get("theme", "dark"))
+        self.placeholder = QWidget()
+        self.placeholder.setStyleSheet("background: transparent;")
+        hint_layout = QVBoxLayout(self.placeholder)
+        hint_layout.setContentsMargins(0, 30, 0, 0)
+        hint_layout.setSpacing(14)
+
+        art = QLabel()
+        art.setPixmap(make_watermark(96, colors["text_faint"], 34))
+        art.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        art.setStyleSheet("background: transparent;")
+        hint_layout.addWidget(art)
+
+        text = QLabel(
             "Выберите задачу слева.\n\nДвойной клик открывает карточку,\n"
             "правая кнопка — быстрые действия."
         )
-        self.placeholder.setProperty("faint", "true")
-        self.placeholder.setWordWrap(True)
-        layout.addWidget(self.placeholder, 0, Qt.AlignmentFlag.AlignTop)
+        text.setProperty("faint", "true")
+        text.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        text.setWordWrap(True)
+        hint_layout.addWidget(text)
+        hint_layout.addStretch(1)
+        layout.addWidget(self.placeholder, 1)
 
         self.body = QWidget()
         body_layout = QVBoxLayout(self.body)
@@ -316,6 +341,7 @@ class MainWindow(QMainWindow):
         self.scheduler.start()
 
         demo.seed_if_empty(storage, settings)
+        self._start_clock()
         self.refresh()
 
     # --- Интерфейс ------------------------------------------------------------
@@ -329,7 +355,7 @@ class MainWindow(QMainWindow):
         root.setSpacing(0)
 
         root.addWidget(self._header())
-        root.addWidget(hline())
+        root.addWidget(headline())
 
         body = QWidget()
         body.setObjectName("bodyArea")
@@ -381,11 +407,28 @@ class MainWindow(QMainWindow):
         self.list.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
         center_layout.addWidget(self.list, 1)
 
+        self.empty_box = QWidget()
+        self.empty_box.setStyleSheet("background: transparent;")
+        empty_layout = QVBoxLayout(self.empty_box)
+        empty_layout.setContentsMargins(0, 40, 0, 0)
+        empty_layout.setSpacing(16)
+        empty_layout.addStretch(1)
+
+        self.empty_art = QLabel()
+        self.empty_art.setPixmap(make_watermark(112, self.colors["text_faint"], 40))
+        self.empty_art.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_art.setStyleSheet("background: transparent;")
+        empty_layout.addWidget(self.empty_art)
+
         self.empty_label = QLabel()
         self.empty_label.setProperty("faint", "true")
+        self.empty_label.setWordWrap(True)
         self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.empty_label.hide()
-        center_layout.addWidget(self.empty_label)
+        empty_layout.addWidget(self.empty_label)
+        empty_layout.addStretch(2)
+
+        self.empty_box.hide()
+        center_layout.addWidget(self.empty_box, 1)
 
         self.detail = TaskDetail(self.storage, self.settings, self)
         self.detail.setObjectName("detailPanel")
@@ -441,14 +484,14 @@ class MainWindow(QMainWindow):
         dot.setStyleSheet("color: %s; font-size: 18px;" % c["accent"])
         layout.addWidget(dot)
 
-        # Счётчики по спискам показывает боковая панель — дублировать их в шапке
-        # незачем, здесь остаются только действия.
-        self.today_label = QLabel()
-        self.today_label.setFont(theme.mono_font(9))
-        self.today_label.setProperty("dim", "true")
-        layout.addWidget(self.today_label)
-
+        # Счётчики по спискам показывает боковая панель, состояние дня —
+        # индикатор справа; в шапке остаются только действия.
         layout.addStretch(1)
+
+        self.day_indicator = DayIndicator(c)
+        self.day_indicator.clicked.connect(self.open_daily)
+        layout.addWidget(self.day_indicator)
+        layout.addSpacing(18)
 
         daily = QPushButton("Отчёт за день")
         daily.setProperty("flat", "true")
@@ -702,7 +745,7 @@ class MainWindow(QMainWindow):
             self._show_empty("Под ваш фильтр в Jira не попала ни одна задача.")
             return
 
-        self.empty_label.hide()
+        self.empty_box.hide()
         self.list.show()
         for issue in self._jira_issues:
             already = self.storage.find_by_jira_key(issue.key) is not None
@@ -722,7 +765,7 @@ class MainWindow(QMainWindow):
 
     def _show_empty(self, text: str) -> None:
         self.empty_label.setText(text)
-        self.empty_label.show()
+        self.empty_box.show()
         self.list.hide()
 
     def _take_jira_issue(self, key: str) -> None:
@@ -878,7 +921,7 @@ class MainWindow(QMainWindow):
             if separator_before is not None and task.id == separator_before:
                 self._add_planned_separator(len(upcoming))
 
-        self.empty_label.setVisible(not tasks)
+        self.empty_box.setVisible(not tasks)
         self.list.setVisible(bool(tasks))
         self.empty_label.setText(self._empty_text())
         if tasks:
@@ -903,12 +946,7 @@ class MainWindow(QMainWindow):
     def _refresh_chrome(self, stale_days: int) -> None:
         """Обновляет шапку, боковое меню и окошко планов."""
         counters = self.storage.counters(stale_days)
-        summary = []
-        if counters["today"]:
-            summary.append("на сегодня: %d" % counters["today"])
-        if counters["overdue"]:
-            summary.append("просрочено: %d" % counters["overdue"])
-        self.today_label.setText("  ·  ".join(summary))
+        self._sync_day_indicator(counters)
 
         searching = bool(self.search.text().strip())
         jira_on = bool(self.settings.get("jira.enabled", True))
@@ -1028,6 +1066,23 @@ class MainWindow(QMainWindow):
             "jira": "По всем задачам вопрос с Jira закрыт.",
             "done": "Выполненных задач пока нет.",
         }.get(self.filter, "Пусто")
+
+    def _sync_day_indicator(self, counters: dict[str, int]) -> None:
+        """Сколько задач сегодня уже отмечено и заполнен ли отчёт."""
+        today = date.today()
+        logs = self.storage.logs_for_date(today)
+        done = len({log.task_id for log in logs if log.task_id is not None})
+        # За «план на день» считаем задачи со сроком на сегодня и раньше.
+        total = max(counters.get("today", 0), done)
+        self.day_indicator.set_clock(datetime.now())
+        self.day_indicator.set_day(done, total, self.storage.has_saved_report(today))
+
+    def _start_clock(self) -> None:
+        """Часы в шапке: раз в полминуты обновляем только текст, без перечитывания."""
+        self._clock = QTimer(self)
+        self._clock.setInterval(30_000)
+        self._clock.timeout.connect(lambda: self.day_indicator.set_clock(datetime.now()))
+        self._clock.start()
 
     def _update_tray_tooltip(self, counters: dict[str, int]) -> None:
         self.tray.setToolTip(

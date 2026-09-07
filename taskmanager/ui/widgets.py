@@ -215,6 +215,14 @@ def hline() -> QFrame:
     return line
 
 
+def headline() -> QFrame:
+    """Разделитель под шапкой — с акцентным началом, чтобы окно не было серым."""
+    line = QFrame()
+    line.setProperty("headline", "true")
+    line.setFixedHeight(1)
+    return line
+
+
 class CheckCircle(QAbstractButton):
     """Круглая отметка «выполнено».
 
@@ -329,6 +337,9 @@ class CheckCircle(QAbstractButton):
 
 PILL_HEIGHT = 20
 
+# Отступ от текста до рамки метки — одинаковый у всех меток, включая продукт.
+PILL_PADDING = 6
+
 
 class Pill(QLabel):
     """Компактная метка: срок, ключ Jira, приоритет, продукт, простой.
@@ -345,18 +356,24 @@ class Pill(QLabel):
         self.setFixedHeight(PILL_HEIGHT)
         self.setStyleSheet(
             "color: %s; background: %s; border: 1px solid %s;"
-            "border-radius: %dpx; padding: 0 7px; %s"
+            "border-radius: %dpx; padding: 0 %dpx; %s"
             % (
                 color,
                 theme.tint(color, 0.20 if strong else 0.12),
                 theme.tint(color, 0.34),
                 theme.radius("pill"),
+                PILL_PADDING,
                 theme.small_font_css(),
             )
         )
         # QLabel не учитывает отступы из таблицы стилей в подсказке размера,
-        # поэтому ширину задаём сами — по тому же шрифту, что и в стилях.
-        self.setFixedWidth(QFontMetrics(font).horizontalAdvance(text) + 26)
+        # поэтому ширину задаём сами: текст плюс ровно два отступа и рамка.
+        # Ширину меряем у уже стилизованного виджета: таблица стилей добавляет
+        # межбуквенный интервал, о котором метрики исходного шрифта не знают.
+        self.ensurePolished()
+        metrics = self.fontMetrics()
+        ink = max(metrics.horizontalAdvance(text), metrics.boundingRect(text).width())
+        self.setFixedWidth(ink + PILL_PADDING * 2 + 4)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
 
@@ -367,11 +384,12 @@ class ProductPill(QWidget):
         super().__init__(parent)
         self.setFixedHeight(PILL_HEIGHT)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(7, 0, 8, 0)
-        layout.setSpacing(6)
+        # Отступы те же, что у обычной метки, чтобы продукт не выбивался из ряда.
+        layout.setContentsMargins(PILL_PADDING, 0, PILL_PADDING, 0)
+        layout.setSpacing(5)
 
         dot = QLabel()
-        dot.setFixedSize(7, 7)
+        dot.setFixedSize(6, 6)
         dot.setStyleSheet(
             "background: %s; border-radius: %dpx;" % (color, 0 if theme.is_pixel() else 3)
         )
@@ -384,7 +402,11 @@ class ProductPill(QWidget):
         label.setStyleSheet(
             "color: %s; background: transparent; %s" % (color, theme.small_font_css())
         )
-        label.setFixedWidth(QFontMetrics(font).horizontalAdvance(name) + 8)
+        label.ensurePolished()
+        metrics = label.fontMetrics()
+        label.setFixedWidth(
+            max(metrics.horizontalAdvance(name), metrics.boundingRect(name).width()) + 2
+        )
         layout.addWidget(label)
 
         self.setStyleSheet(
@@ -716,3 +738,104 @@ class JiraIssueRow(Card):
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         self.activated.emit(self.issue.key)
         super().mouseDoubleClickEvent(event)
+
+
+class DayProgress(QWidget):
+    """Пиксельная шкала: сколько задач сегодня уже отмечено."""
+
+    SEGMENTS = 8
+    BLOCK = 7
+    GAP = 3
+
+    def __init__(self, colors: dict[str, str], parent=None) -> None:
+        super().__init__(parent)
+        self.colors = colors
+        self._filled = 0
+        self._complete = False
+        self.setFixedSize(
+            self.SEGMENTS * self.BLOCK + (self.SEGMENTS - 1) * self.GAP, 12
+        )
+
+    def set_values(self, done: int, total: int, complete: bool = False) -> None:
+        share = 0.0 if total <= 0 else min(1.0, done / total)
+        # Хотя бы один сегмент, если работа была: иначе прогресс не видно.
+        self._filled = self.SEGMENTS if complete else (
+            max(1, round(share * self.SEGMENTS)) if done else 0
+        )
+        self._complete = complete
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        c = self.colors
+        painter = QPainter(self)
+        painter.setPen(Qt.PenStyle.NoPen)
+        active = QColor(c["success"] if self._complete else c["accent"])
+        empty = QColor(c["border"])
+        for index in range(self.SEGMENTS):
+            x = index * (self.BLOCK + self.GAP)
+            painter.setBrush(active if index < self._filled else empty)
+            painter.drawRect(x, 1, self.BLOCK, 10)
+        painter.end()
+
+
+class DayIndicator(QWidget):
+    """Шапка: дата, время и то, как идёт работа за сегодня."""
+
+    clicked = Signal()
+
+    def __init__(self, colors: dict[str, str], parent=None) -> None:
+        super().__init__(parent)
+        self.colors = colors
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Открыть отчёт за день")
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        self.date = QLabel()
+        self.date.setFont(theme.mono_font(8))
+        self.date.setStyleSheet("color: %s; background: transparent;" % colors["text_faint"])
+        layout.addWidget(self.date)
+
+        self.time = QLabel()
+        self.time.setFont(theme.accent_font(12, bold=True))
+        self.time.setStyleSheet("color: %s; background: transparent;" % colors["accent"])
+        layout.addWidget(self.time)
+
+        self.progress = DayProgress(colors)
+        layout.addWidget(self.progress)
+
+        self.caption = QLabel()
+        self.caption.setFont(theme.mono_font(8))
+        self.caption.setStyleSheet("color: %s; background: transparent;" % colors["text_dim"])
+        layout.addWidget(self.caption)
+
+        # Подписи не должны сжиматься: в узкой шапке они обрезались бы.
+        for label in (self.date, self.time, self.caption):
+            label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        self.caption.setMinimumWidth(
+            self.caption.fontMetrics().horizontalAdvance("отмечено 00 из 00") + 4
+        )
+
+    def set_clock(self, moment) -> None:
+        weekday = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"][moment.weekday()]
+        self.date.setText("%s %s" % (weekday, moment.strftime("%d.%m")))
+        self.time.setText(moment.strftime("%H:%M"))
+
+    def set_day(self, done: int, total: int, report_saved: bool) -> None:
+        self.progress.set_values(done, total, report_saved)
+        if report_saved:
+            self.caption.setText("отчёт готов")
+            color = self.colors["success"]
+        elif done:
+            self.caption.setText("отмечено %d из %d" % (done, max(total, done)))
+            color = self.colors["text_dim"]
+        else:
+            self.caption.setText("сегодня пока пусто")
+            color = self.colors["text_faint"]
+        self.caption.setStyleSheet("color: %s; background: transparent;" % color)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        self.clicked.emit()
+        super().mousePressEvent(event)

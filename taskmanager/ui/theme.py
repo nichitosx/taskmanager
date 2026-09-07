@@ -219,7 +219,9 @@ def small_font_css() -> str:
     у метки шрифт указывается прямо в её собственных стилях — иначе ширина,
     посчитанная по метрикам, не совпадёт с нарисованным текстом.
     """
-    return 'font-family: "%s"; font-size: %dpx;' % (
+    # Межбуквенный интервал у мелких меток обнуляем: общая таблица стилей его
+    # добавляет, а QFontMetrics про него не знает — и текст переставал влезать.
+    return 'font-family: "%s"; font-size: %dpx; letter-spacing: 0;' % (
         accent_family() if is_pixel() else mono_family(),
         small_font_px(),
     )
@@ -266,10 +268,10 @@ def pattern_image(theme: str) -> str:
     from ..config import data_dir
 
     colors = palette(theme)
-    path = data_dir() / ("pattern-%s.png" % theme)
+    path = data_dir() / ("stripes-%s.png" % theme)
     try:
         if not path.exists():
-            write_pattern(path, colors["bg"], colors["text"], 34 if theme == "dark" else 30)
+            write_pattern(path, colors["bg"], colors["text"], 11 if theme == "dark" else 14)
     except Exception:
         return ""
     return str(path).replace("\\", "/")
@@ -443,6 +445,13 @@ QLabel[section="true"] {
     letter-spacing: %(section_spacing)spx;
 }
 QFrame[hline="true"] { background: %(border_soft)s; max-height: 1px; border: none; }
+/* Полоска под шапкой: слева подкрашена акцентом и растворяется вправо. */
+QFrame[headline="true"] {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 %(accent)s, stop:0.22 %(accent_soft)s, stop:1 %(border_soft)s);
+    max-height: 1px;
+    border: none;
+}
 QFrame[vline="true"] { background: %(border_soft)s; max-width: 1px; border: none; }
 
 QCheckBox { spacing: 8px; }

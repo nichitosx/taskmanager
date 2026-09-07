@@ -135,33 +135,67 @@ def write_ico(path: Path, accent: str = ACCENT, background: str = BACKGROUND) ->
     return path
 
 
-def write_pattern(path: Path, base: str, ink: str, alpha: int = 26) -> Path:
-    """Плитка фонового узора для пиксельного стиля.
+def write_pattern(path: Path, base: str, ink: str, alpha: int = 12) -> Path:
+    """Плитка фона для пиксельного стиля: тонкие горизонтальные полоски.
 
-    Мелкие точки и крестики по сетке 16×16: на глаз почти не читаются, но фон
-    перестаёт быть плоским — как в старых интерфейсах с текстурой.
+    Раньше здесь была сетка из крестиков — на большом окне она читалась как шум.
+    Полоска раз в четыре пикселя даёт ту же «не плоскую» поверхность, но глаз за
+    неё не цепляется.
     """
-    tile = QPixmap(16, 16)
+    tile = QPixmap(4, 4)
     tile.fill(QColor(base))
     painter = QPainter(tile)
+    line = QColor(ink)
+    line.setAlpha(max(0, min(255, alpha)))
     painter.setPen(Qt.PenStyle.NoPen)
-
-    bright = QColor(ink)
-    bright.setAlpha(max(0, min(255, alpha)))
-    faint = QColor(ink)
-    faint.setAlpha(max(0, min(255, alpha // 2)))
-
-    # Крестик в центре плитки и одиночные точки по углам: на глаз фон просто
-    # перестаёт быть идеально плоским, узор не читается как рисунок.
-    painter.setBrush(bright)
-    for x, y in ((8, 7), (7, 8), (9, 8), (8, 9)):
-        painter.drawRect(x, y, 1, 1)
-    painter.setBrush(faint)
-    for x, y in ((0, 0), (4, 12), (12, 4), (15, 15)):
-        painter.drawRect(x, y, 1, 1)
+    painter.setBrush(line)
+    painter.drawRect(0, 0, 4, 1)
     painter.end()
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tile.save(str(path), "PNG")
     return path
+
+
+def make_watermark(size: int = 120, color: str = MUTED, alpha: int = 46) -> QPixmap:
+    """Крупный полупрозрачный пиксель-рисунок для пустых экранов.
+
+    Планшет со списком и галочкой: рисуется в сетке 16×16 и увеличивается без
+    сглаживания, поэтому остаётся честным пиксель-артом на любом размере.
+    """
+    grid = QPixmap(16, 16)
+    grid.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(grid)
+    painter.setPen(Qt.PenStyle.NoPen)
+
+    ink = QColor(color)
+    ink.setAlpha(max(0, min(255, alpha)))
+    soft = QColor(color)
+    soft.setAlpha(max(0, min(255, int(alpha * 0.55))))
+
+    painter.setBrush(ink)
+    # Рамка планшета.
+    painter.drawRect(3, 2, 10, 1)
+    painter.drawRect(3, 13, 10, 1)
+    painter.drawRect(3, 2, 1, 12)
+    painter.drawRect(12, 2, 1, 12)
+    # Ушко сверху.
+    painter.drawRect(6, 1, 4, 1)
+    # Строки списка.
+    painter.setBrush(soft)
+    for y in (5, 8, 11):
+        painter.drawRect(5, y, 6, 1)
+    # Галочка на первой строке.
+    painter.setBrush(ink)
+    painter.drawRect(5, 5, 1, 1)
+    painter.drawRect(6, 6, 1, 1)
+    painter.drawRect(7, 4, 1, 1)
+    painter.end()
+
+    return grid.scaled(
+        size,
+        size,
+        Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.FastTransformation,
+    )
