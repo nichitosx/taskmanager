@@ -18,6 +18,7 @@ SHORTCUT_NAME = "TaskManager.lnk"
 
 DESKTOP = "desktop"
 START_MENU = "startmenu"
+APP_FOLDER = "folder"
 
 
 # Номер версии иконки в имени файла: Windows кеширует значки по пути, и без
@@ -74,7 +75,12 @@ def start_menu_dir() -> Path:
 
 
 def target_dir(kind: str) -> Path:
-    return start_menu_dir() if kind == START_MENU else desktop_dir()
+    """Куда класть ярлык: рабочий стол, меню «Пуск» или папка самой программы."""
+    if kind == START_MENU:
+        return start_menu_dir()
+    if kind == APP_FOLDER:
+        return app_dir()
+    return desktop_dir()
 
 
 def launch_target() -> tuple[str, str]:

@@ -9,6 +9,7 @@ data/
 portable.flag
 *.db
 *.ico
+*.lnk
 
 # Служебное
 .idea/

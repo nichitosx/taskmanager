@@ -173,6 +173,10 @@ class SettingsDialog(QDialog):
         menu_button = _button("Добавить в меню «Пуск»", "flat")
         menu_button.clicked.connect(lambda: self._make_shortcut(shortcut.START_MENU))
         shortcut_row.addWidget(menu_button)
+        folder_button = _button("Ярлык в папке программы", "flat")
+        folder_button.setToolTip("Положить ярлык рядом с run.py — запускать оттуда")
+        folder_button.clicked.connect(lambda: self._make_shortcut(shortcut.APP_FOLDER))
+        shortcut_row.addWidget(folder_button)
         shortcut_row.addStretch(1)
         layout.addLayout(shortcut_row)
 

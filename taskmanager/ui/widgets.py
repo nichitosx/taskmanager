@@ -20,6 +20,7 @@ from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QAbstractButton,
     QFrame,
+    QGridLayout,
     QLayout,
     QHBoxLayout,
     QLabel,
@@ -597,6 +598,127 @@ class TaskRow(Card):
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         self.activated.emit(self.task.id)
         super().mouseDoubleClickEvent(event)
+
+
+# Шпаргалка быстрой записи: пара «что написать» — «что получится».
+QUICK_HELP = [
+    ("!!", "высокий приоритет"),
+    ("!!!", "критично"),
+    ("@завтра  @пт  @25.12", "срок"),
+    ("@кмес", "конец месяца"),
+    (">15.10  >+14", "начать позже"),
+    ("#тег", "метка"),
+    ("PROJ-142", "ключ Jira"),
+]
+
+
+class HintPopup(QFrame):
+    """Всплывающее окно со шпаргалкой — отдельным окошком, поверх интерфейса."""
+
+    def __init__(self, colors: dict[str, str], parent=None) -> None:
+        super().__init__(parent, Qt.WindowType.ToolTip)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setObjectName("hintPopup")
+        self.setStyleSheet(
+            "#hintPopup { background: %s; border: 1px solid %s; border-radius: %dpx; }"
+            % (colors["surface_alt"], colors["border"], theme.radius("card"))
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 11, 16, 12)
+        layout.setSpacing(8)
+
+        caption = section_label("шпаргалка быстрой записи")
+        layout.addWidget(caption)
+
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(theme.line_extra() + 4)
+        layout.addLayout(grid)
+
+        for row, (token, meaning) in enumerate(QUICK_HELP):
+            left = QLabel(token)
+            left.setFont(theme.mono_font(8))
+            left.setStyleSheet("color: %s; background: transparent;" % colors["accent"])
+            grid.addWidget(left, row, 0)
+
+            right = QLabel(meaning)
+            right.setFont(theme.mono_font(8))
+            right.setStyleSheet("color: %s; background: transparent;" % colors["text_dim"])
+            grid.addWidget(right, row, 1)
+
+        note = QLabel("Всё это можно писать прямо в строке новой задачи.")
+        note.setFont(theme.mono_font(8))
+        note.setWordWrap(True)
+        note.setStyleSheet("color: %s; background: transparent;" % colors["text_faint"])
+        layout.addWidget(note)
+
+
+class HintTrigger(QFrame):
+    """Строка «шпаргалка ввода»: занимает одну строку, раскрывается по наведению."""
+
+    def __init__(self, colors: dict[str, str], parent=None) -> None:
+        super().__init__(parent)
+        self.colors = colors
+        self.setObjectName("hintTrigger")
+        self.setCursor(Qt.CursorShape.WhatsThisCursor)
+        self._popup: HintPopup | None = None
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(9, 5, 9, 5)
+        layout.setSpacing(8)
+
+        badge = QLabel("?")
+        badge.setFont(theme.accent_font(9, bold=True))
+        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        badge.setFixedSize(16, 16)
+        badge.setStyleSheet(
+            "color: %s; background: %s; border-radius: %dpx;"
+            % (colors["accent"], theme.tint(colors["accent"], 0.16),
+               0 if theme.is_pixel() else 8)
+        )
+        layout.addWidget(badge)
+
+        title = QLabel("шпаргалка ввода")
+        title.setFont(theme.mono_font(8))
+        title.setStyleSheet("color: %s; background: transparent;" % colors["text_faint"])
+        layout.addWidget(title)
+        layout.addStretch(1)
+
+        self._apply_style(False)
+
+    def _apply_style(self, hover: bool) -> None:
+        c = self.colors
+        self.setStyleSheet(
+            "#hintTrigger { background: %s; border-radius: %dpx; }"
+            % (c["surface_alt"] if hover else "transparent", theme.radius("nav"))
+        )
+
+    def enterEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        self._apply_style(True)
+        self.show_popup()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        self._apply_style(False)
+        self.hide_popup()
+        super().leaveEvent(event)
+
+    def show_popup(self) -> None:
+        if self._popup is None:
+            self._popup = HintPopup(self.colors, self)
+        popup = self._popup
+        popup.adjustSize()
+        # Показываем справа от панели, выравнивая по нижнему краю строки.
+        corner = self.mapToGlobal(self.rect().topRight())
+        popup.move(corner.x() + 10, max(10, corner.y() - popup.height() + self.height()))
+        popup.show()
+        popup.raise_()
+
+    def hide_popup(self) -> None:
+        if self._popup is not None:
+            self._popup.hide()
 
 
 class NavItem(QFrame):

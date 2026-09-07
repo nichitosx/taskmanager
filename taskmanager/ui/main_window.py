@@ -71,6 +71,7 @@ from .settings_dialog import SettingsDialog
 from .widgets import (
     Card,
     DayIndicator,
+    HintTrigger,
     elide_text,
     headline,
     JiraIssueRow,
@@ -594,23 +595,10 @@ class MainWindow(QMainWindow):
         self.plans_box = self._plans_box()
         layout.addWidget(self.plans_box)
 
-        layout.addSpacing(theme.section_gap())
-        layout.addWidget(section_label("шпаргалка ввода"))
-        layout.addSpacing(2)
-        hint = QLabel(
-            theme.multiline(
-                "!!  срочно\n"
-                "@завтра  срок\n"
-                "@кмес  конец месяца\n"
-                ">15.10  начать позже\n"
-                "#тег  метка\n"
-                "PROJ-142  ключ jira"
-            )
-        )
-        hint.setWordWrap(True)
-        hint.setFont(theme.mono_font(8))
-        hint.setProperty("faint", "true")
-        layout.addWidget(hint)
+        # Шпаргалка занимает одну строку: подробности всплывают при наведении.
+        layout.addSpacing(6)
+        self.hint_trigger = HintTrigger(self.colors)
+        layout.addWidget(self.hint_trigger)
         return panel
 
     def _plans_box(self) -> QWidget:
