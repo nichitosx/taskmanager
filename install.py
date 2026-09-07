@@ -11,12 +11,23 @@
 
 from __future__ import annotations
 
+import importlib
+import os
+import site
 import subprocess
 import sys
 from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parent
 MIN_PYTHON = (3, 10)
+
+# Признак того, что скрипт уже перезапускал сам себя после установки библиотеки.
+RETRY_FLAG = "TASKMANAGER_SETUP_RETRY"
+
+# Чем закончилась установка библиотеки.
+OK = "ok"
+RESTART = "restart"
+FAILED = "failed"
 
 
 def say(text: str = "") -> None:
@@ -41,8 +52,57 @@ def has_pyside() -> bool:
     return True
 
 
-def install_pyside() -> bool:
-    """Ставит PySide6 в профиль пользователя."""
+def refresh_import_paths() -> None:
+    """Добавляет в поиск модулей папку, куда pip только что положил библиотеку.
+
+    Python составляет список путей при старте. Если папки пользовательских
+    пакетов тогда ещё не было (обычная ситуация при первой установке через
+    ``pip --user``), свежепоставленная библиотека в этом же процессе не видна.
+    """
+    candidates = []
+    try:
+        candidates.append(site.getusersitepackages())
+    except (AttributeError, TypeError):
+        pass
+    for path in candidates:
+        if path and os.path.isdir(path) and path not in sys.path:
+            sys.path.append(path)
+    importlib.invalidate_caches()
+
+
+def restart_self() -> int:
+    """Перезапускает установщик новым процессом — он увидит новые пути.
+
+    Нужен, когда библиотека встала в место, которого не было на момент запуска:
+    добавить путь задним числом удаётся не всегда, а новый процесс собирает
+    список путей заново.
+    """
+    environment = dict(os.environ, **{RETRY_FLAG: "1"})
+    try:
+        result = subprocess.run([sys.executable, str(Path(__file__).resolve())],
+                                env=environment)
+    except OSError:
+        return 1
+    return result.returncode
+
+
+def has_pyside_in_fresh_process() -> bool:
+    """Проверяет импорт в новом процессе — он видит пути, которых не было у нас."""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", "import PySide6"], capture_output=True
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
+def install_pyside() -> str:
+    """Ставит PySide6 в профиль пользователя.
+
+    Возвращает: OK — можно работать дальше; RESTART — библиотека встала, но
+    видна только новому процессу; FAILED — установить не удалось.
+    """
     say("Ставлю библиотеку интерфейса PySide6 (несколько минут, ~100 МБ)…")
     command = [
         sys.executable, "-m", "pip", "install", "--user",
@@ -52,14 +112,18 @@ def install_pyside() -> bool:
         result = subprocess.run(command)
     except OSError as exc:
         say("Не удалось запустить pip: %s" % exc)
-        return False
+        return FAILED
     if result.returncode != 0:
         say("")
         say("pip завершился с ошибкой. Если в компании закрыт доступ к интернету,")
         say("попросите коллег принести файл PySide6 и поставьте его командой:")
         say("    python -m pip install --user путь-к-файлу.whl")
-        return False
-    return has_pyside()
+        return FAILED
+
+    refresh_import_paths()
+    if has_pyside():
+        return OK
+    return RESTART if has_pyside_in_fresh_process() else FAILED
 
 
 def make_shortcuts() -> list[Path]:
@@ -98,9 +162,21 @@ def main() -> int:
 
     if has_pyside():
         say("Библиотека интерфейса уже стоит.")
-    elif not install_pyside():
-        return 1
     else:
+        status = install_pyside()
+        if status == FAILED:
+            return 1
+        if status == RESTART:
+            if os.environ.get(RETRY_FLAG):
+                say("")
+                say("Библиотека установилась, но Python её по-прежнему не видит.")
+                say("Закройте окно и запустите «Установить.cmd» ещё раз.")
+                return 1
+            # Библиотека встала в папку, которой не было при запуске: новый
+            # процесс соберёт список путей заново и всё увидит.
+            say("Библиотека установлена, продолжаю в новом окне…")
+            say()
+            return restart_self()
         say("Библиотека установлена.")
 
     say()
