@@ -341,6 +341,22 @@ PILL_HEIGHT = 20
 PILL_PADDING = 6
 
 
+def elide_text(metrics, text: str, width: int) -> str:
+    """Обрезает текст под ширину.
+
+    Стандартное многоточие есть не во всяком пиксельном шрифте, поэтому если
+    его нет — дописываем две точки, они рисуются любым шрифтом.
+    """
+    if metrics.horizontalAdvance(text) <= width:
+        return text
+    # Многоточие в пиксельных шрифтах либо отсутствует, либо рисуется странно —
+    # там честнее две точки.
+    suffix = ".." if theme.is_pixel() else "…"
+    while text and metrics.horizontalAdvance(text + suffix) > width:
+        text = text[:-1]
+    return text.rstrip() + suffix
+
+
 def text_width(widget, text: str) -> int:
     """Ширина текста у уже стилизованного виджета.
 
@@ -595,8 +611,9 @@ class NavItem(QFrame):
         self.setObjectName("navItem")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
+        horizontal, vertical = theme.nav_padding()
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(11, 7, 10, 7)
+        layout.setContentsMargins(horizontal + 1, vertical, horizontal, vertical)
         layout.setSpacing(8)
 
         self.title = QLabel(title)

@@ -157,7 +157,7 @@ def mono_font(size: int = 9, bold: bool = False, spacing: float = 0.0) -> QFont:
     размер крупнее — у таких шрифтов маленькая высота строчных букв.
     """
     family = pixel_family() if is_pixel() else mono_family()
-    font = QFont(family, size)
+    font = QFont(family, size + FONT_BUMP)
     font.setBold(bold)
     if spacing:
         font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, spacing)
@@ -184,7 +184,7 @@ def accent_font(size: int = 9, bold: bool = False, spacing: float = 0.0) -> QFon
     В пиксельном стиле это самое заметное отличие: вывески набраны пиксельным
     шрифтом, а текст задач остаётся читаемым моноширинным.
     """
-    font = QFont(accent_family(), size)
+    font = QFont(accent_family(), size + FONT_BUMP)
     font.setBold(bold)
     if spacing:
         font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, spacing)
@@ -192,18 +192,14 @@ def accent_font(size: int = 9, bold: bool = False, spacing: float = 0.0) -> QFon
 
 
 def ui_font(size: int = 10, bold: bool = False) -> QFont:
-    if is_pixel():
-        font = QFont(pixel_family(), size)
-        font.setBold(bold)
-        return font
-    font = QFont(ui_family(), size)
+    font = QFont(pixel_family() if is_pixel() else ui_family(), size + FONT_BUMP)
     font.setBold(bold)
     return font
 
 
 def small_font_px() -> int:
     """Размер шрифта мелких меток в пикселях (не в пунктах — не зависит от DPI)."""
-    return 12 if is_pixel() else 11
+    return 13 if is_pixel() else 12
 
 
 def small_font() -> QFont:
@@ -225,6 +221,29 @@ def small_font_css() -> str:
         accent_family() if is_pixel() else mono_family(),
         small_font_px(),
     )
+
+
+# Общий подрост шрифта: чуть крупнее, чем было, в обоих стилях.
+FONT_BUMP = 1
+
+
+def nav_padding() -> tuple[int, int]:
+    """Отступы пункта бокового меню: (по горизонтали, по вертикали).
+
+    В мягком стиле меню плотное — списки «когда» и «состояние» занимают меньше
+    места; в пиксельном воздуха больше, там строки крупнее.
+    """
+    return (10, 8) if is_pixel() else (10, 4)
+
+
+def nav_spacing() -> int:
+    """Расстояние между соседними пунктами меню."""
+    return 3 if is_pixel() else 1
+
+
+def section_gap() -> int:
+    """Отступ между разделами бокового меню."""
+    return 12 if is_pixel() else 9
 
 
 def line_height_percent() -> int:
@@ -326,13 +345,13 @@ def stylesheet(theme: str, style: str | None = None) -> str:
     c["ui"] = pixel_family() if is_pixel() else ui_family()
     c["mono"] = pixel_family() if is_pixel() else mono_family()
     c["accent_family"] = accent_family()
-    c["section_size"] = 11 if is_pixel() else 10
+    c["section_size"] = 12 if is_pixel() else 11
     c["section_spacing"] = 1.0 if is_pixel() else 1.5
     c["r_input"] = radius("input")
     c["r_button"] = radius("button")
     c["r_small"] = radius("small")
     c["r_nav"] = radius("nav")
-    c["font_size"] = 13
+    c["font_size"] = 14
     c["item_gap"] = 7 + line_extra()
     pattern = pattern_image(theme) if is_pixel() else ""
     # Только сокращённая запись background замащивает картинку: с отдельным

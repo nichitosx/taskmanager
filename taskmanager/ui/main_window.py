@@ -64,6 +64,7 @@ from .settings_dialog import SettingsDialog
 from .widgets import (
     Card,
     DayIndicator,
+    elide_text,
     headline,
     JiraIssueRow,
     NavItem,
@@ -523,7 +524,7 @@ class MainWindow(QMainWindow):
         panel.setFixedWidth(216)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 4, 0, 0)
-        layout.setSpacing(3)
+        layout.setSpacing(theme.nav_spacing())
         self.nav_items: dict[str, NavItem] = {}
 
         layout.addWidget(section_label("когда"))
@@ -538,14 +539,14 @@ class MainWindow(QMainWindow):
             )
         )
 
-        layout.addSpacing(12)
+        layout.addSpacing(theme.section_gap())
         layout.addWidget(section_label("состояние"))
         layout.addSpacing(2)
         for key, title in STATE_FILTERS:
             layout.addWidget(self._nav_item(key, title))
 
         # Продуктов может быть много, поэтому раздел сворачивается и прокручивается.
-        layout.addSpacing(12)
+        layout.addSpacing(theme.section_gap())
         self.products_header = QWidget()
         self.products_header.setCursor(Qt.CursorShape.PointingHandCursor)
         header_row = QHBoxLayout(self.products_header)
@@ -586,7 +587,7 @@ class MainWindow(QMainWindow):
         self.plans_box = self._plans_box()
         layout.addWidget(self.plans_box)
 
-        layout.addSpacing(12)
+        layout.addSpacing(theme.section_gap())
         layout.addWidget(section_label("шпаргалка ввода"))
         layout.addSpacing(2)
         hint = QLabel(
@@ -649,18 +650,24 @@ class MainWindow(QMainWindow):
             row.setContentsMargins(0, 0, 0, 0)
             row.setSpacing(8)
 
-            title = QLabel(task.title)
-            title.setFont(theme.ui_font(9))
-            title.setStyleSheet("color: %s; background: transparent;" % c["text_dim"])
-            metrics = title.fontMetrics()
-            title.setText(metrics.elidedText(task.title, Qt.TextElideMode.ElideRight, 122))
-            title.setToolTip(task.title)
-            row.addWidget(title)
-            row.addStretch(1)
-
             days = task.days_to_start or 0
             left = QLabel("%d дн." % days if days > 1 else "завтра")
             left.setFont(theme.accent_font(8))
+
+            title = QLabel(task.title)
+            title.setFont(theme.ui_font(9))
+            title.setStyleSheet("color: %s; background: transparent;" % c["text_dim"])
+            # Сколько места осталось под название: ширина панели минус отступы
+            # окошка и место под «через сколько дней».
+            available = (
+                self.plans_box.parentWidget().width() or 216
+            ) - 24 - 10 - left.fontMetrics().horizontalAdvance(left.text())
+            title.setText(
+                elide_text(title.fontMetrics(), task.title, max(70, available))
+            )
+            title.setToolTip(task.title)
+            row.addWidget(title)
+            row.addStretch(1)
             left.setStyleSheet("color: %s; background: transparent;" % c["accent"])
             row.addWidget(left)
             self.plans_lines.addWidget(line)
@@ -829,7 +836,10 @@ class MainWindow(QMainWindow):
 
         # Список длинный — прокрутка; короткий — показываем целиком.
         rows = min(len(known), 6)
-        self.products_scroll.setMaximumHeight(rows * 32 + 6)
+        row_height = self.nav_items[PRODUCT_PREFIX + known[0]].sizeHint().height()
+        self.products_scroll.setMaximumHeight(
+            rows * (row_height + theme.nav_spacing()) + 6
+        )
 
     def _build_tray(self) -> None:
         self.tray = QSystemTrayIcon(self.windowIcon(), self)
