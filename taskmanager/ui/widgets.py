@@ -6,6 +6,9 @@ from datetime import date
 
 from PySide6.QtCore import (
     QAbstractAnimation,
+    QByteArray,
+    QEvent,
+    QObject,
     QEasingCurve,
     QPoint,
     QPropertyAnimation,
@@ -203,6 +206,99 @@ class Card(QFrame):
             painter.restore()
         painter.strokePath(path, QPen(QColor(self._border), 1))
         painter.end()
+
+
+def fit_to_screen(window, width: int, height: int, margin: float = 0.92) -> None:
+    """Задаёт размер окна, не выходя за пределы экрана.
+
+    На ноутбуке с невысоким экраном (или при системном масштабе 125%) окно с
+    жёстко заданным минимумом вылезает за край: кнопки «Сохранить» оказываются
+    под нижней границей и до них не добраться. Поэтому желаемый размер
+    ограничивается доступной областью экрана, а минимум ставится совсем
+    небольшим — окно всегда можно сжать руками.
+    """
+    from PySide6.QtGui import QGuiApplication
+
+    screen = window.screen() or QGuiApplication.primaryScreen()
+    if screen is None:
+        window.resize(width, height)
+        return
+
+    available = screen.availableGeometry()
+    limit_width = int(available.width() * margin)
+    limit_height = int(available.height() * margin)
+
+    window.setMinimumSize(min(width, limit_width, 420), min(height, limit_height, 320))
+    window.setMaximumHeight(available.height())
+    window.resize(min(width, limit_width), min(height, limit_height))
+
+
+def move_onto_screen(window) -> None:
+    """Возвращает окно в видимую область, если оно вылезло за край.
+
+    Так бывает после смены монитора или разрешения: сохранённые координаты
+    указывают туда, где экрана уже нет, и окно оказывается недоступным.
+    """
+    from PySide6.QtGui import QGuiApplication
+
+    screen = window.screen() or QGuiApplication.primaryScreen()
+    if screen is None:
+        return
+    available = screen.availableGeometry()
+
+    geometry = window.frameGeometry()
+    width = min(geometry.width(), available.width())
+    height = min(geometry.height(), available.height())
+    x = min(max(geometry.x(), available.x()), available.right() - width)
+    y = min(max(geometry.y(), available.y()), available.bottom() - height)
+    window.resize(width, height)
+    window.move(x, y)
+
+
+class _GeometryKeeper(QObject):
+    """Запоминает размер и положение окна при закрытии."""
+
+    def __init__(self, window, settings, key: str) -> None:
+        super().__init__(window)
+        self.window = window
+        self.settings = settings
+        self.key = "windows.%s" % key
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt naming)
+        if event.type() in (QEvent.Type.Close, QEvent.Type.Hide):
+            self.save()
+        return False
+
+    def save(self) -> None:
+        if self.settings is None:
+            return
+        try:
+            raw = bytes(self.window.saveGeometry().toBase64()).decode()
+            self.settings.set(self.key, raw)
+            self.settings.save()
+        except Exception:
+            pass  # не смогли запомнить размер — не повод мешать работе
+
+
+def manage_window(window, settings, key: str, width: int, height: int) -> None:
+    """Окно подстраивается под экран, помнит свой размер и остаётся видимым.
+
+    Вызывается в конце сборки окна: сначала размер по содержимому, потом —
+    сохранённый пользователем, если он есть и помещается на экран.
+    """
+    fit_to_screen(window, width, height)
+
+    saved = settings.get("windows.%s" % key, "") if settings is not None else ""
+    if saved:
+        try:
+            window.restoreGeometry(QByteArray.fromBase64(saved.encode()))
+        except Exception:
+            pass
+    move_onto_screen(window)
+
+    keeper = _GeometryKeeper(window, settings, key)
+    window.installEventFilter(keeper)
+    window._geometry_keeper = keeper  # держим ссылку, иначе фильтр соберёт сборщик
 
 
 def section_label(text: str) -> QLabel:

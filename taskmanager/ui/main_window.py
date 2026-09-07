@@ -71,6 +71,8 @@ from .settings_dialog import SettingsDialog
 from .widgets import (
     Card,
     DayIndicator,
+    fit_to_screen,
+    move_onto_screen,
     HintTrigger,
     SubtaskList,
     elide_text,
@@ -362,15 +364,15 @@ class MainWindow(QMainWindow):
         self._jira_thread: JiraFetch | None = None
         self._shown_filter = ""
         theme.set_style(settings.get("ui_style", theme.STYLE_SOFT))
+        theme.set_preferred_pixel(settings.get("pixel_font", ""))
         self.colors = theme.palette(settings.get("theme", "dark"))
         self._force_quit = False
 
         self.setWindowTitle("TaskManager")
         self.setWindowIcon(self._icon())
-        self.resize(1180, 760)
-        # Ниже этого окно сжимать нельзя: шапка и боковая панель начинают
-        # наезжать друг на друга.
-        self.setMinimumSize(1040, 660)
+        # Размер подбирается под экран: на ноутбуке окно не должно вылезать
+        # за край, иначе часть интерфейса недостижима.
+        fit_to_screen(self, 1180, 760)
 
         self._build()
         self._build_tray()
@@ -1351,6 +1353,7 @@ class MainWindow(QMainWindow):
         """Перекрашивает приложение после смены темы или стиля в настройках."""
         name = self.settings.get("theme", "dark")
         theme.set_style(self.settings.get("ui_style", theme.STYLE_SOFT))
+        theme.set_preferred_pixel(self.settings.get("pixel_font", ""))
         self.colors = theme.palette(name)
         app = QApplication.instance()
         if app is not None:

@@ -15,10 +15,12 @@ from PySide6.QtCore import QByteArray, QTimer  # noqa: E402
 from PySide6.QtNetwork import QLocalServer, QLocalSocket  # noqa: E402
 from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
+from taskmanager import fonts  # noqa: E402
 from taskmanager.config import Settings  # noqa: E402
 from taskmanager.storage import Storage  # noqa: E402
 from taskmanager.ui import theme  # noqa: E402
 from taskmanager.ui.main_window import MainWindow  # noqa: E402
+from taskmanager.ui.widgets import move_onto_screen  # noqa: E402
 
 SERVER_NAME = "TaskManager.SingleInstance"
 
@@ -45,6 +47,9 @@ def main() -> int:
     if _already_running():
         return 0
 
+    # Шрифты из папки fonts подключаем до отрисовки: стиль их сразу увидит.
+    fonts.load_bundled()
+
     settings = Settings()
     try:
         storage = Storage()
@@ -62,6 +67,8 @@ def main() -> int:
     geometry = settings.get("window_geometry", "")
     if geometry:
         window.restoreGeometry(QByteArray.fromBase64(geometry.encode()))
+        # Монитор мог смениться: возвращаем окно в видимую область.
+        move_onto_screen(window)
 
     # Сервер для перехвата повторного запуска: показываем уже открытое окно.
     QLocalServer.removeServer(SERVER_NAME)

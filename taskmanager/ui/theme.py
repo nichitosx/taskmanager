@@ -164,9 +164,40 @@ def mono_font(size: int = 9, bold: bool = False, spacing: float = 0.0) -> QFont:
     return font
 
 
+# Шрифт, выбранный пользователем в настройках (пусто — подобрать самим).
+_preferred_pixel = ""
+
+
+def set_preferred_pixel(family: str) -> None:
+    global _preferred_pixel
+    _preferred_pixel = (family or "").strip()
+
+
+def pixel_candidates() -> list[str]:
+    """Что можно взять под пиксельный стиль: сначала свои файлы, потом система."""
+    from ..fonts import loaded_families
+
+    found: list[str] = []
+    for family in loaded_families() + PIXEL_CANDIDATES:
+        if family and family not in found:
+            found.append(family)
+    return found
+
+
 def pixel_family() -> str:
-    """Пиксельный шрифт, если он есть в системе; иначе моноширинный."""
-    return _pick(PIXEL_CANDIDATES, mono_family())
+    """Пиксельный шрифт: выбранный в настройках, свой из папки, системный.
+
+    Файл из папки ``fonts`` идёт первым: его положили осознанно, а системные
+    пиксельные шрифты могут оказаться на одном компьютере и отсутствовать на
+    другом.
+    """
+    available = set(QFontDatabase.families())
+    if _preferred_pixel and _preferred_pixel in available:
+        return _preferred_pixel
+    for family in pixel_candidates():
+        if family in available:
+            return family
+    return mono_family()
 
 
 def has_pixel_font() -> bool:

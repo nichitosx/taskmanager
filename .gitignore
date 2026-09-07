@@ -11,6 +11,11 @@ portable.flag
 *.ico
 *.lnk
 
+# Шрифты пользователя: распространять их нельзя
+fonts/*.ttf
+fonts/*.otf
+fonts/*.ttc
+
 # Собранные архивы
 dist/
 

@@ -10,6 +10,7 @@ from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QScrollArea,
     QColorDialog,
     QComboBox,
     QDialog,
@@ -30,6 +31,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import autostart
+from .. import fonts as fonts_module
 from .. import demo
 from .. import products as products_module
 from .. import shortcut
@@ -38,7 +40,7 @@ from ..integrations.confluence import ConfluenceClient, ConfluenceConfig, Conflu
 from ..integrations.jira import DEFAULT_JQL, JiraClient, JiraConfig, JiraError
 from ..reports import GROUPING_BY_DAYS, GROUPING_LABELS, WEEKDAY_NAMES
 from . import theme
-from .widgets import hline, section_label
+from .widgets import manage_window, hline, section_label
 
 
 def _button(text: str, kind: str = "") -> QPushButton:
@@ -56,9 +58,9 @@ class SettingsDialog(QDialog):
         # Хранилище нужно только для кнопки с задачами-примерами.
         self.storage = storage if storage is not None else getattr(parent, "storage", None)
         self.setWindowTitle("Настройки")
-        self.setMinimumSize(660, 620)
         self._build()
         self._load()
+        manage_window(self, settings, "settings", 680, 640)
 
     # --- Построение -----------------------------------------------------------
 
@@ -68,10 +70,12 @@ class SettingsDialog(QDialog):
         layout.setSpacing(12)
 
         tabs = QTabWidget()
-        tabs.addTab(self._general_tab(), "Общее")
-        tabs.addTab(self._reminders_tab(), "Напоминания")
-        tabs.addTab(self._products_tab(), "Продукты")
-        tabs.addTab(self._integrations_tab(), "Интеграции")
+        # Каждая вкладка прокручивается: на невысоком экране содержимое длиннее
+        # окна, а кнопки сохранения должны оставаться на виду.
+        tabs.addTab(self._scrollable(self._general_tab()), "Общее")
+        tabs.addTab(self._scrollable(self._reminders_tab()), "Напоминания")
+        tabs.addTab(self._scrollable(self._products_tab()), "Продукты")
+        tabs.addTab(self._scrollable(self._integrations_tab()), "Интеграции")
         layout.addWidget(tabs, 1)
 
         self.status = QLabel("")
@@ -93,6 +97,15 @@ class SettingsDialog(QDialog):
         save.setDefault(True)
         buttons.addWidget(save)
         layout.addLayout(buttons)
+
+    @staticmethod
+    def _scrollable(page: QWidget) -> QScrollArea:
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QScrollArea.Shape.NoFrame)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        area.setWidget(page)
+        return area
 
     def _general_tab(self) -> QWidget:
         page = QWidget()
@@ -120,6 +133,23 @@ class SettingsDialog(QDialog):
         form.addRow("Считать задачу «без движения» через", self.stale_spin)
 
         layout.addLayout(form)
+
+        font_row = QHBoxLayout()
+        font_row.setSpacing(8)
+        font_row.addWidget(QLabel("Пиксельный шрифт"))
+        self.pixel_font_box = QComboBox()
+        self.pixel_font_box.setMinimumWidth(180)
+        font_row.addWidget(self.pixel_font_box, 1)
+        add_font = _button("Добавить файл…", "flat")
+        add_font.setToolTip("Скопировать .ttf в папку программы и использовать его")
+        add_font.clicked.connect(self._add_font)
+        font_row.addWidget(add_font)
+        layout.addLayout(font_row)
+
+        self.font_note = QLabel()
+        self.font_note.setWordWrap(True)
+        self.font_note.setProperty("faint", "true")
+        layout.addWidget(self.font_note)
 
         style_note = QLabel(
             "«Мягкий» — скруглённые карточки и системный шрифт. «Пиксельный» — "
@@ -162,6 +192,21 @@ class SettingsDialog(QDialog):
         demo_note.setWordWrap(True)
         demo_note.setProperty("faint", "true")
         layout.addWidget(demo_note)
+
+        layout.addWidget(hline())
+        layout.addWidget(section_label("обновление"))
+        update_row = QHBoxLayout()
+        update_row.setSpacing(8)
+        self.update_button = _button("Проверить обновления")
+        self.update_button.clicked.connect(self._run_update)
+        update_row.addWidget(self.update_button)
+        update_row.addStretch(1)
+        layout.addLayout(update_row)
+
+        self.version_note = QLabel()
+        self.version_note.setWordWrap(True)
+        self.version_note.setProperty("faint", "true")
+        layout.addWidget(self.version_note)
 
         layout.addWidget(hline())
         layout.addWidget(section_label("ярлыки"))
@@ -480,6 +525,54 @@ class SettingsDialog(QDialog):
             del self.products[index]
             self._fill_products()
 
+    def _sync_version(self) -> None:
+        """Показывает установленную версию — её пишет «Обновить»."""
+        from ..config import app_dir, data_dir
+
+        installed = {}
+        try:
+            marker = data_dir() / "installed.json"
+            if marker.exists():
+                import json
+
+                installed = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            installed = {}
+
+        if installed.get("sha"):
+            text = "Установлена версия %s от %s. " % (
+                installed["sha"], installed.get("date", "—")
+            )
+        else:
+            text = "Версия пока не отмечена. "
+        self.version_note.setText(
+            text + "Обновление скачивает свежие файлы программы с GitHub; задачи, "
+            "настройки и шрифты остаются на месте. Программу после обновления "
+            "нужно перезапустить."
+        )
+        self.update_button.setEnabled((app_dir() / "update.py").exists())
+
+    def _run_update(self) -> None:
+        """Запускает обновление отдельным окном: файлы меняются вне работающей программы."""
+        from ..config import app_dir
+
+        script = app_dir() / "Обновить.cmd"
+        if not script.exists():
+            QMessageBox.information(
+                self, "Обновление",
+                "Файл «Обновить.cmd» не найден рядом с программой.",
+            )
+            return
+        try:
+            os.startfile(str(script))  # noqa: S606 (штатный запуск в отдельном окне)
+        except OSError as exc:
+            QMessageBox.warning(self, "Обновление", "Не удалось запустить: %s" % exc)
+            return
+        self.status.setText(
+            "Обновление идёт в отдельном окне. После него закройте программу и "
+            "запустите заново."
+        )
+
     def _add_demo(self) -> None:
         if self.storage is None:
             return
@@ -487,6 +580,7 @@ class SettingsDialog(QDialog):
         self.products = products_module.load(self.settings)
         self._fill_products()
         self._sync_demo_button()
+        self._sync_version()
         self.status.setText(
             "Добавлено задач-примеров: %d. Закройте настройки, чтобы увидеть их в списке."
             % len(created)
@@ -653,6 +747,7 @@ class SettingsDialog(QDialog):
         self.theme_box.setCurrentIndex(max(index, 0))
         index = self.style_box.findData(s.get("ui_style", theme.STYLE_SOFT))
         self.style_box.setCurrentIndex(max(index, 0))
+        self._fill_fonts()
         self.stale_spin.setValue(s.get_int("stale_days", 5))
         self.confirm_check.setChecked(bool(s.get("confirm_done", True)))
         self.tray_check.setChecked(bool(s.get("minimize_to_tray", True)))
@@ -704,6 +799,54 @@ class SettingsDialog(QDialog):
             return int(hours), int(minutes)
         except (ValueError, AttributeError):
             return default_h, default_m
+
+    def _fill_fonts(self) -> None:
+        """Список шрифтов: свои файлы, найденные системные и «подобрать самим»."""
+        from PySide6.QtGui import QFontDatabase
+
+        installed = set(QFontDatabase.families())
+        current = self.settings.get("pixel_font", "")
+
+        self.pixel_font_box.clear()
+        self.pixel_font_box.addItem("Подобрать автоматически", "")
+        own = fonts_module.loaded_families()
+        for family in own:
+            self.pixel_font_box.addItem("%s — из папки программы" % family, family)
+        for family in theme.PIXEL_CANDIDATES:
+            if family in installed and family not in own:
+                self.pixel_font_box.addItem("%s — из системы" % family, family)
+        if current and self.pixel_font_box.findData(current) < 0:
+            self.pixel_font_box.addItem("%s — не найден" % current, current)
+
+        index = self.pixel_font_box.findData(current)
+        self.pixel_font_box.setCurrentIndex(max(index, 0))
+
+        if own:
+            self.font_note.setText(
+                "Шрифты из папки %s подключаются при запуске, ставить их в Windows не нужно."
+                % fonts_module.fonts_dir()
+            )
+        else:
+            self.font_note.setText(
+                "Своих шрифтов пока нет. Положите .ttf в папку %s (или нажмите "
+                "«Добавить файл…») — тогда пиксельное оформление будет выглядеть "
+                "одинаково на любом компьютере." % fonts_module.fonts_dir()
+            )
+
+    def _add_font(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Файл шрифта", "C:/Windows/Fonts", "Шрифты (*.ttf *.otf *.ttc)"
+        )
+        if not path:
+            return
+        family = fonts_module.add_file(path)
+        if not family:
+            QMessageBox.warning(self, "Шрифт", "Не удалось прочитать файл шрифта.")
+            return
+        self._fill_fonts()
+        index = self.pixel_font_box.findData(family)
+        self.pixel_font_box.setCurrentIndex(max(index, 0))
+        self.status.setText("Шрифт «%s» добавлен." % family)
 
     def _pick_ca_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -757,6 +900,7 @@ class SettingsDialog(QDialog):
         s = self.settings
         s.set("theme", self.theme_box.currentData())
         s.set("ui_style", self.style_box.currentData())
+        s.set("pixel_font", self.pixel_font_box.currentData() or "")
         s.set("stale_days", self.stale_spin.value())
         s.set("confirm_done", self.confirm_check.isChecked())
         s.set("minimize_to_tray", self.tray_check.isChecked())

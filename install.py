@@ -126,6 +126,20 @@ def install_pyside() -> str:
     return RESTART if has_pyside_in_fresh_process() else FAILED
 
 
+def remember_version() -> None:
+    """Записывает, какая версия установлена, — от неё считает «Обновить»."""
+    try:
+        sys.path.insert(0, str(APP_DIR))
+        import update
+
+        info = update.latest()
+        if info:
+            update.remember(info)
+            say("Версия: %s от %s" % (info["sha"], info["date"]))
+    except Exception:
+        pass  # без интернета просто нечего записывать
+
+
 def make_shortcuts() -> list[Path]:
     """Создаёт ярлыки на рабочем столе и в папке программы."""
     sys.path.insert(0, str(APP_DIR))
@@ -178,6 +192,8 @@ def main() -> int:
             say()
             return restart_self()
         say("Библиотека установлена.")
+
+    remember_version()
 
     say()
     for path in make_shortcuts():

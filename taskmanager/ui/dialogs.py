@@ -43,7 +43,14 @@ from ..models import (
 from ..reports import fmt_date_long
 from ..storage import Storage
 from . import theme
-from .widgets import CheckCircle, ProductPill, SubtaskList, hline, section_label
+from .widgets import (
+    CheckCircle,
+    ProductPill,
+    SubtaskList,
+    manage_window,
+    hline,
+    section_label,
+)
 
 
 def _button(text: str, kind: str = "") -> QPushButton:
@@ -60,7 +67,8 @@ class LogWorkDialog(QDialog):
     def __init__(self, task: Task, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Отметить работу")
-        self.setMinimumWidth(460)
+        self.setMinimumWidth(380)
+        self.resize(480, 260)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 20, 22, 20)
@@ -75,7 +83,8 @@ class LogWorkDialog(QDialog):
         layout.addWidget(section_label("что сделано"))
         self.comment = QPlainTextEdit()
         self.comment.setPlaceholderText("Например: собрал выгрузку, отдал на проверку")
-        self.comment.setFixedHeight(90)
+        self.comment.setMinimumHeight(64)
+        self.comment.setMaximumHeight(120)
         layout.addWidget(self.comment)
 
         buttons = QHBoxLayout()
@@ -111,13 +120,27 @@ class TaskDialog(QDialog):
         self.task = task or Task()
         self.is_new = task is None
         self.setWindowTitle("Новая задача" if self.is_new else "Задача")
-        self.setMinimumWidth(560)
         self._build()
         self._load()
+        manage_window(self, settings, "task", 620, 720)
 
     def _build(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(22, 20, 22, 18)
+        # Содержимое карточки живёт в прокручиваемой области: на невысоком
+        # экране окно можно сжать, а кнопки внизу останутся на месте.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QScrollArea.Shape.NoFrame)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        outer.addWidget(area, 1)
+
+        content = QWidget()
+        area.setWidget(content)
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(22, 20, 22, 12)
         layout.setSpacing(14)
 
         layout.addWidget(section_label("название"))
@@ -239,7 +262,8 @@ class TaskDialog(QDialog):
         layout.addWidget(section_label("заметки"))
         self.notes_edit = QPlainTextEdit()
         self.notes_edit.setPlaceholderText("Детали, ссылки, договорённости")
-        self.notes_edit.setFixedHeight(96)
+        self.notes_edit.setMinimumHeight(70)
+        self.notes_edit.setMaximumHeight(140)
         layout.addWidget(self.notes_edit)
 
         self.subtasks = SubtaskList(
@@ -253,11 +277,13 @@ class TaskDialog(QDialog):
         self.history_label = section_label("история работы")
         layout.addWidget(self.history_label)
         self.history = QListWidget()
-        self.history.setFixedHeight(112)
+        self.history.setMinimumHeight(80)
+        self.history.setMaximumHeight(150)
         self.history.setFont(theme.mono_font(9))
         layout.addWidget(self.history)
 
         buttons = QHBoxLayout()
+        buttons.setContentsMargins(22, 10, 22, 16)
         self.done_button = _button("Выполнена", "flat")
         self.done_button.clicked.connect(self._toggle_done)
         buttons.addWidget(self.done_button)
@@ -273,7 +299,7 @@ class TaskDialog(QDialog):
         save.clicked.connect(self._save)
         save.setDefault(True)
         buttons.addWidget(save)
-        layout.addLayout(buttons)
+        outer.addLayout(buttons)
 
     def _date_field(self, caption: str, tooltip: str):
         """Колонка «галочка + дата»: дата задаётся, только если галочка стоит."""
@@ -541,9 +567,9 @@ class DailyReportDialog(QDialog):
         self.day = day or date.today()
         self.rows: list[tuple[int, QCheckBox, QLineEdit]] = []
         self.setWindowTitle("Отчёт за день")
-        self.setMinimumSize(680, 620)
         self._build()
         self._load()
+        manage_window(self, settings, "daily", 700, 640)
 
     def _build(self) -> None:
         colors = theme.palette(self.settings.get("theme", "dark"))
@@ -598,7 +624,8 @@ class DailyReportDialog(QDialog):
         self.note_edit.setPlaceholderText(
             "Как прошёл день: встречи, помехи, договорённости, что осталось на завтра"
         )
-        self.note_edit.setFixedHeight(110)
+        self.note_edit.setMinimumHeight(70)
+        self.note_edit.setMaximumHeight(150)
         layout.addWidget(self.note_edit)
 
         self.status = QLabel("")
@@ -792,7 +819,7 @@ class UpcomingTasksDialog(QDialog):
         super().__init__(parent)
         self.settings = settings
         self.setWindowTitle("Скоро в работу")
-        self.setMinimumWidth(560)
+        self.setMinimumWidth(420)
 
         colors = theme.palette(settings.get("theme", "dark"))
         catalog = products_module.load(settings)
@@ -827,7 +854,7 @@ class UpcomingTasksDialog(QDialog):
         for task in tasks:
             rows.addWidget(self._row(task, colors, catalog))
         rows.addStretch(1)
-        self.setMinimumHeight(min(560, 250 + 44 * min(len(tasks), 5)))
+        self.resize(560, min(560, 250 + 44 * min(len(tasks), 5)))
 
         buttons = QHBoxLayout()
         buttons.addStretch(1)

@@ -23,17 +23,22 @@ DIST = ROOT / "dist"
 # Что кладём в архив. Папки берутся целиком, кроме исключений ниже.
 INCLUDE = [
     "taskmanager",
+    "fonts",
     "run.py",
     "install.py",
+    "update.py",
     "requirements.txt",
     "README.md",
     "Установить.cmd",
+    "Обновить.cmd",
     "TaskManager.cmd",
 ]
 
 # Что не должно попасть в архив ни при каких условиях.
 SKIP_DIRS = {"__pycache__", ".git", "dist", "data", ".idea", ".vscode"}
-SKIP_SUFFIXES = {".pyc", ".pyo", ".db", ".lnk", ".ico", ".log"}
+# Шрифты не распространяем: у файлов свои лицензии, а свой шрифт пользователь
+# кладёт в папку fonts сам.
+SKIP_SUFFIXES = {".pyc", ".pyo", ".db", ".lnk", ".ico", ".log", ".ttf", ".otf", ".ttc"}
 SKIP_NAMES = {"settings.json", "portable.flag"}
 
 
@@ -85,7 +90,9 @@ def verify(archive: Path) -> bool:
     required = [
         "TaskManager/run.py",
         "TaskManager/install.py",
+        "TaskManager/update.py",
         "TaskManager/Установить.cmd",
+        "TaskManager/Обновить.cmd",
         "TaskManager/taskmanager/ui/main_window.py",
     ]
     missing = [name for name in required if name not in names]

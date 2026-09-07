@@ -47,7 +47,7 @@ from ..reports import (
 )
 from ..storage import Storage
 from . import theme
-from .widgets import hline, section_label
+from .widgets import manage_window, hline, section_label
 
 
 def _button(text: str, kind: str = "") -> QPushButton:
@@ -85,9 +85,9 @@ class WeeklyReportDialog(QDialog):
             self.grouping = GROUPING_BY_DAYS
         self.colors = theme.palette(settings.get("theme", "dark"))
         self.setWindowTitle("Недельный отчёт")
-        self.setMinimumSize(980, 700)
         self._build()
         self.refresh()
+        manage_window(self, settings, "weekly", 1000, 720)
 
     def _build(self) -> None:
         layout = QVBoxLayout(self)
@@ -470,7 +470,7 @@ class HistoryDialog(QDialog):
         self.storage = storage
         self.settings = settings
         self.setWindowTitle("История отчётов")
-        self.setMinimumSize(860, 600)
+        manage_window(self, settings, "history", 880, 620)
         self._build()
         self._load()
 
@@ -596,9 +596,9 @@ class AllWeeksDialog(QDialog):
         self.grouping = grouping if grouping in GROUPING_LABELS else GROUPING_BY_TASKS
         self.weeks = sorted(storage.weeks_with_activity())
         self.setWindowTitle("Выгрузка по неделям")
-        self.setMinimumSize(900, 680)
         self._build()
         self.refresh()
+        manage_window(self, settings, "all_weeks", 920, 700)
 
     def _build(self) -> None:
         layout = QVBoxLayout(self)
