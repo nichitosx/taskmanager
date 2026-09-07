@@ -13,6 +13,7 @@ from .models import (
     STATUS_ARCHIVED,
     STATUS_DONE,
     DailyReport,
+    Subtask,
     Task,
     WorkLog,
 )
@@ -35,6 +36,16 @@ CREATE TABLE IF NOT EXISTS tasks (
     updated_at       TEXT NOT NULL,
     done_at          TEXT,
     last_activity_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS subtasks (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id    INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    title      TEXT NOT NULL,
+    done       INTEGER DEFAULT 0,
+    position   INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL,
+    done_at    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS work_logs (
@@ -70,6 +81,7 @@ CREATE TABLE IF NOT EXISTS meta (
 INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_start ON tasks(start_date);
+CREATE INDEX IF NOT EXISTS idx_subtasks_task ON subtasks(task_id);
 CREATE INDEX IF NOT EXISTS idx_logs_date ON work_logs(log_date);
 CREATE INDEX IF NOT EXISTS idx_logs_task ON work_logs(task_id);
 """
@@ -224,6 +236,101 @@ class Storage:
             (_now(), _now(), task_id),
         )
         self.conn.commit()
+
+    # --- Подпункты ------------------------------------------------------------
+
+    def list_subtasks(self, task_id: int) -> list[Subtask]:
+        rows = self.conn.execute(
+            "SELECT * FROM subtasks WHERE task_id=? ORDER BY position, id", (task_id,)
+        ).fetchall()
+        return [Subtask.from_row(row) for row in rows]
+
+    def add_subtask(self, task_id: int, title: str) -> Optional[Subtask]:
+        """Добавляет подпункт в конец списка. Пустое название игнорируется."""
+        title = (title or "").strip()
+        if not title:
+            return None
+        row = self.conn.execute(
+            "SELECT COALESCE(MAX(position), -1) + 1 AS next FROM subtasks WHERE task_id=?",
+            (task_id,),
+        ).fetchone()
+        cur = self.conn.execute(
+            "INSERT INTO subtasks (task_id, title, done, position, created_at) "
+            "VALUES (?,?,0,?,?)",
+            (task_id, title, row["next"], _now()),
+        )
+        self.conn.commit()
+        return self.get_subtask(cur.lastrowid)
+
+    def get_subtask(self, subtask_id: int) -> Optional[Subtask]:
+        row = self.conn.execute(
+            "SELECT * FROM subtasks WHERE id=?", (subtask_id,)
+        ).fetchone()
+        return Subtask.from_row(row) if row else None
+
+    def rename_subtask(self, subtask_id: int, title: str) -> None:
+        title = (title or "").strip()
+        if not title:
+            return
+        self.conn.execute("UPDATE subtasks SET title=? WHERE id=?", (title, subtask_id))
+        self.conn.commit()
+
+    def set_subtask_done(self, subtask_id: int, done: bool) -> None:
+        """Отметка подпункта — это движение по задаче, обновляем и её активность."""
+        self.conn.execute(
+            "UPDATE subtasks SET done=?, done_at=? WHERE id=?",
+            (1 if done else 0, _now() if done else None, subtask_id),
+        )
+        row = self.conn.execute(
+            "SELECT task_id FROM subtasks WHERE id=?", (subtask_id,)
+        ).fetchone()
+        if row:
+            self.conn.execute(
+                "UPDATE tasks SET last_activity_at=?, updated_at=? WHERE id=?",
+                (_now(), _now(), row["task_id"]),
+            )
+        self.conn.commit()
+
+    def delete_subtask(self, subtask_id: int) -> None:
+        self.conn.execute("DELETE FROM subtasks WHERE id=?", (subtask_id,))
+        self.conn.commit()
+
+    def move_subtask(self, subtask_id: int, direction: int) -> None:
+        """Меняет подпункт местами с соседним: -1 — выше, 1 — ниже."""
+        current = self.get_subtask(subtask_id)
+        if current is None:
+            return
+        items = self.list_subtasks(current.task_id)
+        index = next((i for i, s in enumerate(items) if s.id == subtask_id), None)
+        if index is None:
+            return
+        target = index + direction
+        if not 0 <= target < len(items):
+            return
+        # Позиции могли совпадать у старых записей — переписываем весь список.
+        items[index], items[target] = items[target], items[index]
+        for position, item in enumerate(items):
+            self.conn.execute(
+                "UPDATE subtasks SET position=? WHERE id=?", (position, item.id)
+            )
+        self.conn.commit()
+
+    def subtask_progress(self, task_id: int) -> tuple[int, int]:
+        """Сколько подпунктов сделано из скольких."""
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS total, COALESCE(SUM(done), 0) AS done "
+            "FROM subtasks WHERE task_id=?",
+            (task_id,),
+        ).fetchone()
+        return int(row["done"]), int(row["total"])
+
+    def subtask_progress_map(self) -> dict[int, tuple[int, int]]:
+        """Прогресс сразу по всем задачам — для списка, одним запросом."""
+        rows = self.conn.execute(
+            "SELECT task_id, COUNT(*) AS total, COALESCE(SUM(done), 0) AS done "
+            "FROM subtasks GROUP BY task_id"
+        ).fetchall()
+        return {row["task_id"]: (int(row["done"]), int(row["total"])) for row in rows}
 
     # --- Отметки о работе -----------------------------------------------------
 

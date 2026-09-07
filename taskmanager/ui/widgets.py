@@ -21,9 +21,11 @@ from PySide6.QtWidgets import (
     QAbstractButton,
     QFrame,
     QGridLayout,
+    QScrollArea,
     QLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
@@ -472,6 +474,7 @@ class TaskRow(Card):
         stale_days: int,
         product_color: str = "",
         show_jira: bool = True,
+        subtasks: tuple[int, int] = (0, 0),
         parent=None,
     ) -> None:
         super().__init__(colors, parent)
@@ -479,6 +482,7 @@ class TaskRow(Card):
         self.stale_days = stale_days
         self.product_color = product_color
         self.show_jira = show_jira
+        self.subtasks = subtasks
         self._build()
         self._apply_style()
 
@@ -540,6 +544,17 @@ class TaskRow(Card):
 
         if task.is_planned:
             pills.append(Pill(start_text(task), c["info"]))
+
+        done, total = self.subtasks
+        if total:
+            complete = done >= total
+            pills.append(
+                Pill(
+                    "%d/%d" % (done, total),
+                    c["success"] if complete else c["text_dim"],
+                    strong=complete,
+                )
+            )
 
         repeat = describe_repeat(task.repeat)
         if repeat and not task.is_done:
@@ -719,6 +734,260 @@ class HintTrigger(QFrame):
     def hide_popup(self) -> None:
         if self._popup is not None:
             self._popup.hide()
+
+
+class SubtaskRow(QWidget):
+    """Строка чек-листа: отметка, название с правкой на месте и удаление."""
+
+    toggled = Signal(int, bool)
+    renamed = Signal(int, str)
+    removed = Signal(int)
+    moved = Signal(int, int)
+
+    def __init__(self, subtask, colors: dict[str, str], compact: bool = False,
+                 parent=None) -> None:
+        super().__init__(parent)
+        self.subtask = subtask
+        self.colors = colors
+        self.compact = compact
+        self.setStyleSheet("background: transparent;")
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(9)
+
+        self.check = CheckCircle(subtask.done, colors)
+        self.check.setToolTip("Отметить подпункт")
+        self.check.toggled.connect(lambda state: self.toggled.emit(subtask.id, state))
+        layout.addWidget(self.check, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.title = QLineEdit(subtask.title)
+        self.title.setProperty("seamless", "true")
+        self.title.setFont(theme.ui_font(10))
+        # Длинное название иначе показывается «с хвоста»: поле прокручено вправо.
+        self.title.setCursorPosition(0)
+        # Разрешаем полю сжиматься: иначе в узкой панели строка не помещается.
+        self.title.setMinimumWidth(60)
+        self.title.setToolTip(subtask.title)
+        self.title.editingFinished.connect(self._rename)
+        self._apply_done_style()
+        layout.addWidget(self.title, 1)
+
+        # В узкой боковой панели стрелки не помещаются — порядок меняют в карточке.
+        for text, tip, step in ()  if compact else (("↑", "Выше", -1), ("↓", "Ниже", 1)):
+            button = QPushButton(text)
+            button.setProperty("tiny", "true")
+            button.setToolTip(tip)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.clicked.connect(lambda _=False, s=step: self.moved.emit(subtask.id, s))
+            layout.addWidget(button)
+
+        remove = QPushButton("×")
+        remove.setProperty("tiny", "true")
+        remove.setToolTip("Удалить подпункт")
+        remove.setCursor(Qt.CursorShape.PointingHandCursor)
+        remove.clicked.connect(lambda: self.removed.emit(subtask.id))
+        layout.addWidget(remove)
+
+    def _apply_done_style(self) -> None:
+        c = self.colors
+        font = self.title.font()
+        font.setStrikeOut(self.subtask.done)
+        self.title.setFont(font)
+        self.title.setStyleSheet(
+            "color: %s; background: transparent;"
+            % (c["text_faint"] if self.subtask.done else c["text"])
+        )
+
+    def _rename(self) -> None:
+        text = self.title.text().strip()
+        if text and text != self.subtask.title:
+            self.subtask.title = text
+            self.title.setToolTip(text)
+            self.renamed.emit(self.subtask.id, text)
+        elif not text:
+            self.title.setText(self.subtask.title)
+
+
+class SubtaskList(QWidget):
+    """Чек-лист подпунктов задачи.
+
+    Умеет работать и до того, как задача сохранена: тогда подпункты копятся в
+    памяти, а после создания задачи переносятся в базу методом ``flush``.
+    """
+
+    changed = Signal()
+
+    def __init__(self, storage, colors: dict[str, str], task_id=None,
+                 compact: bool = False, scroll_height: int = 0, parent=None) -> None:
+        super().__init__(parent)
+        self.storage = storage
+        self.colors = colors
+        self.task_id = task_id
+        self.compact = compact
+        self._pending: list[str] = []
+        self.setStyleSheet("background: transparent;")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        head.setSpacing(8)
+        head.addWidget(section_label("подпункты"))
+        head.addStretch(1)
+        self.progress = QLabel("")
+        self.progress.setFont(theme.accent_font(8))
+        self.progress.setStyleSheet(
+            "color: %s; background: transparent;" % colors["text_faint"]
+        )
+        head.addWidget(self.progress)
+        layout.addLayout(head)
+
+        rows_host = QWidget()
+        rows_host.setStyleSheet("background: transparent;")
+        self.rows_box = QVBoxLayout(rows_host)
+        self.rows_box.setContentsMargins(0, 0, 0, 0)
+        self.rows_box.setSpacing(theme.line_extra() + 3)
+
+        self._area = None
+        self._scroll_height = scroll_height
+        if scroll_height:
+            # Прокручиваем только строки: заголовок со счётчиком и поле ввода
+            # должны оставаться на виду, сколько бы подпунктов ни было.
+            self._area = QScrollArea()
+            self._area.setWidgetResizable(True)
+            self._area.setFrameShape(QFrame.Shape.NoFrame)
+            self._area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            self._area.setStyleSheet("background: transparent;")
+            self._area.setWidget(rows_host)
+            layout.addWidget(self._area)
+        else:
+            layout.addWidget(rows_host)
+
+        self.adder = QLineEdit()
+        self.adder.setPlaceholderText("Добавить подпункт — Enter")
+        self.adder.setFont(theme.ui_font(10))
+        self.adder.returnPressed.connect(self._add)
+        layout.addWidget(self.adder)
+
+        self.reload()
+
+    # --- Данные ---------------------------------------------------------------
+
+    def set_task(self, task_id) -> None:
+        self.task_id = task_id
+        self._pending = []
+        self.reload()
+
+    def items(self) -> list:
+        """Текущие подпункты: из базы либо ещё не сохранённые."""
+        if self.task_id is None:
+            from ..models import Subtask
+
+            return [
+                Subtask(id=-index - 1, title=title, position=index)
+                for index, title in enumerate(self._pending)
+            ]
+        return self.storage.list_subtasks(self.task_id)
+
+    def flush(self, task_id: int) -> None:
+        """Переносит накопленные подпункты в только что созданную задачу."""
+        for title in self._pending:
+            self.storage.add_subtask(task_id, title)
+        self._pending = []
+        self.task_id = task_id
+        self.reload()
+
+    def reload(self) -> None:
+        while self.rows_box.count():
+            item = self.rows_box.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+
+        items = self.items()
+        done = sum(1 for item in items if item.done)
+        self.progress.setText("%d из %d" % (done, len(items)) if items else "")
+
+        for subtask in items:
+            row = SubtaskRow(subtask, self.colors, self.compact)
+            row.toggled.connect(self._toggle)
+            row.renamed.connect(self._rename)
+            row.removed.connect(self._remove)
+            row.moved.connect(self._move)
+            self.rows_box.addWidget(row)
+        self._fit_area(len(items))
+
+    def _fit_area(self, count: int) -> None:
+        """Подгоняет высоту области под число строк, но не выше предела.
+
+        Без явной высоты раскладка сжимает список до двух строк, а с фиксированной
+        у короткого чек-листа оставалась бы пустота.
+        """
+        if self._area is None:
+            return
+        row_height = 26
+        first = self.rows_box.itemAt(0)
+        if first is not None and first.widget() is not None:
+            row_height = max(row_height, first.widget().sizeHint().height())
+        spacing = self.rows_box.spacing()
+        wanted = count * row_height + max(0, count - 1) * spacing + 4
+        self._area.setFixedHeight(max(28, min(self._scroll_height, wanted)))
+
+    # --- Действия -------------------------------------------------------------
+
+    def _add(self) -> None:
+        title = self.adder.text().strip()
+        if not title:
+            return
+        if self.task_id is None:
+            self._pending.append(title)
+        else:
+            self.storage.add_subtask(self.task_id, title)
+        self.adder.clear()
+        self.reload()
+        self.changed.emit()
+
+    def _toggle(self, subtask_id: int, done: bool) -> None:
+        if self.task_id is None:
+            return  # у несохранённой задачи отмечать ещё нечего
+        self.storage.set_subtask_done(subtask_id, done)
+        self.reload()
+        self.changed.emit()
+
+    def _rename(self, subtask_id: int, title: str) -> None:
+        if self.task_id is None:
+            index = -subtask_id - 1
+            if 0 <= index < len(self._pending):
+                self._pending[index] = title
+        else:
+            self.storage.rename_subtask(subtask_id, title)
+        self.changed.emit()
+
+    def _remove(self, subtask_id: int) -> None:
+        if self.task_id is None:
+            index = -subtask_id - 1
+            if 0 <= index < len(self._pending):
+                self._pending.pop(index)
+        else:
+            self.storage.delete_subtask(subtask_id)
+        self.reload()
+        self.changed.emit()
+
+    def _move(self, subtask_id: int, step: int) -> None:
+        if self.task_id is None:
+            index = -subtask_id - 1
+            target = index + step
+            if 0 <= index < len(self._pending) and 0 <= target < len(self._pending):
+                self._pending[index], self._pending[target] = (
+                    self._pending[target],
+                    self._pending[index],
+                )
+        else:
+            self.storage.move_subtask(subtask_id, step)
+        self.reload()
+        self.changed.emit()
 
 
 class NavItem(QFrame):
@@ -979,7 +1248,7 @@ class DayIndicator(QWidget):
             self.caption.setText("отмечено %d из %d" % (done, max(total, done)))
             color = self.colors["text_dim"]
         else:
-            self.caption.setText("сегодня пока пусто")
+            self.caption.setText("пока пусто")
             color = self.colors["text_faint"]
         self.caption.setStyleSheet("color: %s; background: transparent;" % color)
 

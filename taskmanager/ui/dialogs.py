@@ -43,7 +43,7 @@ from ..models import (
 from ..reports import fmt_date_long
 from ..storage import Storage
 from . import theme
-from .widgets import CheckCircle, ProductPill, hline, section_label
+from .widgets import CheckCircle, ProductPill, SubtaskList, hline, section_label
 
 
 def _button(text: str, kind: str = "") -> QPushButton:
@@ -241,6 +241,14 @@ class TaskDialog(QDialog):
         self.notes_edit.setPlaceholderText("Детали, ссылки, договорённости")
         self.notes_edit.setFixedHeight(96)
         layout.addWidget(self.notes_edit)
+
+        self.subtasks = SubtaskList(
+            self.storage,
+            theme.palette(self.settings.get("theme", "dark")),
+            None if self.is_new else self.task.id,
+            scroll_height=190,
+        )
+        layout.addWidget(self.subtasks)
 
         self.history_label = section_label("история работы")
         layout.addWidget(self.history_label)
@@ -490,6 +498,8 @@ class TaskDialog(QDialog):
             return
         if self.is_new or task.id is None:
             self.task = self.storage.add_task(task)
+            # Подпункты, набранные до сохранения, переносим в созданную задачу.
+            self.subtasks.flush(self.task.id)
         else:
             self.storage.update_task(task)
         self.accept()

@@ -159,7 +159,11 @@ def collect_week(storage: Storage, start: date, end: date) -> dict:
         if task.needs_jira() and all(t.id != task.id for t in jira_todo):
             jira_todo.append(task)
 
+    # Прогресс по подпунктам — чтобы в отчёте было видно, насколько задача разобрана.
+    subtasks = {task.id: storage.subtask_progress(task.id) for task in touched}
+
     return {
+        "subtasks": subtasks,
         "start": start,
         "end": end,
         "per_day": per_day,
@@ -281,6 +285,9 @@ def _render_tasks_body(data: dict, with_jira: bool = True) -> list[str]:
         lines.append("### %s%s" % (task.title, key))
 
         meta = ["дней в работе: %d" % len({log.log_date for log in task_logs})]
+        done, total = data.get("subtasks", {}).get(task.id, (0, 0))
+        if total:
+            meta.append("подпункты: %d из %d" % (done, total))
         if task.product:
             meta.append("продукт: %s" % task.product)
         meta.append("приоритет: %s" % PRIORITY_LABELS.get(task.priority, "обычный"))

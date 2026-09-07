@@ -470,6 +470,26 @@ QPushButton[flat="true"][active="true"] {
     font-weight: 600;
 }
 QPushButton[danger="true"] { color: %(danger)s; }
+/* Крошечные кнопки у подпунктов: только знак, без рамки. */
+QPushButton[tiny="true"] {
+    background: transparent;
+    border: none;
+    color: %(text_faint)s;
+    padding: 0 4px;
+    min-width: 16px;
+}
+QPushButton[tiny="true"]:hover { color: %(text)s; background: %(surface_alt)s; }
+
+/* Поле, которое выглядит как текст: правка названия подпункта на месте. */
+QLineEdit[seamless="true"] {
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid transparent;
+    border-radius: 0;
+    padding: 1px 0;
+}
+QLineEdit[seamless="true"]:hover { border-bottom: 1px solid %(border)s; }
+QLineEdit[seamless="true"]:focus { border-bottom: 1px solid %(accent)s; }
 
 /* --- Боковые фильтры --- */
 QPushButton[nav="true"] {

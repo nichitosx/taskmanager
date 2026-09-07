@@ -153,6 +153,31 @@ class Task:
 
 
 @dataclass
+class Subtask:
+    """Подпункт задачи: маленький шаг внутри большой работы."""
+
+    id: Optional[int] = None
+    task_id: Optional[int] = None
+    title: str = ""
+    done: bool = False
+    position: int = 0
+    created_at: Optional[datetime] = None
+    done_at: Optional[datetime] = None
+
+    @classmethod
+    def from_row(cls, row) -> "Subtask":
+        return cls(
+            id=row["id"],
+            task_id=row["task_id"],
+            title=row["title"] or "",
+            done=bool(row["done"]),
+            position=row["position"] or 0,
+            created_at=_parse_dt(row["created_at"]),
+            done_at=_parse_dt(row["done_at"]),
+        )
+
+
+@dataclass
 class WorkLog:
     """Отметка о работе по задаче за конкретный день."""
 

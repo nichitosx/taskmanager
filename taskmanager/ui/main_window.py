@@ -72,6 +72,7 @@ from .widgets import (
     Card,
     DayIndicator,
     HintTrigger,
+    SubtaskList,
     elide_text,
     headline,
     JiraIssueRow,
@@ -165,11 +166,23 @@ class TaskDetail(QWidget):
         hint_layout.addStretch(1)
         layout.addWidget(self.placeholder, 1)
 
+        # Содержимое панели прокручивается целиком: у задачи может быть длинный
+        # чек-лист, и раньше он выдавливал историю работы.
+        self.body_scroll = QScrollArea()
+        self.body_scroll.setWidgetResizable(True)
+        self.body_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.body_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.body_scroll.setStyleSheet("background: transparent;")
+        layout.addWidget(self.body_scroll, 1)
+
         self.body = QWidget()
+        self.body.setStyleSheet("background: transparent;")
         body_layout = QVBoxLayout(self.body)
-        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setContentsMargins(0, 0, 10, 0)
         body_layout.setSpacing(10)
-        layout.addWidget(self.body, 1)
+        self.body_scroll.setWidget(self.body)
 
         self.title = QLabel()
         self.title.setWordWrap(True)
@@ -191,10 +204,21 @@ class TaskDetail(QWidget):
         self.notes.focusOutEvent = self._notes_focus_out  # type: ignore[assignment]
         body_layout.addWidget(self.notes)
 
+        self.subtasks = SubtaskList(
+            self.storage,
+            theme.palette(self.settings.get("theme", "dark")),
+            compact=True,
+        )
+        self.subtasks.changed.connect(self._subtasks_changed)
+        body_layout.addWidget(self.subtasks)
+
         body_layout.addWidget(section_label("история работы"))
         self.history = QListWidget()
         self.history.setFont(theme.mono_font(9))
-        body_layout.addWidget(self.history, 1)
+        self.history.setFixedHeight(120)
+        self.history.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.history.setTextElideMode(Qt.TextElideMode.ElideRight)
+        body_layout.addWidget(self.history)
 
         buttons = QVBoxLayout()
         buttons.setSpacing(6)
@@ -222,19 +246,20 @@ class TaskDetail(QWidget):
         row2.addStretch(1)
         buttons.addLayout(row2)
         body_layout.addLayout(buttons)
+        body_layout.addStretch(1)
 
-        self.body.hide()
+        self.body_scroll.hide()
 
     # --- Отображение ----------------------------------------------------------
 
     def show_task(self, task: Task | None) -> None:
         self.task = task
         if task is None:
-            self.body.hide()
+            self.body_scroll.hide()
             self.placeholder.show()
             return
         self.placeholder.hide()
-        self.body.show()
+        self.body_scroll.show()
 
         self.title.setText(task.title)
         parts = [PRIORITY_LABELS.get(task.priority, "обычный")]
@@ -258,10 +283,12 @@ class TaskDetail(QWidget):
         self.notes.setPlainText(task.notes)
         self.notes.blockSignals(False)
 
+        self.subtasks.set_task(task.id)
+
         self.history.clear()
         logs = self.storage.logs_for_task(task.id)
         if not logs:
-            self.history.addItem("Отметок пока нет — нажмите «Отметить работу»")
+            self.history.addItem("Отметок пока нет")
         for log in logs:
             self.history.addItem(
                 "%s  %s" % (log.log_date.strftime("%d.%m"), log.comment or "работа по задаче")
@@ -271,6 +298,11 @@ class TaskDetail(QWidget):
         self.jira_button.setVisible(jira_on)
         self.jira_button.setEnabled(bool(task.jira_key))
         self.no_jira_button.setVisible(jira_on and task.jira_state != JIRA_NOT_NEEDED)
+
+    def _subtasks_changed(self) -> None:
+        """Отметили подпункт — обновляем счётчик в списке слева."""
+        if self.owner is not None:
+            self.owner.refresh(keep_selection=True)
 
     # --- Действия -------------------------------------------------------------
 
@@ -443,8 +475,11 @@ class MainWindow(QMainWindow):
 
         self.detail = TaskDetail(self.storage, self.settings, self)
         self.detail.setObjectName("detailPanel")
+        # Пиксельный шрифт шире, поэтому панели деталей нужно больше места.
+        detail_width = 430 if theme.is_pixel() else 360
+        self.detail.setMinimumWidth(detail_width)
         splitter.addWidget(self.detail)
-        splitter.setSizes([700, 380])
+        splitter.setSizes([700, detail_width])
         splitter.setCollapsible(0, False)
 
     def _demo_bar(self) -> QWidget:
@@ -909,6 +944,7 @@ class MainWindow(QMainWindow):
         catalog = products_module.load(self.settings)
 
         show_jira = bool(self.settings.get("jira.enabled", True))
+        progress = self.storage.subtask_progress_map()
         # Плановые задачи идут в конце списка, за чертой: работать по ним ещё рано.
         current = [t for t in tasks if not t.is_planned]
         upcoming = [t for t in tasks if t.is_planned]
@@ -917,7 +953,9 @@ class MainWindow(QMainWindow):
 
         for task in ordered:
             color = products_module.color_for(catalog, task.product, self.colors["info"])
-            row = TaskRow(task, self.colors, stale_days, color, show_jira)
+            row = TaskRow(
+                task, self.colors, stale_days, color, show_jira, progress.get(task.id, (0, 0))
+            )
             row.toggled.connect(self._toggle_task)
             row.activated.connect(self.open_task)
             row.clicked.connect(self._select_task)
