@@ -33,6 +33,7 @@ from ..reports import (
     GROUPING_BY_DAYS,
     GROUPING_BY_TASKS,
     GROUPING_LABELS,
+    GROUPING_TABLE,
     all_weeks_filename,
     collect_week,
     export_markdown,
@@ -40,6 +41,7 @@ from ..reports import (
     render_all_weeks,
     render_daily,
     render_weekly,
+    to_plain,
     week_bounds,
     weekly_filename,
 )
@@ -75,6 +77,9 @@ class WeeklyReportDialog(QDialog):
         self.start = start
         self.end = start + timedelta(days=6)
         self.jira_enabled = bool(settings.get("jira.enabled", True))
+        self.jira_base = settings.get("jira.base_url", "") if self.jira_enabled else ""
+        self.content = ""
+        self.editing = False
         self.grouping = settings.get("weekly.grouping", GROUPING_BY_DAYS)
         if self.grouping not in GROUPING_LABELS:
             self.grouping = GROUPING_BY_DAYS
@@ -118,8 +123,13 @@ class WeeklyReportDialog(QDialog):
         head_row.addStretch(1)
         head_row.addWidget(section_label("разрез"))
         self.grouping_buttons: dict[str, QPushButton] = {}
-        for key in (GROUPING_BY_DAYS, GROUPING_BY_TASKS):
+        for key in (GROUPING_BY_DAYS, GROUPING_BY_TASKS, GROUPING_TABLE):
             button = _button(GROUPING_LABELS[key].capitalize(), "nav")
+            button.setToolTip(
+                "Таблица «задача — что сделано», её удобно вставлять в Confluence"
+                if key == GROUPING_TABLE
+                else ""
+            )
             button.clicked.connect(lambda _=False, k=key: self.set_grouping(k))
             self.grouping_buttons[key] = button
             head_row.addWidget(button)
@@ -128,9 +138,20 @@ class WeeklyReportDialog(QDialog):
         self.text_edit = QPlainTextEdit()
         self.text_edit.setFont(theme.mono_font(9))
         left_layout.addWidget(self.text_edit, 1)
+
+        bottom_row = QHBoxLayout()
+        bottom_row.setSpacing(8)
         regenerate = _button("Пересобрать из данных", "flat")
         regenerate.clicked.connect(lambda: self.refresh(regenerate=True))
-        left_layout.addWidget(regenerate, 0, Qt.AlignmentFlag.AlignLeft)
+        bottom_row.addWidget(regenerate)
+        self.edit_button = _button("Править текст", "flat")
+        self.edit_button.setToolTip(
+            "Показать разметку и разрешить правку. Копируется отчёт всегда с разметкой."
+        )
+        self.edit_button.clicked.connect(self._toggle_edit)
+        bottom_row.addWidget(self.edit_button)
+        bottom_row.addStretch(1)
+        left_layout.addLayout(bottom_row)
         splitter.addWidget(left)
 
         right = QWidget()
@@ -222,6 +243,26 @@ class WeeklyReportDialog(QDialog):
         self.refresh(regenerate=True)
         self.status.setText("Отчёт пересобран %s" % GROUPING_LABELS[grouping])
 
+    def _render_view(self) -> None:
+        """Показывает отчёт: читаемым текстом или разметкой в режиме правки."""
+        self.text_edit.setPlainText(
+            self.content if self.editing else to_plain(self.content)
+        )
+        self.text_edit.setReadOnly(not self.editing)
+        theme.apply_text_spacing(self.text_edit)
+        self.edit_button.setText("Готово" if self.editing else "Править текст")
+
+    def _toggle_edit(self) -> None:
+        if self.editing:
+            self.content = self.text_edit.toPlainText()
+        self.editing = not self.editing
+        self._render_view()
+        self.status.setText(
+            "Показана разметка — так отчёт попадёт в буфер и в Confluence."
+            if self.editing
+            else ""
+        )
+
     def _sync_grouping_buttons(self) -> None:
         for key, button in self.grouping_buttons.items():
             button.setProperty("active", "true" if key == self.grouping else "false")
@@ -235,16 +276,20 @@ class WeeklyReportDialog(QDialog):
         )
         stale_days = self.settings.get_int("stale_days", 5)
         saved = None if regenerate else self.storage.get_weekly_report(self.start)
-        text = saved or render_weekly(
+        # Разрез «таблицей» — представление, а не сохранённый текст: его всегда
+        # собираем заново, иначе показали бы вчерашний отчёт по дням.
+        if saved and self.grouping == GROUPING_TABLE:
+            saved = None
+        self.content = saved or render_weekly(
             self.storage,
             self.start,
             self.end,
             stale_days,
             self.grouping,
             with_jira=self.jira_enabled,
+            jira_base=self.jira_base,
         )
-        self.text_edit.setPlainText(text)
-        theme.apply_text_spacing(self.text_edit)
+        self._render_view()
         self._sync_grouping_buttons()
         self._sync_navigation()
         self._fill_jira_list()
@@ -355,9 +400,16 @@ class WeeklyReportDialog(QDialog):
     # --- Выгрузка -------------------------------------------------------------
 
     def _content(self) -> str:
-        return self.text_edit.toPlainText()
+        """Текст с разметкой — именно он копируется и публикуется."""
+        if self.editing:
+            self.content = self.text_edit.toPlainText()
+        return self.content
 
     def _save_and_close(self) -> None:
+        # Таблица — только представление, сохранять её вместо отчёта не нужно.
+        if self.grouping == GROUPING_TABLE:
+            self.accept()
+            return
         self.storage.save_weekly_report(self.start, self._content())
         self.storage.set_meta("last_weekly_report", self.start.isoformat())
         self.accept()
@@ -439,6 +491,7 @@ class HistoryDialog(QDialog):
         self.list.currentItemChanged.connect(self._show)
         splitter.addWidget(self.list)
 
+        self._markdown = ""
         self.view = QPlainTextEdit()
         self.view.setReadOnly(True)
         self.view.setFont(theme.mono_font(9))
@@ -448,7 +501,7 @@ class HistoryDialog(QDialog):
         buttons = QHBoxLayout()
         copy_button = _button("Скопировать")
         copy_button.clicked.connect(
-            lambda: QApplication.clipboard().setText(self.view.toPlainText())
+            lambda: QApplication.clipboard().setText(self._markdown)
         )
         buttons.addWidget(copy_button)
         all_weeks = _button("Выгрузить все недели")
@@ -496,9 +549,13 @@ class HistoryDialog(QDialog):
         if current is None:
             return
         value = current.data(Qt.ItemDataRole.UserRole)
+        jira_on = bool(self.settings.get("jira.enabled", True))
         if self.kind_box.currentData() == "daily":
             report = self.storage.get_daily_report(value)
-            self.view.setPlainText(render_daily(report, self.storage) if report else "")
+            self._markdown = (
+                render_daily(report, self.storage, with_jira=jira_on) if report else ""
+            )
+            self.view.setPlainText(to_plain(self._markdown))
             theme.apply_text_spacing(self.view)
         else:
             content = self.storage.get_weekly_report(value)
@@ -509,9 +566,11 @@ class HistoryDialog(QDialog):
                     value + timedelta(days=6),
                     self.settings.get_int("stale_days", 5),
                     self.settings.get("weekly.grouping", GROUPING_BY_DAYS),
-                    with_jira=bool(self.settings.get("jira.enabled", True)),
+                    with_jira=jira_on,
+                    jira_base=self.settings.get("jira.base_url", "") if jira_on else "",
                 )
-            self.view.setPlainText(content)
+            self._markdown = content
+            self.view.setPlainText(to_plain(content))
             theme.apply_text_spacing(self.view)
 
 
@@ -558,7 +617,7 @@ class AllWeeksDialog(QDialog):
         head_row.addStretch(1)
         head_row.addWidget(section_label("разрез"))
         self.grouping_buttons: dict[str, QPushButton] = {}
-        for key in (GROUPING_BY_TASKS, GROUPING_BY_DAYS):
+        for key in (GROUPING_BY_TASKS, GROUPING_BY_DAYS, GROUPING_TABLE):
             button = _button(GROUPING_LABELS[key].capitalize(), "nav")
             button.clicked.connect(lambda _=False, k=key: self.set_grouping(k))
             self.grouping_buttons[key] = button
@@ -612,11 +671,16 @@ class AllWeeksDialog(QDialog):
             )
         else:
             self.header.setText("Заполненных недель пока нет")
-        self.text_edit.setPlainText(
-            render_all_weeks(
-                self.storage, self.grouping, self.settings.get_int("stale_days", 5)
-            )
+        jira_on = bool(self.settings.get("jira.enabled", True))
+        self.content = render_all_weeks(
+            self.storage,
+            self.grouping,
+            self.settings.get_int("stale_days", 5),
+            with_jira=jira_on,
+            jira_base=self.settings.get("jira.base_url", "") if jira_on else "",
         )
+        self.text_edit.setPlainText(to_plain(self.content))
+        self.text_edit.setReadOnly(True)
         theme.apply_text_spacing(self.text_edit)
         for key, button in self.grouping_buttons.items():
             button.setProperty("active", "true" if key == self.grouping else "false")
@@ -636,8 +700,8 @@ class AllWeeksDialog(QDialog):
     # --- Выгрузка -------------------------------------------------------------
 
     def _copy(self) -> None:
-        QApplication.clipboard().setText(self.text_edit.toPlainText())
-        self.status.setText("Выгрузка скопирована в буфер обмена")
+        QApplication.clipboard().setText(self.content)
+        self.status.setText("Выгрузка скопирована в буфер обмена — с разметкой")
 
     def _export_obsidian(self) -> None:
         vault = self.settings.get("obsidian.vault_path", "")
@@ -646,7 +710,7 @@ class AllWeeksDialog(QDialog):
             return
         target = Path(vault) / self.settings.get("obsidian.weekly_subdir", "")
         try:
-            path = export_markdown(self.text_edit.toPlainText(), target, self._filename())
+            path = export_markdown(self.content, target, self._filename())
         except OSError as exc:
             QMessageBox.warning(self, "Obsidian", "Не удалось записать файл:\n%s" % exc)
             return
@@ -661,7 +725,7 @@ class AllWeeksDialog(QDialog):
         if not path:
             return
         try:
-            Path(path).write_text(self.text_edit.toPlainText(), encoding="utf-8")
+            Path(path).write_text(self.content, encoding="utf-8")
         except OSError as exc:
             QMessageBox.warning(self, "Сохранение", "Не удалось записать файл:\n%s" % exc)
             return

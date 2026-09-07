@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional
@@ -60,8 +61,8 @@ def previous_week_bounds(any_day: Optional[date] = None) -> tuple[date, date]:
 # --- Ежедневный отчёт ---------------------------------------------------------
 
 
-def render_daily(report: DailyReport, storage: Storage) -> str:
-    """Markdown-текст отчёта за день."""
+def render_daily(report: DailyReport, storage: Storage, with_jira: bool = True) -> str:
+    """Markdown-текст отчёта за день. ``with_jira`` добавляет ключи задач."""
     lines: list[str] = []
     lines.append("# Отчёт за %s" % fmt_date_long(report.log_date))
     lines.append("")
@@ -82,7 +83,7 @@ def render_daily(report: DailyReport, storage: Storage) -> str:
             title = task.title if task else (logs[0].task_title or "Задача удалена")
             key = task.jira_key if task and task.jira_key else logs[0].task_jira_key
             head = "- **%s**" % title
-            if key:
+            if key and with_jira:
                 head += " (`%s`)" % key
             lines.append(head)
             for log in logs:
@@ -106,7 +107,7 @@ def render_daily(report: DailyReport, storage: Storage) -> str:
     if done_today:
         lines.append("## Завершено сегодня")
         for task in done_today:
-            suffix = " (`%s`)" % task.jira_key if task.jira_key else ""
+            suffix = " (`%s`)" % task.jira_key if (task.jira_key and with_jira) else ""
             lines.append("- %s%s" % (task.title, suffix))
         lines.append("")
 
@@ -172,10 +173,12 @@ def collect_week(storage: Storage, start: date, end: date) -> dict:
 
 GROUPING_BY_DAYS = "days"
 GROUPING_BY_TASKS = "tasks"
+GROUPING_TABLE = "table"
 
 GROUPING_LABELS = {
     GROUPING_BY_DAYS: "по дням",
     GROUPING_BY_TASKS: "по задачам",
+    GROUPING_TABLE: "таблицей",
 }
 
 
@@ -190,7 +193,46 @@ def _empty_workdays(data: dict) -> list[date]:
     return days
 
 
-def _render_days_body(data: dict) -> list[str]:
+def task_week_summary(data: dict, task) -> str:
+    """Одной строкой: что сделано по задаче за неделю."""
+    comments = []
+    for log in data["logs"]:
+        if log.task_id != task.id:
+            continue
+        comment = log.comment.strip()
+        if comment and comment not in comments:
+            comments.append(comment)
+    return "; ".join(comments) if comments else "работа по задаче"
+
+
+def render_week_table(data: dict, jira_base: str = "", with_jira: bool = True) -> list[str]:
+    """Таблица «задача — что сделано» для вставки в Confluence."""
+    lines = [
+        "| Задача | Что сделано за неделю |",
+        "|---|---|",
+    ]
+    if not data["touched"]:
+        lines.append("| — | за неделю отметок не было |")
+        return lines + [""]
+
+    for task in data["touched"]:
+        if with_jira and task.jira_key:
+            base = (jira_base or "").strip().rstrip("/")
+            label = (
+                "[%s](%s/browse/%s)" % (task.jira_key, base, task.jira_key)
+                if base
+                else task.jira_key
+            )
+            title = "%s — %s" % (label, task.title)
+        else:
+            title = task.title
+        summary = task_week_summary(data, task).replace("|", "/")
+        lines.append("| %s | %s |" % (title, summary))
+    lines.append("")
+    return lines
+
+
+def _render_days_body(data: dict, with_jira: bool = True) -> list[str]:
     """Хроника недели: что происходило в каждый день."""
     lines = ["## Как прошла неделя"]
     day = data["start"]
@@ -206,7 +248,7 @@ def _render_days_body(data: dict) -> list[str]:
             lines.append(note)
         for log in day_logs:
             title = log.task_title or "Без задачи"
-            key = " (`%s`)" % log.task_jira_key if log.task_jira_key else ""
+            key = " (`%s`)" % log.task_jira_key if (log.task_jira_key and with_jira) else ""
             comment = log.comment.strip()
             if log.task_id is None:
                 lines.append("- %s" % (comment or "—"))
@@ -218,7 +260,7 @@ def _render_days_body(data: dict) -> list[str]:
     if data["touched"]:
         lines.append("## Задачи, по которым была работа")
         for task in data["touched"]:
-            key = " `%s`" % task.jira_key if task.jira_key else ""
+            key = " `%s`" % task.jira_key if (task.jira_key and with_jira) else ""
             status = " · завершена" if task.status == STATUS_DONE else ""
             days = len({log.log_date for log in data["logs"] if log.task_id == task.id})
             lines.append(
@@ -228,13 +270,13 @@ def _render_days_body(data: dict) -> list[str]:
     return lines
 
 
-def _render_tasks_body(data: dict) -> list[str]:
+def _render_tasks_body(data: dict, with_jira: bool = True) -> list[str]:
     """Разрез по задачам: что сделано по каждой за неделю."""
     lines = ["## Работа по задачам"]
 
     for task in data["touched"]:
         task_logs = [log for log in data["logs"] if log.task_id == task.id]
-        key = " (`%s`)" % task.jira_key if task.jira_key else ""
+        key = " (`%s`)" % task.jira_key if (task.jira_key and with_jira) else ""
         lines.append("")
         lines.append("### %s%s" % (task.title, key))
 
@@ -286,6 +328,7 @@ def render_weekly(
     stale_days: int = 5,
     grouping: str = GROUPING_BY_DAYS,
     with_jira: bool = True,
+    jira_base: str = "",
 ) -> str:
     """Markdown-текст отчёта за неделю.
 
@@ -305,15 +348,19 @@ def render_weekly(
     )
     lines.append("")
 
+    if grouping == GROUPING_TABLE:
+        # Таблицу отдаём одну, без хвостов: её вставляют на страницу как есть.
+        lines.extend(render_week_table(data, jira_base, with_jira))
+        return "\n".join(lines).strip() + "\n"
     if grouping == GROUPING_BY_TASKS:
-        lines.extend(_render_tasks_body(data))
+        lines.extend(_render_tasks_body(data, with_jira))
     else:
-        lines.extend(_render_days_body(data))
+        lines.extend(_render_days_body(data, with_jira))
 
     if data["completed"]:
         lines.append("## Завершено за неделю")
         for task in data["completed"]:
-            key = " `%s`" % task.jira_key if task.jira_key else ""
+            key = " `%s`" % task.jira_key if (task.jira_key and with_jira) else ""
             lines.append("- %s%s" % (task.title, key))
         lines.append("")
 
@@ -415,6 +462,8 @@ def render_all_weeks(
     storage: Storage,
     grouping: str = GROUPING_BY_TASKS,
     stale_days: int = 5,
+    with_jira: bool = True,
+    jira_base: str = "",
 ) -> str:
     """Одна выгрузка по всем неделям, за которые что-то заполнено.
 
@@ -437,12 +486,56 @@ def render_all_weeks(
         week_end = week_start + timedelta(days=6)
         data = collect_week(storage, week_start, week_end)
         lines.append("### Неделя %s — %s" % (fmt_date(week_start), fmt_date(week_end)))
+        if grouping == GROUPING_TABLE:
+            lines.extend(render_week_table(data, jira_base, with_jira))
+            continue
         body = (
-            _render_tasks_body(data)
+            _render_tasks_body(data, with_jira)
             if grouping == GROUPING_BY_TASKS
-            else _render_days_body(data)
+            else _render_days_body(data, with_jira)
         )
         lines.extend(_shift_headings(_shift_headings(body)))
+
+    return "\n".join(lines).strip() + "\n"
+
+
+# --- Человекочитаемый вид -----------------------------------------------------
+
+
+def _strip_inline(text: str) -> str:
+    """Убирает из строки жирный шрифт, код и ссылки, оставляя сам текст."""
+    text = re.sub(r"\[(.+?)\]\((.+?)\)", r"\1", text)
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    text = re.sub(r"__(.+?)__", r"\1", text)
+    text = re.sub(r"`(.+?)`", r"\1", text)
+    return re.sub(r"(?<!\w)_(.+?)_(?!\w)", r"\1", text)
+
+
+def to_plain(markdown: str) -> str:
+    """Убирает разметку: то же самое, но без решёток, звёздочек и ссылок.
+
+    На экране отчёт удобнее читать без служебных символов, а копируется он
+    по-прежнему с разметкой — её ждут и Obsidian, и Confluence.
+    """
+    lines: list[str] = []
+    for raw in markdown.splitlines():
+        line = raw.rstrip()
+
+        if re.fullmatch(r"\s*\|[\s|:-]+\|\s*", line):
+            continue  # разделительная строка таблицы
+        if line.strip().startswith("|"):
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            line = "  —  ".join(cell for cell in cells if cell)
+
+        heading = re.match(r"^(#{1,6})\s+(.*)$", line)
+        if heading:
+            title = _strip_inline(heading.group(2))
+            lines.append(title.upper() if len(heading.group(1)) <= 2 else title)
+            continue
+
+        line = re.sub(r"^(\s*)[-*]\s+\[[ xX]\]\s+", r"\1• ", line)
+        line = re.sub(r"^(\s*)[-*]\s+", r"\1• ", line)
+        lines.append(_strip_inline(line))
 
     return "\n".join(lines).strip() + "\n"
 

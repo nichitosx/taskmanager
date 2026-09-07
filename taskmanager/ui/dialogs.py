@@ -706,7 +706,7 @@ class DailyReportDialog(QDialog):
             )
             grid.addWidget(pill, row, 2, top)
 
-        if task.jira_key:
+        if task.jira_key and self.settings.get("jira.enabled", True):
             key = QLabel(task.jira_key)
             key.setFont(theme.mono_font(8))
             key.setStyleSheet("color: %s;" % c["info"])
@@ -742,7 +742,9 @@ class DailyReportDialog(QDialog):
         report = self.storage.get_daily_report(self.day)
         if report is None:
             return ""
-        return render_daily(report, self.storage)
+        return render_daily(
+            report, self.storage, with_jira=bool(self.settings.get("jira.enabled", True))
+        )
 
     def _copy(self) -> None:
         from PySide6.QtWidgets import QApplication

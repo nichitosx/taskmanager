@@ -56,26 +56,58 @@ class ConfluenceConfig:
 def markdown_to_storage(markdown: str) -> str:
     """Простая конвертация нашего Markdown в storage format Confluence.
 
-    Поддерживаются заголовки, списки, жирный шрифт, inline-код и ссылки —
-    всё, что реально встречается в генерируемых отчётах.
+    Поддерживаются заголовки, списки, таблицы, жирный шрифт, inline-код и
+    ссылки — всё, что реально встречается в генерируемых отчётах.
     """
     lines = markdown.splitlines()
     out: list[str] = []
     in_list = False
+    index = 0
 
     def inline(text: str) -> str:
         text = html.escape(text)
         text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
+        text = re.sub(r"(?<!\w)_(.+?)_(?!\w)", r"<em>\1</em>", text)
         text = re.sub(r"`(.+?)`", r"<code>\1</code>", text)
         text = re.sub(r"\[(.+?)\]\((.+?)\)", r'<a href="\2">\1</a>', text)
         return text
 
-    for raw in lines:
+    def is_separator(text: str) -> bool:
+        return bool(re.fullmatch(r"\s*\|[\s|:-]+\|\s*", text))
+
+    def cells(text: str) -> list[str]:
+        return [cell.strip() for cell in text.strip().strip("|").split("|")]
+
+    while index < len(lines):
+        raw = lines[index]
+        index += 1
         line = raw.rstrip()
         if not line.strip():
             if in_list:
                 out.append("</ul>")
                 in_list = False
+            continue
+
+        # --- Таблица: заголовок, разделитель и строки подряд -------------------
+        if line.strip().startswith("|"):
+            if in_list:
+                out.append("</ul>")
+                in_list = False
+            block = [line]
+            while index < len(lines) and lines[index].strip().startswith("|"):
+                block.append(lines[index].rstrip())
+                index += 1
+
+            rows = [row for row in block if not is_separator(row)]
+            has_header = len(block) > 1 and is_separator(block[1])
+            out.append('<table><tbody>')
+            for number, row in enumerate(rows):
+                tag = "th" if (has_header and number == 0) else "td"
+                columns = "".join(
+                    "<%s>%s</%s>" % (tag, inline(cell), tag) for cell in cells(row)
+                )
+                out.append("<tr>%s</tr>" % columns)
+            out.append("</tbody></table>")
             continue
         heading = re.match(r"^(#{1,6})\s+(.*)$", line)
         if heading:
@@ -90,7 +122,10 @@ def markdown_to_storage(markdown: str) -> str:
             if not in_list:
                 out.append("<ul>")
                 in_list = True
-            out.append("<li>%s</li>" % inline(bullet.group(1)))
+            # «- [ ] задача» — обычный пункт списка: квадратные скобки в
+            # Confluence выглядели бы мусором.
+            item = re.sub(r"^\[[ xX]\]\s+", "", bullet.group(1))
+            out.append("<li>%s</li>" % inline(item))
             continue
         if in_list:
             out.append("</ul>")
