@@ -261,6 +261,19 @@ class CheckCircle(QAbstractButton):
 
     fill = Property(float, _get_fill, _set_fill)
 
+    def set_checked_silently(self, checked: bool) -> None:
+        """Меняет отметку без сигнала и без анимации — для отката действия."""
+        # Анимацию от прошлого клика обязательно останавливаем: иначе она
+        # доиграет и снова закрасит кружок, который мы только что сбросили.
+        if self._animation is not None:
+            self._animation.stop()
+            self._animation = None
+        self.blockSignals(True)
+        self.setChecked(checked)
+        self.blockSignals(False)
+        self._fill = 1.0 if checked else 0.0
+        self.update()
+
     def _animate(self, checked: bool) -> None:
         animation = QPropertyAnimation(self, b"fill", self)
         animation.setDuration(self.ANIMATION_MS)

@@ -1214,8 +1214,10 @@ class MainWindow(QMainWindow):
         yes = box.addButton("Выполнена", QMessageBox.ButtonRole.AcceptRole)
         box.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
         box.setDefaultButton(yes)
-        box.setCheckBox(QCheckBox("Больше не спрашивать"))
-        box.setProperty("acceptButton", id(yes))
+        # Ссылку на галочку держим сами: без неё PySide отдаёт из checkBox()
+        # безымянный QObject, у которого уже нет isChecked().
+        box.skip_checkbox = QCheckBox("Больше не спрашивать")
+        box.setCheckBox(box.skip_checkbox)
         return box
 
     def _confirm_done(self, task: Task) -> bool:
@@ -1224,20 +1226,22 @@ class MainWindow(QMainWindow):
             return True
         box = self.done_dialog(task)
         box.exec()
-        if box.checkBox().isChecked():
+        if box.skip_checkbox.isChecked():
             self.settings.set("confirm_done", False)
             self.settings.save()
-        return id(box.clickedButton()) == box.property("acceptButton")
+        # Сравниваем по роли кнопки, а не по объекту: обёртки Qt для одной и той
+        # же кнопки могут не совпадать. Закрытие крестиком — тоже отказ.
+        clicked = box.clickedButton()
+        return (
+            clicked is not None
+            and box.buttonRole(clicked) == QMessageBox.ButtonRole.AcceptRole
+        )
 
     def _reset_check(self, task_id: int) -> None:
         """Возвращает отметку в списке обратно, если выполнение не подтвердили."""
         row = self.rows.get(task_id)
-        if row is None:
-            return
-        row.check.blockSignals(True)
-        row.check.setChecked(False)
-        row.check.blockSignals(False)
-        row.check.update()
+        if row is not None:
+            row.check.set_checked_silently(False)
 
     def _spawn_next_occurrence(self, task: Task) -> None:
         """Для повторяющейся задачи заводит следующий раз с новыми датами."""
