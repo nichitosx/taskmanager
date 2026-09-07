@@ -11,6 +11,9 @@ portable.flag
 *.ico
 *.lnk
 
+# Собранные архивы
+dist/
+
 # Служебное
 .idea/
 .vscode/

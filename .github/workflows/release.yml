@@ -1,0 +1,48 @@
+# Собирает ZIP и прикладывает его к релизу — чтобы архив можно было просто
+# скачать со страницы Releases, не собирая ничего вручную.
+#
+# Как выпустить новую версию:
+#     git tag v1.0
+#     git push origin v1.0
+#
+# Через минуту архив появится в Releases. Кнопка «Run workflow» на вкладке
+# Actions собирает архив без релиза — он ляжет в артефакты сборки.
+
+name: Сборка архива
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Собрать архив
+        run: python build_zip.py
+
+      - name: Положить в артефакты сборки
+        uses: actions/upload-artifact@v4
+        with:
+          name: TaskManager
+          path: dist/*.zip
+
+      - name: Приложить к релизу
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.zip \
+            --title "TaskManager $GITHUB_REF_NAME" \
+            --notes "Распакуйте архив и запустите «Установить.cmd» — он поставит зависимости и создаст ярлык. Права администратора не нужны."
