@@ -53,6 +53,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Справочник продуктов: [{"name": ..., "keywords": [...], "color": "#..."}].
     "products": [],
     "products_autodetect": True,
+    # Состояние боковой панели.
+    "sidebar": {"products_open": True},
     # Экспорт отчётов в хранилище Obsidian.
     "obsidian": {
         "enabled": False,

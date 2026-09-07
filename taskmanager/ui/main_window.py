@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QFrame,
     QGraphicsOpacityEffect,
+    QScrollArea,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -60,7 +61,7 @@ from . import theme
 from .dialogs import DailyReportDialog, LogWorkDialog, TaskDialog, UpcomingTasksDialog
 from .reports_ui import HistoryDialog, WeeklyReportDialog
 from .settings_dialog import SettingsDialog
-from .widgets import JiraIssueRow, NavItem, TaskRow, hline, section_label
+from .widgets import Card, JiraIssueRow, NavItem, TaskRow, hline, section_label
 
 # Боковое меню делится на две части: «когда» — горизонты планирования,
 # «состояние» — то, что требует внимания независимо от сроков.
@@ -321,6 +322,7 @@ class MainWindow(QMainWindow):
 
     def _build(self) -> None:
         central = QWidget()
+        central.setObjectName("canvas")
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
@@ -330,6 +332,7 @@ class MainWindow(QMainWindow):
         root.addWidget(hline())
 
         body = QWidget()
+        body.setObjectName("bodyArea")
         body_layout = QHBoxLayout(body)
         body_layout.setContentsMargins(20, 16, 20, 16)
         body_layout.setSpacing(0)
@@ -341,6 +344,7 @@ class MainWindow(QMainWindow):
         body_layout.addWidget(splitter, 1)
 
         center = QWidget()
+        center.setObjectName("centerArea")
         center_layout = QVBoxLayout(center)
         center_layout.setContentsMargins(18, 0, 4, 0)
         center_layout.setSpacing(12)
@@ -350,9 +354,8 @@ class MainWindow(QMainWindow):
         center_layout.addWidget(self.demo_bar)
 
         self.quick_add = QLineEdit()
-        self.quick_add.setPlaceholderText(
-            "Новая задача — Enter, чтобы добавить.  !! срочно   @завтра   #тег   PROJ-142"
-        )
+        # Подсказки по синтаксису живут в шпаргалке слева, здесь только суть.
+        self.quick_add.setPlaceholderText("Новая задача — нажмите Enter, чтобы добавить")
         self.quick_add.setFont(theme.ui_font(11))
         self.quick_add.setMinimumHeight(42)
         self.quick_add.returnPressed.connect(self._quick_add)
@@ -385,6 +388,7 @@ class MainWindow(QMainWindow):
         center_layout.addWidget(self.empty_label)
 
         self.detail = TaskDetail(self.storage, self.settings, self)
+        self.detail.setObjectName("detailPanel")
         splitter.addWidget(self.detail)
         splitter.setSizes([700, 380])
         splitter.setCollapsible(0, False)
@@ -392,12 +396,9 @@ class MainWindow(QMainWindow):
     def _demo_bar(self) -> QWidget:
         """Полоса-подсказка про задачи-примеры с кнопкой «убрать»."""
         c = self.colors
-        bar = QFrame()
-        bar.setObjectName("demoBar")
-        bar.setStyleSheet(
-            "#demoBar { background: %s; border: 1px solid %s; border-radius: %dpx; }"
-            % (theme.tint(c["info"], 0.10), theme.tint(c["info"], 0.30), theme.radius("card"))
-        )
+        bar = Card(c)
+        bar.set_card_colors(c["surface_alt"], theme.tint(c["info"], 0.45), c["surface_alt"])
+        bar.set_bar(c["info"])
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(13, 8, 10, 8)
         layout.setSpacing(10)
@@ -426,6 +427,7 @@ class MainWindow(QMainWindow):
     def _header(self) -> QWidget:
         c = self.colors
         header = QWidget()
+        header.setObjectName("appHeader")
         layout = QHBoxLayout(header)
         layout.setContentsMargins(20, 14, 20, 10)
         layout.setSpacing(22)
@@ -472,6 +474,7 @@ class MainWindow(QMainWindow):
 
     def _sidebar(self) -> QWidget:
         panel = QWidget()
+        panel.setObjectName("sidebarPanel")
         panel.setFixedWidth(216)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 4, 0, 0)
@@ -496,16 +499,42 @@ class MainWindow(QMainWindow):
         for key, title in STATE_FILTERS:
             layout.addWidget(self._nav_item(key, title))
 
-        # Раздел продуктов появляется, только когда продукты заведены.
-        self.products_caption = section_label("продукты")
-        self.products_caption.hide()
+        # Продуктов может быть много, поэтому раздел сворачивается и прокручивается.
         layout.addSpacing(12)
-        layout.addWidget(self.products_caption)
+        self.products_header = QWidget()
+        self.products_header.setCursor(Qt.CursorShape.PointingHandCursor)
+        header_row = QHBoxLayout(self.products_header)
+        header_row.setContentsMargins(0, 0, 4, 0)
+        header_row.setSpacing(6)
+        self.products_caption = section_label("продукты")
+        header_row.addWidget(self.products_caption)
+        header_row.addStretch(1)
+        self.products_arrow = QLabel()
+        self.products_arrow.setFont(theme.mono_font(8))
+        self.products_arrow.setProperty("faint", "true")
+        header_row.addWidget(self.products_arrow)
+        self.products_header.mousePressEvent = (  # type: ignore[assignment]
+            lambda _event: self._toggle_products()
+        )
+        self.products_header.hide()
+        layout.addWidget(self.products_header)
+
+        self.products_scroll = QScrollArea()
+        self.products_scroll.setObjectName("productsScroll")
+        self.products_scroll.setWidgetResizable(True)
+        self.products_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.products_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.products_scroll.setMaximumHeight(190)
         self.products_box = QWidget()
+        self.products_box.setObjectName("productsBox")
         self.products_layout = QVBoxLayout(self.products_box)
         self.products_layout.setContentsMargins(0, 2, 0, 0)
         self.products_layout.setSpacing(3)
-        layout.addWidget(self.products_box)
+        self.products_scroll.setWidget(self.products_box)
+        self.products_scroll.hide()
+        layout.addWidget(self.products_scroll)
 
         layout.addStretch(1)
 
@@ -517,9 +546,11 @@ class MainWindow(QMainWindow):
         layout.addSpacing(2)
         hint = QLabel(
             "!!  срочно\n"
-            "@завтра  @пт  @кмес  срок\n"
+            "@завтра  срок\n"
+            "@кмес  конец месяца\n"
             ">15.10  начать позже\n"
-            "#тег  ·  PROJ-142"
+            "#тег  метка\n"
+            "PROJ-142  ключ jira"
         )
         hint.setWordWrap(True)
         hint.setFont(theme.mono_font(8))
@@ -530,13 +561,9 @@ class MainWindow(QMainWindow):
     def _plans_box(self) -> QWidget:
         """Минималистичное окошко: что и через сколько дней начнётся."""
         c = self.colors
-        box = QFrame()
-        box.setObjectName("plansBox")
+        box = Card(c)
         box.setCursor(Qt.CursorShape.PointingHandCursor)
-        box.setStyleSheet(
-            "#plansBox { background: %s; border: 1px solid %s; border-radius: %dpx; }"
-            % (c["surface"], c["border_soft"], theme.radius("card"))
-        )
+        box.setToolTip("Открыть список плановых задач")
         box.mousePressEvent = lambda _event: self.set_filter("planned")  # type: ignore[assignment]
 
         layout = QVBoxLayout(box)
@@ -568,6 +595,9 @@ class MainWindow(QMainWindow):
 
         for task in planned[:4]:
             line = QWidget()
+            # Без этого строка красится общим фоном окна и на подложке окошка
+            # получаются тёмные полосы.
+            line.setStyleSheet("background: transparent;")
             row = QHBoxLayout(line)
             row.setContentsMargins(0, 0, 0, 0)
             row.setSpacing(8)
@@ -593,6 +623,12 @@ class MainWindow(QMainWindow):
             more.setFont(theme.mono_font(8))
             more.setStyleSheet("color: %s; background: transparent;" % c["text_faint"])
             self.plans_lines.addWidget(more)
+
+    def _toggle_products(self) -> None:
+        opened = not bool(self.settings.get("sidebar.products_open", True))
+        self.settings.set("sidebar.products_open", opened)
+        self.settings.save()
+        self.refresh(keep_selection=True)
 
     def _nav_item(self, key: str, title: str, tooltip: str = "") -> NavItem:
         item = NavItem(title, self.colors, self.colors["accent"])
@@ -676,7 +712,7 @@ class MainWindow(QMainWindow):
             )
             row.take.connect(self._take_jira_issue)
             item = QListWidgetItem()
-            item.setSizeHint(QSize(0, row.sizeHint().height() + 4))
+            item.setSizeHint(QSize(0, self._row_height(row)))
             self.list.addItem(item)
             self.list.setItemWidget(item, row)
 
@@ -704,14 +740,19 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Задача %s добавлена к вам в список" % issue.key, 3000)
         self.refresh(keep_selection=False)
 
-    def _sync_products_nav(self) -> None:
-        """Пересобирает список продуктов в боковой панели."""
+    def _sync_products_nav(self, tasks: list[Task]) -> None:
+        """Пересобирает список продуктов: сначала те, где есть активные задачи."""
         catalog = products_module.load(self.settings)
         known = products_module.names(catalog)
         # Показываем и продукты из справочника, и те, что уже стоят у задач.
         for name in self.storage.products_in_use():
             if name not in known:
                 known.append(name)
+
+        counts = {}
+        for name in known:
+            counts[name] = sum(1 for t in tasks if t.product.lower() == name.lower())
+        known.sort(key=lambda name: (-counts[name], name.lower()))
 
         for key in [k for k in self.nav_items if k.startswith(PRODUCT_PREFIX)]:
             self.nav_items.pop(key).deleteLater()
@@ -720,14 +761,28 @@ class MainWindow(QMainWindow):
             if item.widget() is not None:
                 item.widget().deleteLater()
 
-        self.products_caption.setVisible(bool(known))
-        self.products_box.setVisible(bool(known))
+        opened = bool(self.settings.get("sidebar.products_open", True))
+        self.products_header.setVisible(bool(known))
+        self.products_scroll.setVisible(bool(known) and opened)
+        self.products_caption.setText(
+            "продукты · %d" % len(known) if len(known) > 6 else "продукты"
+        )
+        self.products_arrow.setText("▾" if opened else "▸")
+        if not known:
+            return
+
         for name in known:
             key = PRODUCT_PREFIX + name
             item = NavItem(name, self.colors, products_module.color_for(catalog, name))
+            item.setToolTip(name)
             item.clicked.connect(lambda k=key: self.set_filter(k))
             self.nav_items[key] = item
             self.products_layout.addWidget(item)
+        self.products_layout.addStretch(1)
+
+        # Список длинный — прокрутка; короткий — показываем целиком.
+        rows = min(len(known), 6)
+        self.products_scroll.setMaximumHeight(rows * 32 + 6)
 
     def _build_tray(self) -> None:
         self.tray = QSystemTrayIcon(self.windowIcon(), self)
@@ -815,7 +870,7 @@ class MainWindow(QMainWindow):
             row.activated.connect(self.open_task)
             row.clicked.connect(self._select_task)
             item = QListWidgetItem()
-            item.setSizeHint(QSize(0, row.sizeHint().height() + 4))
+            item.setSizeHint(QSize(0, self._row_height(row)))
             item.setData(Qt.ItemDataRole.UserRole, task.id)
             self.list.addItem(item)
             self.list.setItemWidget(item, row)
@@ -863,8 +918,8 @@ class MainWindow(QMainWindow):
             self.filter = "active"
         self.demo_bar.setVisible(bool(demo.remaining_ids(self.storage)))
 
-        self._sync_products_nav()
         active_tasks = self.storage.list_tasks(include_done=False)
+        self._sync_products_nav(active_tasks)
         self._sync_plans_box(active_tasks)
         if JIRA_PLAN in self.nav_items:
             self.nav_items[JIRA_PLAN].setVisible(self._jira_ready())
@@ -916,6 +971,25 @@ class MainWindow(QMainWindow):
         animation.finished.connect(lambda: self.list.setGraphicsEffect(None))
         animation.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
         self._list_animation = animation
+
+    def _row_height(self, row) -> int:
+        """Высота строки с учётом переноса меток на вторую строку."""
+        width = max(320, self.list.viewport().width() - 4)
+        height = row.heightForWidth(width) if row.hasHeightForWidth() else -1
+        if height <= 0:
+            height = row.sizeHint().height()
+        return height + 4
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        """При изменении ширины пересчитываем высоты строк — но не на каждый пиксель."""
+        super().resizeEvent(event)
+        timer = getattr(self, "_resize_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(lambda: self.refresh(keep_selection=True))
+            self._resize_timer = timer
+        timer.start(180)
 
     def _add_planned_separator(self, count: int) -> None:
         """Черта «плановые» между актуальными и будущими задачами."""

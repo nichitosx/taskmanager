@@ -73,8 +73,14 @@ STYLE_LABELS = {
 # Скругления по типам элементов для каждого стиля.
 RADII = {
     STYLE_SOFT: {"card": 10, "input": 8, "button": 8, "pill": 9, "small": 6, "nav": 7},
-    STYLE_PIXEL: {"card": 0, "input": 0, "button": 0, "pill": 0, "small": 0, "nav": 0},
+    # Пиксельный стиль: у полей и кнопок скругление крошечное (на глаз — фаска
+    # в пару пикселей), а карточки рисуются вручную «лесенкой», см. widgets.py.
+    STYLE_PIXEL: {"card": 6, "input": 3, "button": 3, "pill": 3, "small": 2, "nav": 3},
 }
+
+# Ступенчатое скругление карточек: радиус и высота одной «ступеньки».
+PIXEL_CORNER = 6
+PIXEL_STEP = 2
 
 _style = STYLE_SOFT
 
@@ -145,7 +151,13 @@ def ui_family() -> str:
 
 
 def mono_font(size: int = 9, bold: bool = False, spacing: float = 0.0) -> QFont:
-    font = QFont(mono_family(), size)
+    """Служебный текст: метки, даты, тексты отчётов.
+
+    В пиксельном стиле это тот же пиксельный шрифт, что и везде, только на
+    размер крупнее — у таких шрифтов маленькая высота строчных букв.
+    """
+    family = pixel_family() if is_pixel() else mono_family()
+    font = QFont(family, size)
     font.setBold(bold)
     if spacing:
         font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, spacing)
@@ -181,13 +193,36 @@ def accent_font(size: int = 9, bold: bool = False, spacing: float = 0.0) -> QFon
 
 def ui_font(size: int = 10, bold: bool = False) -> QFont:
     if is_pixel():
-        # Текст задач в пиксельном стиле — моноширинный, как в консоли.
-        font = QFont(mono_family(), max(size - 1, 8))
+        font = QFont(pixel_family(), size)
         font.setBold(bold)
         return font
     font = QFont(ui_family(), size)
     font.setBold(bold)
     return font
+
+
+def small_font_px() -> int:
+    """Размер шрифта мелких меток в пикселях (не в пунктах — не зависит от DPI)."""
+    return 12 if is_pixel() else 11
+
+
+def small_font() -> QFont:
+    font = QFont(accent_family() if is_pixel() else mono_family())
+    font.setPixelSize(small_font_px())
+    return font
+
+
+def small_font_css() -> str:
+    """Тот же шрифт, но для таблицы стилей самого виджета.
+
+    Общая таблица стилей задаёт шрифт всем QWidget и перебивает setFont, поэтому
+    у метки шрифт указывается прямо в её собственных стилях — иначе ширина,
+    посчитанная по метрикам, не совпадёт с нарисованным текстом.
+    """
+    return 'font-family: "%s"; font-size: %dpx;' % (
+        accent_family() if is_pixel() else mono_family(),
+        small_font_px(),
+    )
 
 
 def tint(color: str, alpha: float) -> str:
@@ -225,12 +260,27 @@ def check_icon() -> str:
     return str(path).replace("\\", "/")
 
 
+def pattern_image(theme: str) -> str:
+    """Плитка фонового узора для пиксельного стиля (создаётся один раз)."""
+    from ..appicon import write_pattern
+    from ..config import data_dir
+
+    colors = palette(theme)
+    path = data_dir() / ("pattern-%s.png" % theme)
+    try:
+        if not path.exists():
+            write_pattern(path, colors["bg"], colors["text"], 34 if theme == "dark" else 30)
+    except Exception:
+        return ""
+    return str(path).replace("\\", "/")
+
+
 def stylesheet(theme: str, style: str | None = None) -> str:
     if style is not None:
         set_style(style)
     c = palette(theme)
-    c["ui"] = mono_family() if is_pixel() else ui_family()
-    c["mono"] = mono_family()
+    c["ui"] = pixel_family() if is_pixel() else ui_family()
+    c["mono"] = pixel_family() if is_pixel() else mono_family()
     c["accent_family"] = accent_family()
     c["section_size"] = 11 if is_pixel() else 10
     c["section_spacing"] = 1.0 if is_pixel() else 1.5
@@ -238,7 +288,11 @@ def stylesheet(theme: str, style: str | None = None) -> str:
     c["r_button"] = radius("button")
     c["r_small"] = radius("small")
     c["r_nav"] = radius("nav")
-    c["font_size"] = 12 if is_pixel() else 13
+    c["font_size"] = 13
+    pattern = pattern_image(theme) if is_pixel() else ""
+    # Только сокращённая запись background замащивает картинку: с отдельным
+    # background-image Qt рисует плитку один раз в углу.
+    c["pattern_rule"] = ('url("%s") repeat' % pattern) if pattern else ""
     c["letter_spacing"] = "letter-spacing: 0.4px;" if is_pixel() else ""
     icon = check_icon()
     c["check_rule"] = ('image: url("%s");' % icon) if icon else ""
@@ -256,6 +310,21 @@ QWidget {
 QMainWindow, QDialog {
     background: %(bg)s;
 }
+
+/* Подписи не должны закрашивать собой фон — иначе поверх узора появляются
+   прямоугольные заплатки. */
+QLabel { background: transparent; }
+
+/* Холст с фоновым узором и прозрачные контейнеры поверх него. */
+/* Узор рисует каждая панель у себя: иначе непрозрачные контейнеры и
+   разделитель закрывают собой холст. */
+QWidget#canvas, QWidget#appHeader, QWidget#bodyArea, QWidget#centerArea,
+QWidget#sidebarPanel, QWidget#detailPanel, QSplitter {
+    background: %(bg)s %(pattern_rule)s;
+}
+QWidget#productsBox { background: transparent; }
+QScrollArea#productsScroll { background: transparent; border: none; }
+QScrollArea#productsScroll > QWidget > QWidget { background: transparent; }
 
 /* --- Полосы прокрутки: тонкие, без стрелок --- */
 QScrollBar:vertical {

@@ -7,16 +7,20 @@ from datetime import date
 from PySide6.QtCore import (
     QAbstractAnimation,
     QEasingCurve,
+    QPoint,
     QPropertyAnimation,
+    QRect,
     QRectF,
+    QSize,
     Property,
     Qt,
     Signal,
 )
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QAbstractButton,
     QFrame,
+    QLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -33,6 +37,169 @@ from ..models import (
     Task,
 )
 from . import theme
+
+
+class FlowLayout(QLayout):
+    """Ряд, который переносит не поместившиеся элементы на следующую строку.
+
+    Метки задачи (срок, приоритет, продукт, теги) в узком окне переставали
+    помещаться в одну строку и обрезались; теперь они просто переходят ниже.
+    """
+
+    def __init__(self, parent=None, spacing: int = 6) -> None:
+        super().__init__(parent)
+        self._items: list = []
+        self._spacing = spacing
+        self.setContentsMargins(0, 0, 0, 0)
+
+    # --- Обязательный минимум QLayout ----------------------------------------
+
+    def addItem(self, item) -> None:  # noqa: N802 (Qt naming)
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int):  # noqa: N802 (Qt naming)
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index: int):  # noqa: N802 (Qt naming)
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self):  # noqa: N802 (Qt naming)
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 (Qt naming)
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 (Qt naming)
+        return self._arrange(QRect(0, 0, width, 0), apply=False)
+
+    def setGeometry(self, rect: QRect) -> None:  # noqa: N802 (Qt naming)
+        super().setGeometry(rect)
+        self._arrange(rect, apply=True)
+
+    def sizeHint(self) -> QSize:  # noqa: N802 (Qt naming)
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:  # noqa: N802 (Qt naming)
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        return size
+
+    # --- Раскладка ------------------------------------------------------------
+
+    def _arrange(self, rect: QRect, apply: bool) -> int:
+        x, y, line_height = rect.x(), rect.y(), 0
+        for item in self._items:
+            hint = item.sizeHint()
+            next_x = x + hint.width() + self._spacing
+            if next_x - self._spacing > rect.right() and line_height > 0:
+                x = rect.x()
+                y = y + line_height + self._spacing
+                next_x = x + hint.width() + self._spacing
+                line_height = 0
+            if apply:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x = next_x
+            line_height = max(line_height, hint.height())
+        return y + line_height - rect.y()
+
+
+def pixel_corner_path(rect: QRectF, radius: int = 6, step: int = 2) -> QPainterPath:
+    """Прямоугольник со ступенчатыми углами — скругление в духе пиксель-арта.
+
+    Обычный border-radius даёт гладкую сглаженную дугу, которая в пиксельном
+    оформлении выглядит чужеродно. Здесь угол набирается из квадратных шагов.
+    """
+    path = QPainterPath()
+    left, top = rect.x(), rect.y()
+    right, bottom = rect.x() + rect.width(), rect.y() + rect.height()
+    steps = max(1, int(radius / step))
+    size = radius / steps
+
+    def staircase(x: float, y: float, dx: float, dy: float) -> None:
+        """Лесенка длиной radius: чередуем шаг по горизонтали и по вертикали."""
+        for index in range(steps):
+            path.lineTo(x + dx * size * (index + 1), y + dy * size * index)
+            path.lineTo(x + dx * size * (index + 1), y + dy * size * (index + 1))
+
+    path.moveTo(left + radius, top)
+    path.lineTo(right - radius, top)
+    staircase(right - radius, top, 1, 1)          # правый верхний
+    path.lineTo(right, bottom - radius)
+    staircase(right, bottom - radius, -1, 1)      # правый нижний
+    path.lineTo(left + radius, bottom)
+    staircase(left + radius, bottom, -1, -1)      # левый нижний
+    path.lineTo(left, top + radius)
+    staircase(left, top + radius, 1, -1)          # левый верхний
+    path.closeSubpath()
+    return path
+
+
+def card_path(rect: QRectF) -> QPainterPath:
+    """Контур карточки: гладкий в мягком стиле, ступенчатый в пиксельном."""
+    if theme.is_pixel():
+        return pixel_corner_path(rect, theme.PIXEL_CORNER, theme.PIXEL_STEP)
+    path = QPainterPath()
+    path.addRoundedRect(rect, theme.radius("card"), theme.radius("card"))
+    return path
+
+
+class Card(QFrame):
+    """Карточка, которая рисует себя сама.
+
+    Своя отрисовка нужна ради пиксельных углов, а заодно даёт единый вид
+    наведения и выделения без возни с таблицами стилей.
+    """
+
+    def __init__(self, colors: dict[str, str], parent=None) -> None:
+        super().__init__(parent)
+        self.colors = colors
+        self._bg = colors["surface"]
+        self._border = colors["border_soft"]
+        self._hover_bg = colors["surface_hover"]
+        self._bar = ""
+        self._hover = False
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+
+    def set_card_colors(self, bg: str = "", border: str = "", hover_bg: str = "") -> None:
+        self._bg = bg or self._bg
+        self._border = border or self._border
+        self._hover_bg = hover_bg or self._hover_bg
+        self.update()
+
+    def set_bar(self, color: str) -> None:
+        """Цветная полоска у левого края (приоритет задачи)."""
+        self._bar = color
+        self.update()
+
+    def enterEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        self._hover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        self._hover = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        painter = QPainter(self)
+        pixel = theme.is_pixel()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, not pixel)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path = card_path(rect)
+
+        painter.fillPath(path, QColor(self._hover_bg if self._hover else self._bg))
+        if self._bar:
+            painter.save()
+            painter.setClipPath(path)
+            painter.fillRect(QRectF(rect.x(), rect.y(), 3.0, rect.height()), QColor(self._bar))
+            painter.restore()
+        painter.strokePath(path, QPen(QColor(self._border), 1))
+        painter.end()
 
 
 def section_label(text: str) -> QLabel:
@@ -56,7 +223,8 @@ class CheckCircle(QAbstractButton):
     круга проступает бледная галочка, чтобы было понятно, что сюда можно нажать.
     """
 
-    SIZE = 20
+    # Крупный бледный круг спорил с текстом задачи, поэтому отметка компактная.
+    SIZE = 16
     ANIMATION_MS = 170
 
     def __init__(self, checked: bool, colors: dict[str, str], parent=None) -> None:
@@ -108,7 +276,9 @@ class CheckCircle(QAbstractButton):
         # В пиксельном стиле сглаживание выключено намеренно: ступеньки на краях
         # и есть та самая «пиксельность».
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, not pixel)
-        box = QRectF(1.5, 1.5, self.SIZE - 3, self.SIZE - 3)
+        # Рисуем в системе координат 16×16 — размер меняется одной константой.
+        painter.scale(self.SIZE / 16.0, self.SIZE / 16.0)
+        box = QRectF(1.4, 1.4, 13.2, 13.2)
 
         def draw_shape() -> None:
             if pixel:
@@ -117,18 +287,20 @@ class CheckCircle(QAbstractButton):
                 painter.drawEllipse(box)
 
         # Контур рисуем всегда, заливка «вырастает» из центра по ходу анимации.
+        ring = QColor(c["accent"])
+        if not self._hover:
+            ring = QColor(c["text_faint"])
+            ring.setAlphaF(0.55)  # видно, но не спорит с названием задачи
         painter.setBrush(QColor(c["surface"]))
-        painter.setPen(QPen(QColor(c["accent"] if self._hover else c["border"]), 1.3))
+        painter.setPen(QPen(ring, 1.3))
         draw_shape()
 
         grown = max(0.0, min(1.0, self._fill))
         if grown > 0.01:
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(c["success"]))
-            inset = (1.0 - grown) * (self.SIZE - 3) / 2.0
-            box = QRectF(
-                1.5 + inset, 1.5 + inset, self.SIZE - 3 - inset * 2, self.SIZE - 3 - inset * 2
-            )
+            inset = (1.0 - grown) * 6.6
+            box = QRectF(1.4 + inset, 1.4 + inset, 13.2 - inset * 2, 13.2 - inset * 2)
             draw_shape()
 
         if grown > 0.35:
@@ -141,10 +313,10 @@ class CheckCircle(QAbstractButton):
 
         if tick is not None:
             path = QPainterPath()
-            path.moveTo(6.0, 10.2)
-            path.lineTo(8.8, 13.2)
-            path.lineTo(14.2, 6.8)
-            pen = QPen(tick, 2.2 if pixel else 1.9)
+            path.moveTo(4.6, 8.1)
+            path.lineTo(6.9, 10.5)
+            path.lineTo(11.4, 5.3)
+            pen = QPen(tick, 1.9 if pixel else 1.7)
             cap = Qt.PenCapStyle.SquareCap if pixel else Qt.PenCapStyle.RoundCap
             join = Qt.PenJoinStyle.MiterJoin if pixel else Qt.PenJoinStyle.RoundJoin
             pen.setCapStyle(cap)
@@ -167,19 +339,24 @@ class Pill(QLabel):
 
     def __init__(self, text: str, color: str, strong: bool = False, parent=None) -> None:
         super().__init__(text, parent)
-        self.setFont(theme.mono_font(8))
+        font = theme.small_font()
+        self.setFont(font)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setFixedHeight(PILL_HEIGHT)
         self.setStyleSheet(
             "color: %s; background: %s; border: 1px solid %s;"
-            "border-radius: %dpx; padding: 0 7px;"
+            "border-radius: %dpx; padding: 0 7px; %s"
             % (
                 color,
                 theme.tint(color, 0.20 if strong else 0.12),
                 theme.tint(color, 0.34),
                 theme.radius("pill"),
+                theme.small_font_css(),
             )
         )
+        # QLabel не учитывает отступы из таблицы стилей в подсказке размера,
+        # поэтому ширину задаём сами — по тому же шрифту, что и в стилях.
+        self.setFixedWidth(QFontMetrics(font).horizontalAdvance(text) + 26)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
 
@@ -201,9 +378,13 @@ class ProductPill(QWidget):
         layout.addWidget(dot)
 
         label = QLabel(name)
-        label.setFont(theme.mono_font(8))
+        font = theme.small_font()
+        label.setFont(font)
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        label.setStyleSheet("color: %s; background: transparent;" % color)
+        label.setStyleSheet(
+            "color: %s; background: transparent; %s" % (color, theme.small_font_css())
+        )
+        label.setFixedWidth(QFontMetrics(font).horizontalAdvance(name) + 8)
         layout.addWidget(label)
 
         self.setStyleSheet(
@@ -226,7 +407,7 @@ def _due_text(task: Task) -> str:
     return "до %s" % task.due_date.strftime("%d.%m")
 
 
-class TaskRow(QFrame):
+class TaskRow(Card):
     """Строка списка задач.
 
     Слева — полоска цвета приоритета и круглая отметка, дальше заголовок и
@@ -247,13 +428,11 @@ class TaskRow(QFrame):
         show_jira: bool = True,
         parent=None,
     ) -> None:
-        super().__init__(parent)
+        super().__init__(colors, parent)
         self.task = task
-        self.colors = colors
         self.stale_days = stale_days
         self.product_color = product_color
         self.show_jira = show_jira
-        self.setObjectName("taskRow")
         self._build()
         self._apply_style()
 
@@ -263,30 +442,16 @@ class TaskRow(QFrame):
         c = self.colors
         task = self.task
 
-        root = QHBoxLayout(self)
-        root.setContentsMargins(0, 0, 14, 0)
-        root.setSpacing(0)
-
-        # Полоска приоритета: заметна только у важного, чтобы не рябило.
-        self.bar = QFrame()
-        self.bar.setFixedWidth(3)
-        bar_color = "transparent"
+        # Полоска приоритета рисуется самой карточкой, здесь только отступ под неё.
         if not task.is_done:
             if task.is_overdue:
-                bar_color = c["danger"]
+                self.set_bar(c["danger"])
             elif task.priority >= 2:
-                bar_color = c[theme.PRIORITY_COLOR_KEYS[task.priority]]
-        corner = theme.radius("card")
-        self.bar.setStyleSheet(
-            "background: %s; border-top-left-radius: %dpx;"
-            "border-bottom-left-radius: %dpx;" % (bar_color, corner, corner)
-        )
-        root.addWidget(self.bar)
+                self.set_bar(c[theme.PRIORITY_COLOR_KEYS[task.priority]])
 
-        inner = QHBoxLayout()
-        inner.setContentsMargins(13, 11, 0, 11)
+        inner = QHBoxLayout(self)
+        inner.setContentsMargins(16, 11, 14, 11)
         inner.setSpacing(12)
-        root.addLayout(inner, 1)
 
         self.check = CheckCircle(task.is_done, c)
         self.check.toggled.connect(lambda state: self.toggled.emit(task.id, state))
@@ -313,13 +478,10 @@ class TaskRow(QFrame):
 
         pills = self._meta_pills()
         if pills:
-            meta = QHBoxLayout()
-            meta.setContentsMargins(0, 0, 0, 0)
-            meta.setSpacing(6)
+            meta = FlowLayout(spacing=6)
             text_col.addLayout(meta)
             for pill in pills:
                 meta.addWidget(pill)
-            meta.addStretch(1)
 
     def _meta_pills(self) -> list[QWidget]:
         c = self.colors
@@ -372,22 +534,12 @@ class TaskRow(QFrame):
         if selected:
             border, background = c["accent"], c["surface_hover"]
         elif self.task.is_overdue:
-            border, background = theme.tint(c["danger"], 0.45), c["surface"]
+            border, background = c["danger"], c["surface"]
         else:
             # В пиксельном стиле рамка заметнее: карточка должна читаться коробкой.
             border = c["border"] if theme.is_pixel() else c["border_soft"]
             background = c["surface"]
-        self.setStyleSheet(
-            "#taskRow { background: %s; border: 1px solid %s; border-radius: %dpx; }"
-            "#taskRow:hover { background: %s; border-color: %s; }"
-            % (
-                background,
-                border,
-                theme.radius("card"),
-                c["surface_hover"],
-                c["border"] if not selected else c["accent"],
-            )
-        )
+        self.set_card_colors(background, border, c["surface_hover"])
 
     def set_selected(self, selected: bool) -> None:
         self._apply_style(selected)
@@ -504,7 +656,7 @@ class StatChip(QWidget):
         super().mousePressEvent(event)
 
 
-class JiraIssueRow(QFrame):
+class JiraIssueRow(Card):
     """Строка задачи, прочитанной из Jira: ключ, название, статус, срок.
 
     Это не наша задача, а зеркало чужой: отметить выполненной её нельзя, зато
@@ -515,16 +667,8 @@ class JiraIssueRow(QFrame):
     take = Signal(str)        # ключ — завести локальную задачу
 
     def __init__(self, issue, colors: dict[str, str], already: bool = False, parent=None) -> None:
-        super().__init__(parent)
+        super().__init__(colors, parent)
         self.issue = issue
-        self.colors = colors
-        self.setObjectName("jiraRow")
-        self.setStyleSheet(
-            "#jiraRow { background: %s; border: 1px solid %s; border-radius: %dpx; }"
-            "#jiraRow:hover { background: %s; }"
-            % (colors["surface"], colors["border_soft"], theme.radius("card"),
-               colors["surface_hover"])
-        )
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         layout = QVBoxLayout(self)

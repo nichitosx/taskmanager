@@ -133,3 +133,35 @@ def write_ico(path: Path, accent: str = ACCENT, background: str = BACKGROUND) ->
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(header + entries + b"".join(blob for _, blob in frames))
     return path
+
+
+def write_pattern(path: Path, base: str, ink: str, alpha: int = 26) -> Path:
+    """Плитка фонового узора для пиксельного стиля.
+
+    Мелкие точки и крестики по сетке 16×16: на глаз почти не читаются, но фон
+    перестаёт быть плоским — как в старых интерфейсах с текстурой.
+    """
+    tile = QPixmap(16, 16)
+    tile.fill(QColor(base))
+    painter = QPainter(tile)
+    painter.setPen(Qt.PenStyle.NoPen)
+
+    bright = QColor(ink)
+    bright.setAlpha(max(0, min(255, alpha)))
+    faint = QColor(ink)
+    faint.setAlpha(max(0, min(255, alpha // 2)))
+
+    # Крестик в центре плитки и одиночные точки по углам: на глаз фон просто
+    # перестаёт быть идеально плоским, узор не читается как рисунок.
+    painter.setBrush(bright)
+    for x, y in ((8, 7), (7, 8), (9, 8), (8, 9)):
+        painter.drawRect(x, y, 1, 1)
+    painter.setBrush(faint)
+    for x, y in ((0, 0), (4, 12), (12, 4), (15, 15)):
+        painter.drawRect(x, y, 1, 1)
+    painter.end()
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tile.save(str(path), "PNG")
+    return path

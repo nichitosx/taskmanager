@@ -94,12 +94,14 @@ class WeeklyReportDialog(QDialog):
         self.header_label.setFont(theme.ui_font(13, bold=True))
         header.addWidget(self.header_label)
         header.addStretch(1)
-        prev_button = _button("← неделя назад", "flat")
-        prev_button.clicked.connect(lambda: self._shift(-7))
-        next_button = _button("неделя вперёд →", "flat")
-        next_button.clicked.connect(lambda: self._shift(7))
-        header.addWidget(prev_button)
-        header.addWidget(next_button)
+        self.prev_button = _button("← неделя назад", "flat")
+        self.prev_button.setToolTip("Предыдущая неделя, за которую что-то заполнено")
+        self.prev_button.clicked.connect(lambda: self._step(-1))
+        self.next_button = _button("неделя вперёд →", "flat")
+        self.next_button.setToolTip("Следующая заполненная неделя")
+        self.next_button.clicked.connect(lambda: self._step(1))
+        header.addWidget(self.prev_button)
+        header.addWidget(self.next_button)
         layout.addLayout(header)
         layout.addWidget(hline())
 
@@ -185,10 +187,30 @@ class WeeklyReportDialog(QDialog):
 
     # --- Данные ---------------------------------------------------------------
 
-    def _shift(self, days: int) -> None:
-        self.start += timedelta(days=days)
+    def _known_weeks(self) -> list[date]:
+        """Недели, между которыми имеет смысл листать: заполненные плюс текущая."""
+        weeks = set(self.storage.weeks_with_activity())
+        weeks.add(week_bounds()[0])
+        weeks.add(self.start)
+        return sorted(weeks)
+
+    def _step(self, direction: int) -> None:
+        """Переходит к соседней заполненной неделе, не заглядывая в будущее."""
+        weeks = self._known_weeks()
+        if self.start not in weeks:
+            return
+        index = weeks.index(self.start) + direction
+        if not 0 <= index < len(weeks):
+            return
+        self.start = weeks[index]
         self.end = self.start + timedelta(days=6)
         self.refresh()
+
+    def _sync_navigation(self) -> None:
+        weeks = self._known_weeks()
+        index = weeks.index(self.start)
+        self.prev_button.setEnabled(index > 0)
+        self.next_button.setEnabled(index < len(weeks) - 1)
 
     def set_grouping(self, grouping: str) -> None:
         """Переключает разрез отчёта и запоминает выбор на будущее."""
@@ -223,6 +245,7 @@ class WeeklyReportDialog(QDialog):
         )
         self.text_edit.setPlainText(text)
         self._sync_grouping_buttons()
+        self._sync_navigation()
         self._fill_jira_list()
 
     def _fill_jira_list(self) -> None:
