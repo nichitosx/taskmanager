@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     due_date         TEXT,
     start_date       TEXT,
     product          TEXT DEFAULT '',
+    repeat_rule      TEXT DEFAULT '',
     jira_key         TEXT DEFAULT '',
     jira_state       TEXT DEFAULT 'unknown',
     tags             TEXT DEFAULT '',
@@ -95,6 +96,7 @@ class Storage:
         for name, ddl in (
             ("start_date", "ALTER TABLE tasks ADD COLUMN start_date TEXT"),
             ("product", "ALTER TABLE tasks ADD COLUMN product TEXT DEFAULT ''"),
+            ("repeat_rule", "ALTER TABLE tasks ADD COLUMN repeat_rule TEXT DEFAULT ''"),
         ):
             if name not in columns:
                 self.conn.execute(ddl)
@@ -108,9 +110,9 @@ class Storage:
         now = _now()
         cur = self.conn.execute(
             """INSERT INTO tasks (title, notes, status, priority, due_date, start_date,
-                                  product, jira_key, jira_state, tags, created_at,
-                                  updated_at, last_activity_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                  product, repeat_rule, jira_key, jira_state, tags,
+                                  created_at, updated_at, last_activity_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 task.title.strip(),
                 task.notes,
@@ -119,6 +121,7 @@ class Storage:
                 task.due_date.isoformat() if task.due_date else None,
                 task.start_date.isoformat() if task.start_date else None,
                 task.product,
+                task.repeat,
                 task.jira_key,
                 task.jira_state,
                 ",".join(task.tags),
@@ -138,8 +141,9 @@ class Storage:
             activity = task.last_activity_at.isoformat(timespec="seconds")
         self.conn.execute(
             """UPDATE tasks SET title=?, notes=?, status=?, priority=?, due_date=?,
-                                start_date=?, product=?, jira_key=?, jira_state=?, tags=?,
-                                updated_at=?, done_at=?, last_activity_at=?
+                                start_date=?, product=?, repeat_rule=?, jira_key=?,
+                                jira_state=?, tags=?, updated_at=?, done_at=?,
+                                last_activity_at=?
                WHERE id=?""",
             (
                 task.title.strip(),
@@ -149,6 +153,7 @@ class Storage:
                 task.due_date.isoformat() if task.due_date else None,
                 task.start_date.isoformat() if task.start_date else None,
                 task.product,
+                task.repeat,
                 task.jira_key,
                 task.jira_state,
                 ",".join(task.tags),
@@ -201,6 +206,16 @@ class Storage:
             (like, like, like, like, like),
         ).fetchall()
         return [Task.from_row(r) for r in rows]
+
+    def find_by_jira_key(self, key: str) -> Optional[Task]:
+        """Локальная задача с таким ключом Jira, если она уже заведена."""
+        if not key:
+            return None
+        row = self.conn.execute(
+            "SELECT * FROM tasks WHERE upper(jira_key) = upper(?) ORDER BY id DESC LIMIT 1",
+            (key.strip(),),
+        ).fetchone()
+        return Task.from_row(row) if row else None
 
     def touch_task(self, task_id: int) -> None:
         """Отметить, что по задаче было движение (сбрасывает счётчик простоя)."""

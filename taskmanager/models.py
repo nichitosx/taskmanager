@@ -67,6 +67,8 @@ class Task:
     due_date: Optional[date] = None
     start_date: Optional[date] = None
     product: str = ""
+    # Правило повторения, см. recurrence.py: "", "daily", "weekly:2", "monthly:15".
+    repeat: str = ""
     jira_key: str = ""
     jira_state: str = JIRA_UNKNOWN
     tags: list[str] = field(default_factory=list)
@@ -139,6 +141,7 @@ class Task:
             due_date=_parse_date(row["due_date"]),
             start_date=_parse_date(row["start_date"]) if "start_date" in row.keys() else None,
             product=(row["product"] or "") if "product" in row.keys() else "",
+            repeat=(row["repeat_rule"] or "") if "repeat_rule" in row.keys() else "",
             jira_key=row["jira_key"] or "",
             jira_state=row["jira_state"] or JIRA_UNKNOWN,
             tags=tags,

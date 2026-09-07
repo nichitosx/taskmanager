@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 
 from .. import products as products_module
 from ..config import Settings
+from .. import recurrence
 from ..horizons import start_text
 from ..integrations import jira
 from ..models import (
@@ -164,6 +165,22 @@ class TaskDialog(QDialog):
         product_col.addWidget(self.product_box)
         row2.addLayout(product_col, 1)
 
+        repeat_col = QVBoxLayout()
+        repeat_col.setSpacing(6)
+        repeat_col.addWidget(section_label("повторять"))
+        self.repeat_box = QComboBox()
+        for value, title in (
+            ("", "Не повторять"),
+            ("daily", "Каждый день"),
+            ("weekly", "Каждую неделю"),
+            ("days:14", "Раз в две недели"),
+            ("monthly", "Каждый месяц"),
+        ):
+            self.repeat_box.addItem(title, value)
+        self.repeat_box.currentIndexChanged.connect(self._sync_repeat_hint)
+        repeat_col.addWidget(self.repeat_box)
+        row2.addLayout(repeat_col, 1)
+
         tags_col = QVBoxLayout()
         tags_col.setSpacing(6)
         tags_col.addWidget(section_label("теги"))
@@ -171,6 +188,12 @@ class TaskDialog(QDialog):
         self.tags_edit.setPlaceholderText("через запятую")
         tags_col.addWidget(self.tags_edit)
         row2.addLayout(tags_col, 2)
+
+        self.repeat_hint = QLabel()
+        self.repeat_hint.setProperty("faint", "true")
+        self.repeat_hint.setFont(theme.mono_font(8))
+        self.repeat_hint.setWordWrap(True)
+        layout.addWidget(self.repeat_hint)
 
         suggest_row = QHBoxLayout()
         suggest_row.setSpacing(8)
@@ -304,6 +327,31 @@ class TaskDialog(QDialog):
         self.product_box.setCurrentIndex(index)
         self._sync_product_hint()
 
+    def _anchor_date(self):
+        """Дата, от которой отсчитывается повторение: срок, иначе начало, иначе сегодня."""
+        if self.due_check.isChecked():
+            return self.due_edit.date().toPython()
+        if self.start_check.isChecked():
+            return self.start_edit.date().toPython()
+        return date.today()
+
+    def _repeat_rule(self) -> str:
+        choice = self.repeat_box.currentData() or ""
+        anchor = self._anchor_date()
+        if choice == "weekly":
+            return recurrence.make(recurrence.WEEKLY, anchor.weekday())
+        if choice == "monthly":
+            return recurrence.make(recurrence.MONTHLY, anchor.day)
+        return choice
+
+    def _sync_repeat_hint(self) -> None:
+        text = recurrence.describe(self._repeat_rule())
+        self.repeat_hint.setText(
+            ("Повторяется %s. Следующая появится, когда отметите эту выполненной." % text)
+            if text
+            else ""
+        )
+
     def _sync_start_hint(self) -> None:
         if not self.start_check.isChecked():
             self.start_hint.setText("")
@@ -331,6 +379,10 @@ class TaskDialog(QDialog):
                 QDate(task.start_date.year, task.start_date.month, task.start_date.day)
             )
         self._fill_products()
+        kind, number = recurrence.parse(task.repeat)
+        stored = task.repeat if kind == recurrence.EVERY_DAYS else kind
+        index = self.repeat_box.findData(stored)
+        self.repeat_box.setCurrentIndex(index if index >= 0 else 0)
         self.tags_edit.setText(", ".join(task.tags))
         self.jira_edit.setText(task.jira_key)
         index = self.jira_state_box.findData(task.jira_state)
@@ -343,6 +395,7 @@ class TaskDialog(QDialog):
         for widget in (self.jira_line, self.jira_caption, self.jira_row_box, self.jira_hint):
             widget.setVisible(jira_on)
         self._sync_start_hint()
+        self._sync_repeat_hint()
         self._sync_product_hint()
 
         if self.is_new or task.id is None:
@@ -405,6 +458,7 @@ class TaskDialog(QDialog):
             self.start_edit.date().toPython() if self.start_check.isChecked() else None
         )
         task.product = self.product_box.currentData() or ""
+        task.repeat = self._repeat_rule()
         task.tags = [t.strip() for t in self.tags_edit.text().split(",") if t.strip()]
         task.notes = self.notes_edit.toPlainText().strip()
         if not task.product:

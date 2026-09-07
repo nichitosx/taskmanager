@@ -97,14 +97,19 @@ def radius(kind: str = "card") -> int:
     return RADII.get(_style, RADII[STYLE_SOFT]).get(kind, 0)
 
 
-# Пиксельные шрифты, если они вдруг стоят в системе; иначе — обычный
-# моноширинный, который в прямоугольной вёрстке выглядит так же уместно.
+# Акцентный шрифт пиксельного стиля: им набраны заголовки, подписи разделов,
+# логотип и счётчики — то есть «вывеска», а не текст задач. Сплошной пиксельный
+# шрифт в списке читался бы хуже, поэтому основной текст остаётся моноширинным,
+# как в консоли.
 PIXEL_CANDIDATES = [
-    "Pixelify Sans",
+    "Minecraft Rus",
+    "Minecraft",
+    "Monocraft",
+    "Ndot 55",
+    "Departure Mono",
     "Silkscreen",
     "Press Start 2P",
     "W95FA",
-    "Perfect DOS VGA 437",
 ]
 
 MONO_CANDIDATES = [
@@ -148,15 +153,36 @@ def mono_font(size: int = 9, bold: bool = False, spacing: float = 0.0) -> QFont:
 
 
 def pixel_family() -> str:
-    """Шрифт для пиксельного стиля: пиксельный, если есть, иначе моноширинный."""
+    """Пиксельный шрифт, если он есть в системе; иначе моноширинный."""
     return _pick(PIXEL_CANDIDATES, mono_family())
+
+
+def has_pixel_font() -> bool:
+    return pixel_family() != mono_family()
+
+
+def accent_family() -> str:
+    """Шрифт вывесок: в пиксельном стиле — пиксельный, иначе моноширинный."""
+    return pixel_family() if is_pixel() else mono_family()
+
+
+def accent_font(size: int = 9, bold: bool = False, spacing: float = 0.0) -> QFont:
+    """Заголовки, подписи разделов, счётчики.
+
+    В пиксельном стиле это самое заметное отличие: вывески набраны пиксельным
+    шрифтом, а текст задач остаётся читаемым моноширинным.
+    """
+    font = QFont(accent_family(), size)
+    font.setBold(bold)
+    if spacing:
+        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, spacing)
+    return font
 
 
 def ui_font(size: int = 10, bold: bool = False) -> QFont:
     if is_pixel():
-        # В пиксельном стиле интерфейсный текст тоже моноширинный — именно это
-        # даёт «цифровой» вид, а размер чуть меньше, чтобы строки не разъехались.
-        font = QFont(pixel_family(), max(size - 1, 7))
+        # Текст задач в пиксельном стиле — моноширинный, как в консоли.
+        font = QFont(mono_family(), max(size - 1, 8))
         font.setBold(bold)
         return font
     font = QFont(ui_family(), size)
@@ -203,8 +229,11 @@ def stylesheet(theme: str, style: str | None = None) -> str:
     if style is not None:
         set_style(style)
     c = palette(theme)
-    c["ui"] = pixel_family() if is_pixel() else ui_family()
-    c["mono"] = pixel_family() if is_pixel() else mono_family()
+    c["ui"] = mono_family() if is_pixel() else ui_family()
+    c["mono"] = mono_family()
+    c["accent_family"] = accent_family()
+    c["section_size"] = 11 if is_pixel() else 10
+    c["section_spacing"] = 1.0 if is_pixel() else 1.5
     c["r_input"] = radius("input")
     c["r_button"] = radius("button")
     c["r_small"] = radius("small")
@@ -339,10 +368,10 @@ QLabel[dim="true"] { color: %(text_dim)s; }
 QLabel[faint="true"] { color: %(text_faint)s; }
 QLabel[mono="true"] { font-family: "%(mono)s"; color: %(text_dim)s; }
 QLabel[section="true"] {
-    font-family: "%(mono)s";
-    font-size: 10px;
+    font-family: "%(accent_family)s";
+    font-size: %(section_size)dpx;
     color: %(text_faint)s;
-    letter-spacing: 1.5px;
+    letter-spacing: %(section_spacing)spx;
 }
 QFrame[hline="true"] { background: %(border_soft)s; max-height: 1px; border: none; }
 QFrame[vline="true"] { background: %(border_soft)s; max-width: 1px; border: none; }

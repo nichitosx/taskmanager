@@ -2,19 +2,31 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QRectF, Qt, Signal
+from datetime import date
+
+from PySide6.QtCore import (
+    QAbstractAnimation,
+    QEasingCurve,
+    QPropertyAnimation,
+    QRectF,
+    Property,
+    Qt,
+    Signal,
+)
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QAbstractButton,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
 from ..horizons import start_text
+from ..recurrence import describe as describe_repeat
 from ..models import (
     JIRA_NOT_NEEDED,
     PRIORITY_LABELS,
@@ -45,6 +57,7 @@ class CheckCircle(QAbstractButton):
     """
 
     SIZE = 20
+    ANIMATION_MS = 170
 
     def __init__(self, checked: bool, colors: dict[str, str], parent=None) -> None:
         super().__init__(parent)
@@ -55,6 +68,28 @@ class CheckCircle(QAbstractButton):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip("Отметить выполненной")
         self._hover = False
+        # 0 — пусто, 1 — залито: промежуточные значения рисует анимация.
+        self._fill = 1.0 if checked else 0.0
+        self._animation: QPropertyAnimation | None = None
+        self.toggled.connect(self._animate)
+
+    def _get_fill(self) -> float:
+        return self._fill
+
+    def _set_fill(self, value: float) -> None:
+        self._fill = max(0.0, min(1.0, float(value)))
+        self.update()
+
+    fill = Property(float, _get_fill, _set_fill)
+
+    def _animate(self, checked: bool) -> None:
+        animation = QPropertyAnimation(self, b"fill", self)
+        animation.setDuration(self.ANIMATION_MS)
+        animation.setStartValue(self._fill)
+        animation.setEndValue(1.0 if checked else 0.0)
+        animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        animation.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+        self._animation = animation
 
     def enterEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         self._hover = True
@@ -81,16 +116,28 @@ class CheckCircle(QAbstractButton):
             else:
                 painter.drawEllipse(box)
 
-        if self.isChecked():
+        # Контур рисуем всегда, заливка «вырастает» из центра по ходу анимации.
+        painter.setBrush(QColor(c["surface"]))
+        painter.setPen(QPen(QColor(c["accent"] if self._hover else c["border"]), 1.3))
+        draw_shape()
+
+        grown = max(0.0, min(1.0, self._fill))
+        if grown > 0.01:
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(c["success"]))
+            inset = (1.0 - grown) * (self.SIZE - 3) / 2.0
+            box = QRectF(
+                1.5 + inset, 1.5 + inset, self.SIZE - 3 - inset * 2, self.SIZE - 3 - inset * 2
+            )
             draw_shape()
+
+        if grown > 0.35:
             tick = QColor("#FFFFFF")
+            tick.setAlphaF(min(1.0, (grown - 0.35) / 0.5))
+        elif self._hover:
+            tick = QColor(c["text_faint"])
         else:
-            painter.setBrush(QColor(c["surface"]))
-            painter.setPen(QPen(QColor(c["accent"] if self._hover else c["border"]), 1.3))
-            draw_shape()
-            tick = QColor(c["text_faint"]) if self._hover else None
+            tick = None
 
         if tick is not None:
             path = QPainterPath()
@@ -108,15 +155,24 @@ class CheckCircle(QAbstractButton):
         painter.end()
 
 
+PILL_HEIGHT = 20
+
+
 class Pill(QLabel):
-    """Компактная метка: срок, ключ Jira, приоритет, продукт, простой."""
+    """Компактная метка: срок, ключ Jira, приоритет, продукт, простой.
+
+    Высота фиксированная, текст выравнивается по центру: у моноширинных шрифтов
+    запас под нижние выносные элементы разный, и без этого надпись съезжает вниз.
+    """
 
     def __init__(self, text: str, color: str, strong: bool = False, parent=None) -> None:
         super().__init__(text, parent)
         self.setFont(theme.mono_font(8))
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setFixedHeight(PILL_HEIGHT)
         self.setStyleSheet(
             "color: %s; background: %s; border: 1px solid %s;"
-            "border-radius: %dpx; padding: 2px 7px;"
+            "border-radius: %dpx; padding: 0 7px;"
             % (
                 color,
                 theme.tint(color, 0.20 if strong else 0.12),
@@ -132,8 +188,9 @@ class ProductPill(QWidget):
 
     def __init__(self, name: str, color: str, parent=None) -> None:
         super().__init__(parent)
+        self.setFixedHeight(PILL_HEIGHT)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(7, 2, 8, 2)
+        layout.setContentsMargins(7, 0, 8, 0)
         layout.setSpacing(6)
 
         dot = QLabel()
@@ -145,6 +202,7 @@ class ProductPill(QWidget):
 
         label = QLabel(name)
         label.setFont(theme.mono_font(8))
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         label.setStyleSheet("color: %s; background: transparent;" % color)
         layout.addWidget(label)
 
@@ -274,6 +332,10 @@ class TaskRow(QFrame):
         if task.is_planned:
             pills.append(Pill(start_text(task), c["info"]))
 
+        repeat = describe_repeat(task.repeat)
+        if repeat and not task.is_done:
+            pills.append(Pill("↻ " + repeat, c["text_dim"]))
+
         if task.priority >= 2 and not task.is_done:
             key = theme.PRIORITY_COLOR_KEYS[task.priority]
             pills.append(Pill(PRIORITY_LABELS[task.priority].upper(), c[key], strong=True))
@@ -361,7 +423,7 @@ class NavItem(QFrame):
         layout.addStretch(1)
 
         self.count = QLabel("")
-        self.count.setFont(theme.mono_font(8))
+        self.count.setFont(theme.accent_font(9))
         layout.addWidget(self.count)
 
         self.set_active(False)
@@ -440,3 +502,73 @@ class StatChip(QWidget):
     def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         self.clicked.emit()
         super().mousePressEvent(event)
+
+
+class JiraIssueRow(QFrame):
+    """Строка задачи, прочитанной из Jira: ключ, название, статус, срок.
+
+    Это не наша задача, а зеркало чужой: отметить выполненной её нельзя, зато
+    можно открыть в браузере или взять к себе в список.
+    """
+
+    activated = Signal(str)   # ключ — открыть в браузере
+    take = Signal(str)        # ключ — завести локальную задачу
+
+    def __init__(self, issue, colors: dict[str, str], already: bool = False, parent=None) -> None:
+        super().__init__(parent)
+        self.issue = issue
+        self.colors = colors
+        self.setObjectName("jiraRow")
+        self.setStyleSheet(
+            "#jiraRow { background: %s; border: 1px solid %s; border-radius: %dpx; }"
+            "#jiraRow:hover { background: %s; }"
+            % (colors["surface"], colors["border_soft"], theme.radius("card"),
+               colors["surface_hover"])
+        )
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 11, 14, 11)
+        layout.setSpacing(7)
+
+        title = QLabel(issue.summary or issue.key)
+        title.setWordWrap(True)
+        title.setFont(theme.ui_font(11))
+        title.setStyleSheet("color: %s; background: transparent;" % colors["text"])
+        layout.addWidget(title)
+
+        meta = QHBoxLayout()
+        meta.setContentsMargins(0, 0, 0, 0)
+        meta.setSpacing(6)
+        meta.addWidget(Pill(issue.key, colors["info"]))
+        if issue.status:
+            meta.addWidget(Pill(issue.status.lower(), colors["text_dim"]))
+        if issue.due_date:
+            overdue = issue.due_date < date.today()
+            meta.addWidget(
+                Pill(
+                    "срок %s" % issue.due_date.strftime("%d.%m"),
+                    colors["danger"] if overdue else colors["text_dim"],
+                    strong=overdue,
+                )
+            )
+        if issue.priority:
+            meta.addWidget(Pill(issue.priority.lower(), colors["text_faint"]))
+        meta.addStretch(1)
+
+        if already:
+            mark = QLabel("уже в списке")
+            mark.setFont(theme.mono_font(8))
+            mark.setStyleSheet("color: %s; background: transparent;" % colors["success"])
+            meta.addWidget(mark)
+        else:
+            button = QPushButton("Взять в работу")
+            button.setProperty("flat", "true")
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.clicked.connect(lambda: self.take.emit(issue.key))
+            meta.addWidget(button)
+        layout.addLayout(meta)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        self.activated.emit(self.issue.key)
+        super().mouseDoubleClickEvent(event)

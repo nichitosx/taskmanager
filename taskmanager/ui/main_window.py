@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
-from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtCore import (
+    QAbstractAnimation,
+    QEasingCurve,
+    QPropertyAnimation,
+    QSize,
+    Qt,
+    QThread,
+    QTimer,
+    Signal,
+)
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -28,11 +38,14 @@ from PySide6.QtWidgets import (
 from .. import demo
 from .. import products as products_module
 from .. import quickadd
+from .. import recurrence
 from ..appicon import make_icon
 from ..config import Settings
 from ..horizons import HORIZON_HINTS, HORIZON_LABELS, in_horizon, start_text
 from ..integrations import jira
+from ..integrations.jira import JiraClient, JiraConfig, JiraError
 from ..models import (
+    JIRA_CREATED,
     JIRA_NOT_NEEDED,
     JIRA_STATE_LABELS,
     PRIORITY_LABELS,
@@ -47,7 +60,7 @@ from . import theme
 from .dialogs import DailyReportDialog, LogWorkDialog, TaskDialog, UpcomingTasksDialog
 from .reports_ui import HistoryDialog, WeeklyReportDialog
 from .settings_dialog import SettingsDialog
-from .widgets import NavItem, StatChip, TaskRow, hline, section_label
+from .widgets import JiraIssueRow, NavItem, TaskRow, hline, section_label
 
 # Боковое меню делится на две части: «когда» — горизонты планирования,
 # «состояние» — то, что требует внимания независимо от сроков.
@@ -64,6 +77,31 @@ STATE_FILTERS = [
 FILTERS = HORIZON_FILTERS + STATE_FILTERS
 
 PRODUCT_PREFIX = "product:"
+
+# Список задач, прочитанных прямо из Jira: живёт отдельно от локальных задач.
+JIRA_PLAN = "jira_plan"
+
+# Сколько держим ответ Jira, прежде чем спрашивать снова.
+JIRA_CACHE_SECONDS = 300
+
+
+class JiraFetch(QThread):
+    """Запрос к Jira в отдельном потоке, чтобы окно не подвисало."""
+
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, config: JiraConfig, parent=None) -> None:
+        super().__init__(parent)
+        self.config = config
+
+    def run(self) -> None:  # noqa: D102 (Qt naming)
+        try:
+            self.done.emit(JiraClient(self.config).search())
+        except JiraError as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:  # неожиданная ошибка не должна ронять приложение
+            self.failed.emit("Не удалось прочитать задачи из Jira: %s" % exc)
 
 
 class TaskDetail(QWidget):
@@ -249,6 +287,11 @@ class MainWindow(QMainWindow):
         self.settings = settings
         self.filter = "active"
         self.selected_id: int | None = None
+        self._jira_issues: list = []
+        self._jira_error = ""
+        self._jira_loaded_at = None
+        self._jira_thread: JiraFetch | None = None
+        self._shown_filter = ""
         theme.set_style(settings.get("ui_style", theme.STYLE_SOFT))
         self.colors = theme.palette(settings.get("theme", "dark"))
         self._force_quit = False
@@ -256,7 +299,9 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("TaskManager")
         self.setWindowIcon(self._icon())
         self.resize(1180, 760)
-        self.setMinimumSize(940, 600)
+        # Ниже этого окно сжимать нельзя: шапка и боковая панель начинают
+        # наезжать друг на друга.
+        self.setMinimumSize(1040, 660)
 
         self._build()
         self._build_tray()
@@ -386,7 +431,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(22)
 
         logo = QLabel("TASKMANAGER")
-        logo.setFont(theme.mono_font(11, bold=True, spacing=2.5))
+        logo.setFont(theme.accent_font(12, bold=True, spacing=2.5))
         logo.setStyleSheet("color: %s;" % c["text"])
         layout.addWidget(logo)
 
@@ -394,19 +439,12 @@ class MainWindow(QMainWindow):
         dot.setStyleSheet("color: %s; font-size: 18px;" % c["accent"])
         layout.addWidget(dot)
 
-        self.chips: dict[str, StatChip] = {}
-        for key, caption in (
-            ("active", "в работе"),
-            ("today", "на сегодня"),
-            ("planned", "плановых"),
-            ("overdue", "просрочено"),
-            ("stale", "без движения"),
-            ("jira", "ждут jira"),
-        ):
-            chip = StatChip(caption, c)
-            chip.clicked.connect(lambda k=key: self.set_filter(k))
-            self.chips[key] = chip
-            layout.addWidget(chip)
+        # Счётчики по спискам показывает боковая панель — дублировать их в шапке
+        # незачем, здесь остаются только действия.
+        self.today_label = QLabel()
+        self.today_label.setFont(theme.mono_font(9))
+        self.today_label.setProperty("dim", "true")
+        layout.addWidget(self.today_label)
 
         layout.addStretch(1)
 
@@ -434,7 +472,7 @@ class MainWindow(QMainWindow):
 
     def _sidebar(self) -> QWidget:
         panel = QWidget()
-        panel.setFixedWidth(202)
+        panel.setFixedWidth(216)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 4, 0, 0)
         layout.setSpacing(3)
@@ -444,6 +482,13 @@ class MainWindow(QMainWindow):
         layout.addSpacing(2)
         for key, title in HORIZON_FILTERS:
             layout.addWidget(self._nav_item(key, title, HORIZON_HINTS.get(key, "")))
+        layout.addWidget(
+            self._nav_item(
+                JIRA_PLAN,
+                "В планах",
+                "Задачи из Jira по вашему фильтру: статус «Сделать» и назначены на вас",
+            )
+        )
 
         layout.addSpacing(12)
         layout.addWidget(section_label("состояние"))
@@ -464,6 +509,12 @@ class MainWindow(QMainWindow):
 
         layout.addStretch(1)
 
+        self.plans_box = self._plans_box()
+        layout.addWidget(self.plans_box)
+
+        layout.addSpacing(12)
+        layout.addWidget(section_label("шпаргалка ввода"))
+        layout.addSpacing(2)
         hint = QLabel(
             "!!  срочно\n"
             "@завтра  @пт  @кмес  срок\n"
@@ -476,6 +527,73 @@ class MainWindow(QMainWindow):
         layout.addWidget(hint)
         return panel
 
+    def _plans_box(self) -> QWidget:
+        """Минималистичное окошко: что и через сколько дней начнётся."""
+        c = self.colors
+        box = QFrame()
+        box.setObjectName("plansBox")
+        box.setCursor(Qt.CursorShape.PointingHandCursor)
+        box.setStyleSheet(
+            "#plansBox { background: %s; border: 1px solid %s; border-radius: %dpx; }"
+            % (c["surface"], c["border_soft"], theme.radius("card"))
+        )
+        box.mousePressEvent = lambda _event: self.set_filter("planned")  # type: ignore[assignment]
+
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(11, 9, 11, 9)
+        layout.setSpacing(6)
+        layout.addWidget(section_label("ближайшие планы"))
+
+        self.plans_lines = QVBoxLayout()
+        self.plans_lines.setContentsMargins(0, 0, 0, 0)
+        self.plans_lines.setSpacing(5)
+        layout.addLayout(self.plans_lines)
+        box.hide()
+        return box
+
+    def _sync_plans_box(self, tasks: list[Task]) -> None:
+        """Показывает ближайшие плановые задачи: название и через сколько дней."""
+        c = self.colors
+        while self.plans_lines.count():
+            item = self.plans_lines.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+
+        planned = sorted(
+            (t for t in tasks if t.is_planned), key=lambda t: (t.start_date, -t.priority)
+        )
+        self.plans_box.setVisible(bool(planned))
+        if not planned:
+            return
+
+        for task in planned[:4]:
+            line = QWidget()
+            row = QHBoxLayout(line)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(8)
+
+            title = QLabel(task.title)
+            title.setFont(theme.ui_font(9))
+            title.setStyleSheet("color: %s; background: transparent;" % c["text_dim"])
+            metrics = title.fontMetrics()
+            title.setText(metrics.elidedText(task.title, Qt.TextElideMode.ElideRight, 122))
+            title.setToolTip(task.title)
+            row.addWidget(title)
+            row.addStretch(1)
+
+            days = task.days_to_start or 0
+            left = QLabel("%d дн." % days if days > 1 else "завтра")
+            left.setFont(theme.accent_font(8))
+            left.setStyleSheet("color: %s; background: transparent;" % c["accent"])
+            row.addWidget(left)
+            self.plans_lines.addWidget(line)
+
+        if len(planned) > 4:
+            more = QLabel("и ещё %d" % (len(planned) - 4))
+            more.setFont(theme.mono_font(8))
+            more.setStyleSheet("color: %s; background: transparent;" % c["text_faint"])
+            self.plans_lines.addWidget(more)
+
     def _nav_item(self, key: str, title: str, tooltip: str = "") -> NavItem:
         item = NavItem(title, self.colors, self.colors["accent"])
         if tooltip:
@@ -483,6 +601,108 @@ class MainWindow(QMainWindow):
         item.clicked.connect(lambda k=key: self.set_filter(k))
         self.nav_items[key] = item
         return item
+
+    def _jira_config(self) -> JiraConfig:
+        return JiraConfig.from_settings(self.settings.get("jira", {}) or {})
+
+    def _jira_ready(self) -> bool:
+        config = self._jira_config()
+        return bool(self.settings.get("jira.enabled", True)) and config.is_configured
+
+    def _jira_fresh(self) -> bool:
+        if self._jira_loaded_at is None:
+            return False
+        return (datetime.now() - self._jira_loaded_at).total_seconds() < JIRA_CACHE_SECONDS
+
+    def load_jira(self, force: bool = False) -> None:
+        """Спрашивает Jira в фоне. Свежий ответ переиспользуется."""
+        if not self._jira_ready():
+            return
+        if self._jira_thread is not None and self._jira_thread.isRunning():
+            return
+        if self._jira_fresh() and not force:
+            return
+        self._jira_error = ""
+        thread = JiraFetch(self._jira_config(), self)
+        thread.done.connect(self._on_jira_done)
+        thread.failed.connect(self._on_jira_failed)
+        self._jira_thread = thread
+        thread.start()
+        if self.filter == JIRA_PLAN:
+            self.refresh(keep_selection=False)
+
+    def _on_jira_done(self, issues: list) -> None:
+        self._jira_issues = list(issues)
+        self._jira_error = ""
+        self._jira_loaded_at = datetime.now()
+        if self.filter == JIRA_PLAN:
+            self.refresh(keep_selection=False)
+
+    def _on_jira_failed(self, message: str) -> None:
+        self._jira_error = message
+        self._jira_loaded_at = datetime.now()
+        if self.filter == JIRA_PLAN:
+            self.refresh(keep_selection=False)
+
+    def _fill_jira_plan(self) -> None:
+        """Показывает список задач из Jira вместо локальных."""
+        self.rows = {}
+        self.list.clear()
+        loading = self._jira_thread is not None and self._jira_thread.isRunning()
+
+        if not self._jira_ready():
+            self._show_empty(
+                "Чтобы видеть задачи из Jira, включите интеграцию и заполните адрес, "
+                "e-mail и API-токен в настройках."
+            )
+            return
+        if loading and not self._jira_issues:
+            self._show_empty("Спрашиваю Jira…")
+            return
+        if self._jira_error:
+            self._show_empty(self._jira_error)
+            return
+        if not self._jira_issues:
+            self._show_empty("Под ваш фильтр в Jira не попала ни одна задача.")
+            return
+
+        self.empty_label.hide()
+        self.list.show()
+        for issue in self._jira_issues:
+            already = self.storage.find_by_jira_key(issue.key) is not None
+            row = JiraIssueRow(issue, self.colors, already)
+            row.activated.connect(
+                lambda key: jira.open_issue(self.settings.get("jira.base_url", ""), key)
+            )
+            row.take.connect(self._take_jira_issue)
+            item = QListWidgetItem()
+            item.setSizeHint(QSize(0, row.sizeHint().height() + 4))
+            self.list.addItem(item)
+            self.list.setItemWidget(item, row)
+
+        self.filter_label.setText(
+            "в планах: %d%s" % (len(self._jira_issues), " · обновляю…" if loading else "")
+        )
+
+    def _show_empty(self, text: str) -> None:
+        self.empty_label.setText(text)
+        self.empty_label.show()
+        self.list.hide()
+
+    def _take_jira_issue(self, key: str) -> None:
+        """Заводит локальную задачу по issue из Jira."""
+        issue = next((i for i in self._jira_issues if i.key == key), None)
+        if issue is None:
+            return
+        task = Task(title=issue.summary or issue.key, jira_key=issue.key)
+        task.jira_state = JIRA_CREATED
+        task.due_date = issue.due_date
+        task.notes = "Из Jira: %s" % (issue.url or issue.key)
+        products_module.apply_to_task(task, self.settings)
+        created = self.storage.add_task(task)
+        self.selected_id = created.id
+        self.statusBar().showMessage("Задача %s добавлена к вам в список" % issue.key, 3000)
+        self.refresh(keep_selection=False)
 
     def _sync_products_nav(self) -> None:
         """Пересобирает список продуктов в боковой панели."""
@@ -570,13 +790,25 @@ class MainWindow(QMainWindow):
         previous = self.selected_id if keep_selection else None
         stale_days = self.settings.get_int("stale_days", 5)
 
+        if self.filter == JIRA_PLAN and not self.search.text().strip():
+            self._refresh_chrome(stale_days)
+            self._fill_jira_plan()
+            self.detail.show_task(None)
+            return
+
         self.list.clear()
         self.rows: dict[int, TaskRow] = {}
         tasks = self.visible_tasks()
         catalog = products_module.load(self.settings)
 
         show_jira = bool(self.settings.get("jira.enabled", True))
-        for task in tasks:
+        # Плановые задачи идут в конце списка, за чертой: работать по ним ещё рано.
+        current = [t for t in tasks if not t.is_planned]
+        upcoming = [t for t in tasks if t.is_planned]
+        ordered = current + upcoming
+        separator_before = current[-1].id if current and upcoming else None
+
+        for task in ordered:
             color = products_module.color_for(catalog, task.product, self.colors["info"])
             row = TaskRow(task, self.colors, stale_days, color, show_jira)
             row.toggled.connect(self._toggle_task)
@@ -588,39 +820,20 @@ class MainWindow(QMainWindow):
             self.list.addItem(item)
             self.list.setItemWidget(item, row)
             self.rows[task.id] = row
+            if separator_before is not None and task.id == separator_before:
+                self._add_planned_separator(len(upcoming))
 
         self.empty_label.setVisible(not tasks)
         self.list.setVisible(bool(tasks))
         self.empty_label.setText(self._empty_text())
+        if tasks:
+            self._fade_list()
 
-        counters = self.storage.counters(stale_days)
-        self.chips["active"].set_value(counters["active"])
-        self.chips["today"].set_value(counters["today"], self.colors["accent"])
-        self.chips["planned"].set_value(counters["planned"], self.colors["info"])
-        self.chips["overdue"].set_value(counters["overdue"], self.colors["danger"])
-        self.chips["stale"].set_value(counters["stale"], self.colors["warning"])
-        self.chips["jira"].set_value(counters["jira"], self.colors["info"])
-
-        searching = bool(self.search.text().strip())
-        jira_on = bool(self.settings.get("jira.enabled", True))
-        self.chips["jira"].setVisible(jira_on)
-        if "jira" in self.nav_items:
-            self.nav_items["jira"].setVisible(jira_on)
-        if not jira_on and self.filter == "jira":
-            self.filter = "active"
-        self.demo_bar.setVisible(bool(demo.remaining_ids(self.storage)))
-        for key, chip in self.chips.items():
-            chip.set_active(key == self.filter and not searching)
-
-        self._sync_products_nav()
-        active_tasks = self.storage.list_tasks(include_done=False)
-        for key, item in self.nav_items.items():
-            item.set_active(key == self.filter and not searching)
-            item.set_count(self._nav_count(key, active_tasks, stale_days, counters))
+        self._refresh_chrome(stale_days)
 
         self.filter_label.setText(
             ("найдено: %d" % len(tasks))
-            if searching
+            if self.search.text().strip()
             else "%s: %d" % (self._filter_title().lower(), len(tasks))
         )
 
@@ -632,11 +845,40 @@ class MainWindow(QMainWindow):
         else:
             self.detail.show_task(None)
 
+    def _refresh_chrome(self, stale_days: int) -> None:
+        """Обновляет шапку, боковое меню и окошко планов."""
+        counters = self.storage.counters(stale_days)
+        summary = []
+        if counters["today"]:
+            summary.append("на сегодня: %d" % counters["today"])
+        if counters["overdue"]:
+            summary.append("просрочено: %d" % counters["overdue"])
+        self.today_label.setText("  ·  ".join(summary))
+
+        searching = bool(self.search.text().strip())
+        jira_on = bool(self.settings.get("jira.enabled", True))
+        if "jira" in self.nav_items:
+            self.nav_items["jira"].setVisible(jira_on)
+        if not jira_on and self.filter == "jira":
+            self.filter = "active"
+        self.demo_bar.setVisible(bool(demo.remaining_ids(self.storage)))
+
+        self._sync_products_nav()
+        active_tasks = self.storage.list_tasks(include_done=False)
+        self._sync_plans_box(active_tasks)
+        if JIRA_PLAN in self.nav_items:
+            self.nav_items[JIRA_PLAN].setVisible(self._jira_ready())
+        for key, item in self.nav_items.items():
+            item.set_active(key == self.filter and not searching)
+            item.set_count(self._nav_count(key, active_tasks, stale_days, counters))
+
         self._update_tray_tooltip(counters)
 
     def _filter_title(self) -> str:
         if self.filter.startswith(PRODUCT_PREFIX):
             return self.filter[len(PRODUCT_PREFIX):]
+        if self.filter == JIRA_PLAN:
+            return "В планах"
         return dict(FILTERS).get(self.filter, "")
 
     def _nav_count(
@@ -646,9 +888,55 @@ class MainWindow(QMainWindow):
         if key.startswith(PRODUCT_PREFIX):
             name = key[len(PRODUCT_PREFIX):].lower()
             return sum(1 for t in tasks if t.product.lower() == name)
+        if key == JIRA_PLAN:
+            return len(self._jira_issues)
         if key == "done":
             return 0  # выполненных много, число тут только мешает
         return counters.get(key, 0)
+
+    def _fade_list(self) -> None:
+        """Мягкое появление списка при переходе в другой раздел.
+
+        Только при смене раздела: мигать на каждом обновлении (отметил галочку,
+        напечатал букву в поиске) было бы навязчиво.
+        """
+        current = self.filter + ("?" + self.search.text().strip() if self.search.text() else "")
+        if current == self._shown_filter:
+            return
+        self._shown_filter = current
+
+        effect = QGraphicsOpacityEffect(self.list)
+        self.list.setGraphicsEffect(effect)
+        animation = QPropertyAnimation(effect, b"opacity", self)
+        animation.setDuration(160)
+        animation.setStartValue(0.25)
+        animation.setEndValue(1.0)
+        animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        # Эффект снимаем: с ним список рисуется через промежуточный буфер.
+        animation.finished.connect(lambda: self.list.setGraphicsEffect(None))
+        animation.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+        self._list_animation = animation
+
+    def _add_planned_separator(self, count: int) -> None:
+        """Черта «плановые» между актуальными и будущими задачами."""
+        c = self.colors
+        holder = QWidget()
+        layout = QHBoxLayout(holder)
+        layout.setContentsMargins(2, 8, 2, 4)
+        layout.setSpacing(9)
+
+        caption = section_label("плановые · %d" % count)
+        layout.addWidget(caption)
+        line = QFrame()
+        line.setFixedHeight(1)
+        line.setStyleSheet("background: %s;" % c["border_soft"])
+        layout.addWidget(line, 1)
+
+        item = QListWidgetItem()
+        item.setSizeHint(QSize(0, 30))
+        item.setFlags(Qt.ItemFlag.NoItemFlags)
+        self.list.addItem(item)
+        self.list.setItemWidget(item, holder)
 
     def _empty_text(self) -> str:
         if self.search.text().strip():
@@ -676,8 +964,12 @@ class MainWindow(QMainWindow):
     # --- Действия со списком --------------------------------------------------
 
     def set_filter(self, key: str) -> None:
+        # Повторный клик по «В планах» — принудительное обновление из Jira.
+        force = key == JIRA_PLAN and self.filter == JIRA_PLAN
         self.filter = key
         self.search.clear()
+        if key == JIRA_PLAN:
+            self.load_jira(force=force)
         self.refresh(keep_selection=False)
 
     def _quick_add(self) -> None:
@@ -712,8 +1004,23 @@ class MainWindow(QMainWindow):
         self.detail.show_task(self.storage.get_task(task_id))
 
     def _toggle_task(self, task_id: int, done: bool) -> None:
+        task = self.storage.get_task(task_id)
         self.storage.set_status(task_id, STATUS_DONE if done else STATUS_ACTIVE)
+        if done and task is not None:
+            self._spawn_next_occurrence(task)
         QTimer.singleShot(120, lambda: self.refresh(keep_selection=True))
+
+    def _spawn_next_occurrence(self, task: Task) -> None:
+        """Для повторяющейся задачи заводит следующий раз с новыми датами."""
+        following = recurrence.next_occurrence(task)
+        if following is None:
+            return
+        created = self.storage.add_task(following)
+        when = created.due_date or created.start_date
+        self.statusBar().showMessage(
+            "Следующая: «%s» — %s" % (created.title, fmt_date(when) if when else "без даты"),
+            4000,
+        )
 
     def open_task(self, task_id: int) -> None:
         task = self.storage.get_task(task_id)
@@ -816,7 +1123,7 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(icon)
         self.tray.setIcon(icon)
         # Виджеты, которые красятся кодом, а не таблицей стилей.
-        for widget in list(self.chips.values()) + list(self.nav_items.values()):
+        for widget in self.nav_items.values():
             widget.colors = self.colors
 
     # --- Напоминания ----------------------------------------------------------

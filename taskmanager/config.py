@@ -26,6 +26,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "enabled": True,
         "base_url": "",
         "auto_detect_keys": True,
+        # Доступы для чтения задач из Jira (раздел «В планах»).
+        "email": "",
+        "token": "",
+        "jql": 'assignee = currentUser() AND statusCategory = "To Do" ORDER BY duedate ASC',
     },
     # Напоминание в конце дня.
     "eod": {

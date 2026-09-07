@@ -8,6 +8,7 @@ import subprocess
 from PySide6.QtCore import QTime, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -33,6 +34,7 @@ from .. import products as products_module
 from .. import shortcut
 from ..config import Settings, data_dir, is_portable
 from ..integrations.confluence import ConfluenceClient, ConfluenceConfig, ConfluenceError
+from ..integrations.jira import DEFAULT_JQL, JiraClient, JiraConfig, JiraError
 from ..reports import GROUPING_BY_DAYS, GROUPING_LABELS, WEEKDAY_NAMES
 from . import theme
 from .widgets import hline, section_label
@@ -347,10 +349,48 @@ class SettingsDialog(QDialog):
         layout.addWidget(note)
         return page
 
+    def _jira_config(self) -> JiraConfig:
+        return JiraConfig(
+            base_url=self.jira_url.text().strip(),
+            email=self.jira_email.text().strip(),
+            token=self.jira_token.text().strip(),
+            jql=self.jira_jql.text().strip() or DEFAULT_JQL,
+            enabled=self.jira_check.isChecked(),
+        )
+
+    def _check_jira(self) -> None:
+        config = self._jira_config()
+        if not config.is_configured:
+            QMessageBox.information(
+                self, "Jira", "Заполните адрес, e-mail и API-токен, чтобы проверить фильтр."
+            )
+            return
+        self.status.setText("Спрашиваю Jira…")
+        QApplication.processEvents()
+        try:
+            issues = JiraClient(config).search(limit=10)
+        except JiraError as exc:
+            self.status.setText("")
+            QMessageBox.warning(self, "Jira", str(exc))
+            return
+        if not issues:
+            self.status.setText("Связь есть, но под фильтр не попала ни одна задача.")
+            return
+        self.status.setText(
+            "Связь есть. Первая задача: %s — %s" % (issues[0].key, issues[0].summary)
+        )
+
     def _sync_integrations(self) -> None:
         """Гасит поля выключенной интеграции, чтобы не сбивали с толку."""
         jira_on = self.jira_check.isChecked()
-        self.jira_url.setEnabled(jira_on)
+        for widget in (
+            self.jira_url,
+            self.jira_email,
+            self.jira_token,
+            self.jira_jql,
+            self.jira_check_button,
+        ):
+            widget.setEnabled(jira_on)
         cf_on = self.cf_check.isChecked()
         for widget in (
             self.cf_url,
@@ -477,13 +517,44 @@ class SettingsDialog(QDialog):
         self.jira_url.setPlaceholderText("https://mycompany.atlassian.net")
         layout.addWidget(self.jira_url)
         jira_note = QLabel(
-            "Адрес нужен только для ссылок «Открыть в Jira». Ключи задач вы указываете вручную. "
-            "Если выключить — из списков, карточек и отчётов пропадут все упоминания Jira, "
-            "а сами ключи у задач сохранятся."
+            "Адрес нужен для ссылок «Открыть в Jira». Если выключить интеграцию — из списков, "
+            "карточек и отчётов пропадут все упоминания Jira, а ключи у задач сохранятся."
         )
         jira_note.setWordWrap(True)
         jira_note.setProperty("faint", "true")
         layout.addWidget(jira_note)
+
+        jira_form = QFormLayout()
+        jira_form.setSpacing(8)
+        self.jira_email = QLineEdit()
+        self.jira_email.setPlaceholderText("почта учётной записи Atlassian")
+        self.jira_token = QLineEdit()
+        self.jira_token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.jira_jql = QLineEdit()
+        self.jira_jql.setPlaceholderText(DEFAULT_JQL)
+        jira_form.addRow("E-mail", self.jira_email)
+        jira_form.addRow("API-токен", self.jira_token)
+        jira_form.addRow("Фильтр (JQL)", self.jira_jql)
+        layout.addLayout(jira_form)
+
+        jira_check_row = QHBoxLayout()
+        self.jira_check_button = _button("Проверить фильтр", "flat")
+        self.jira_check_button.clicked.connect(self._check_jira)
+        jira_check_row.addWidget(self.jira_check_button)
+        reset_jql = _button("Вернуть фильтр по умолчанию", "flat")
+        reset_jql.clicked.connect(lambda: self.jira_jql.setText(DEFAULT_JQL))
+        jira_check_row.addWidget(reset_jql)
+        jira_check_row.addStretch(1)
+        layout.addLayout(jira_check_row)
+
+        jql_note = QLabel(
+            "Доступы нужны только для списка «В планах» — он показывает задачи прямо из Jira. "
+            "По умолчанию берутся задачи со статусом «Сделать», назначенные на вас; фильтр "
+            "можно заменить любым своим JQL."
+        )
+        jql_note.setWordWrap(True)
+        jql_note.setProperty("faint", "true")
+        layout.addWidget(jql_note)
 
         layout.addWidget(hline())
         layout.addWidget(section_label("obsidian"))
@@ -579,6 +650,9 @@ class SettingsDialog(QDialog):
 
         self.jira_check.setChecked(bool(s.get("jira.enabled", True)))
         self.jira_url.setText(s.get("jira.base_url", ""))
+        self.jira_email.setText(s.get("jira.email", ""))
+        self.jira_token.setText(s.get("jira.token", ""))
+        self.jira_jql.setText(s.get("jira.jql", "") or DEFAULT_JQL)
         self.vault_edit.setText(s.get("obsidian.vault_path", ""))
         self.daily_subdir.setText(s.get("obsidian.daily_subdir", ""))
         self.weekly_subdir.setText(s.get("obsidian.weekly_subdir", ""))
@@ -657,6 +731,9 @@ class SettingsDialog(QDialog):
         products_module.save(s, self.products)
 
         s.set("jira.enabled", self.jira_check.isChecked())
+        s.set("jira.email", self.jira_email.text().strip())
+        s.set("jira.token", self.jira_token.text().strip())
+        s.set("jira.jql", self.jira_jql.text().strip() or DEFAULT_JQL)
         s.set("jira.base_url", self.jira_url.text().strip().rstrip("/"))
         s.set("obsidian.vault_path", self.vault_edit.text().strip())
         s.set("obsidian.daily_subdir", self.daily_subdir.text().strip())
