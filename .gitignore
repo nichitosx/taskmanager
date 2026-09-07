@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Локальные данные приложения (портативный режим)
+data/
+portable.flag
+*.db
+*.ico
+
+# Служебное
+.idea/
+.vscode/
+*.log

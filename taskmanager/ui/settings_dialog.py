@@ -1,0 +1,646 @@
+"""Настройки приложения."""
+
+from __future__ import annotations
+
+import os
+import subprocess
+
+from PySide6.QtCore import QTime, Qt
+from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QFileDialog,
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
+    QPushButton,
+    QSpinBox,
+    QTabWidget,
+    QTimeEdit,
+    QVBoxLayout,
+    QWidget,
+)
+
+from .. import autostart
+from .. import products as products_module
+from .. import shortcut
+from ..config import Settings, data_dir, is_portable
+from ..integrations.confluence import ConfluenceClient, ConfluenceConfig, ConfluenceError
+from ..reports import GROUPING_BY_DAYS, GROUPING_LABELS, WEEKDAY_NAMES
+from . import theme
+from .widgets import hline, section_label
+
+
+def _button(text: str, kind: str = "") -> QPushButton:
+    button = QPushButton(text)
+    if kind:
+        button.setProperty(kind, "true")
+    button.setCursor(Qt.CursorShape.PointingHandCursor)
+    return button
+
+
+class SettingsDialog(QDialog):
+    def __init__(self, settings: Settings, parent=None) -> None:
+        super().__init__(parent)
+        self.settings = settings
+        self.setWindowTitle("Настройки")
+        self.setMinimumSize(660, 620)
+        self._build()
+        self._load()
+
+    # --- Построение -----------------------------------------------------------
+
+    def _build(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 18, 22, 16)
+        layout.setSpacing(12)
+
+        tabs = QTabWidget()
+        tabs.addTab(self._general_tab(), "Общее")
+        tabs.addTab(self._reminders_tab(), "Напоминания")
+        tabs.addTab(self._products_tab(), "Продукты")
+        tabs.addTab(self._integrations_tab(), "Интеграции")
+        layout.addWidget(tabs, 1)
+
+        self.status = QLabel("")
+        self.status.setProperty("faint", "true")
+        self.status.setFont(theme.mono_font(8))
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+
+        buttons = QHBoxLayout()
+        data_button = _button("Открыть папку с данными", "flat")
+        data_button.clicked.connect(self._open_data_dir)
+        buttons.addWidget(data_button)
+        buttons.addStretch(1)
+        cancel = _button("Отмена", "flat")
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+        save = _button("Сохранить", "accent")
+        save.clicked.connect(self._save)
+        save.setDefault(True)
+        buttons.addWidget(save)
+        layout.addLayout(buttons)
+
+    def _general_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(4, 14, 4, 4)
+        layout.setSpacing(12)
+
+        form = QFormLayout()
+        form.setSpacing(10)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+
+        self.theme_box = QComboBox()
+        self.theme_box.addItem("Тёмная", "dark")
+        self.theme_box.addItem("Светлая", "light")
+        form.addRow("Оформление", self.theme_box)
+
+        self.stale_spin = QSpinBox()
+        self.stale_spin.setRange(1, 60)
+        self.stale_spin.setSuffix(" дн.")
+        form.addRow("Считать задачу «без движения» через", self.stale_spin)
+
+        layout.addLayout(form)
+
+        self.tray_check = QCheckBox("Сворачивать в трей вместо закрытия")
+        layout.addWidget(self.tray_check)
+        self.autostart_check = QCheckBox("Запускать при входе в Windows")
+        layout.addWidget(self.autostart_check)
+
+        note = QLabel(
+            "Автозапуск создаёт обычный ярлык в папке «Автозагрузка» вашего профиля — "
+            "права администратора не нужны."
+        )
+        note.setWordWrap(True)
+        note.setProperty("faint", "true")
+        layout.addWidget(note)
+
+        layout.addWidget(hline())
+        layout.addWidget(section_label("ярлыки"))
+        shortcut_row = QHBoxLayout()
+        shortcut_row.setSpacing(8)
+        desktop_button = _button("Ярлык на рабочий стол")
+        desktop_button.clicked.connect(lambda: self._make_shortcut(shortcut.DESKTOP))
+        shortcut_row.addWidget(desktop_button)
+        menu_button = _button("Добавить в меню «Пуск»", "flat")
+        menu_button.clicked.connect(lambda: self._make_shortcut(shortcut.START_MENU))
+        shortcut_row.addWidget(menu_button)
+        shortcut_row.addStretch(1)
+        layout.addLayout(shortcut_row)
+
+        shortcut_note = QLabel(
+            "Ярлык запускает программу двойным кликом по значку — без консоли и "
+            "без прав администратора."
+        )
+        shortcut_note.setWordWrap(True)
+        shortcut_note.setProperty("faint", "true")
+        layout.addWidget(shortcut_note)
+
+        layout.addWidget(hline())
+        layout.addWidget(section_label("где лежат данные"))
+        path_label = QLabel(str(data_dir()))
+        path_label.setFont(theme.mono_font(8))
+        path_label.setProperty("dim", "true")
+        path_label.setWordWrap(True)
+        path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(path_label)
+        mode = QLabel(
+            "Портативный режим включён (файл portable.flag)."
+            if is_portable()
+            else "Чтобы носить программу с собой, положите рядом с run.py пустой файл portable.flag — "
+            "данные переедут в папку приложения."
+        )
+        mode.setWordWrap(True)
+        mode.setProperty("faint", "true")
+        layout.addWidget(mode)
+
+        layout.addStretch(1)
+        return page
+
+    def _reminders_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(4, 14, 4, 4)
+        layout.setSpacing(10)
+
+        layout.addWidget(section_label("отчёт в конце дня"))
+        self.eod_check = QCheckBox("Напоминать заполнить отчёт")
+        layout.addWidget(self.eod_check)
+
+        eod_row = QHBoxLayout()
+        eod_row.addWidget(QLabel("Время"))
+        self.eod_time = QTimeEdit()
+        self.eod_time.setDisplayFormat("HH:mm")
+        eod_row.addWidget(self.eod_time)
+        eod_row.addStretch(1)
+        layout.addLayout(eod_row)
+
+        days_row = QHBoxLayout()
+        days_row.setSpacing(10)
+        days_row.addWidget(QLabel("Дни"))
+        self.day_checks: list[QCheckBox] = []
+        for index, name in enumerate(WEEKDAY_NAMES):
+            box = QCheckBox(name[:2].capitalize())
+            self.day_checks.append(box)
+            days_row.addWidget(box)
+        days_row.addStretch(1)
+        layout.addLayout(days_row)
+
+        layout.addWidget(hline())
+        layout.addWidget(section_label("недельный отчёт"))
+        self.weekly_check = QCheckBox("Составлять отчёт за неделю")
+        layout.addWidget(self.weekly_check)
+
+        weekly_row = QHBoxLayout()
+        weekly_row.addWidget(QLabel("День"))
+        self.weekly_day = QComboBox()
+        for index, name in enumerate(WEEKDAY_NAMES):
+            self.weekly_day.addItem(name.capitalize(), index)
+        weekly_row.addWidget(self.weekly_day)
+        weekly_row.addSpacing(14)
+        weekly_row.addWidget(QLabel("Время"))
+        self.weekly_time = QTimeEdit()
+        self.weekly_time.setDisplayFormat("HH:mm")
+        weekly_row.addWidget(self.weekly_time)
+        weekly_row.addStretch(1)
+        layout.addLayout(weekly_row)
+
+        grouping_row = QHBoxLayout()
+        grouping_row.addWidget(QLabel("Разрез отчёта"))
+        self.grouping_box = QComboBox()
+        for key, title in GROUPING_LABELS.items():
+            self.grouping_box.addItem(title.capitalize(), key)
+        grouping_row.addWidget(self.grouping_box)
+        grouping_row.addStretch(1)
+        layout.addLayout(grouping_row)
+
+        grouping_note = QLabel(
+            "«По дням» — хроника недели: что происходило каждый день. "
+            "«По задачам» — сводка по каждой задаче со всеми отметками. "
+            "Разрез можно переключить и прямо в окне отчёта."
+        )
+        grouping_note.setWordWrap(True)
+        grouping_note.setProperty("faint", "true")
+        layout.addWidget(grouping_note)
+
+        layout.addWidget(hline())
+        layout.addWidget(section_label("плановые задачи"))
+        self.planning_check = QCheckBox("Предупреждать, когда плановая задача скоро начнётся")
+        layout.addWidget(self.planning_check)
+
+        planning_row = QHBoxLayout()
+        planning_row.addWidget(QLabel("За сколько дней"))
+        self.planning_days = QSpinBox()
+        self.planning_days.setRange(1, 60)
+        self.planning_days.setSuffix(" дн.")
+        planning_row.addWidget(self.planning_days)
+        planning_row.addStretch(1)
+        layout.addLayout(planning_row)
+
+        planning_note = QLabel(
+            "Про каждую задачу предупреждаем один раз — повторно только если "
+            "сдвинуть дату начала."
+        )
+        planning_note.setWordWrap(True)
+        planning_note.setProperty("faint", "true")
+        layout.addWidget(planning_note)
+
+        note = QLabel(
+            "Если в нужный момент программа была закрыта, напоминание появится "
+            "при первом запуске в этот день."
+        )
+        note.setWordWrap(True)
+        note.setProperty("faint", "true")
+        layout.addWidget(note)
+
+        layout.addStretch(1)
+        return page
+
+    def _products_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(4, 14, 4, 4)
+        layout.setSpacing(10)
+
+        layout.addWidget(section_label("справочник продуктов"))
+        intro = QLabel(
+            "Продукт — направление, к которому относится задача. Метка видна в списке, "
+            "по ней можно фильтровать задачи и она попадает в отчёты."
+        )
+        intro.setWordWrap(True)
+        intro.setProperty("dim", "true")
+        layout.addWidget(intro)
+
+        self.products_list = QListWidget()
+        self.products_list.itemDoubleClicked.connect(lambda _: self._edit_product())
+        layout.addWidget(self.products_list, 1)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(8)
+        add = _button("Добавить")
+        add.clicked.connect(self._add_product)
+        buttons.addWidget(add)
+        edit = _button("Изменить", "flat")
+        edit.clicked.connect(self._edit_product)
+        buttons.addWidget(edit)
+        remove = _button("Удалить", "flat")
+        remove.setProperty("danger", "true")
+        remove.clicked.connect(self._remove_product)
+        buttons.addWidget(remove)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
+
+        self.autodetect_check = QCheckBox("Определять продукт по тексту задачи автоматически")
+        layout.addWidget(self.autodetect_check)
+
+        note = QLabel(
+            "Ключевые слова перечисляются через запятую. Если слово встретилось в "
+            "названии или заметках задачи, продукт подставится сам — и его всегда "
+            "можно поправить в карточке. Уже проставленные метки при изменении "
+            "справочника не теряются."
+        )
+        note.setWordWrap(True)
+        note.setProperty("faint", "true")
+        layout.addWidget(note)
+        return page
+
+    # --- Продукты -------------------------------------------------------------
+
+    def _fill_products(self) -> None:
+        self.products_list.clear()
+        for product in self.products:
+            keywords = ", ".join(product.keywords)
+            item = QListWidgetItem(
+                "%s — %s" % (product.name, keywords) if keywords else product.name
+            )
+            item.setData(Qt.ItemDataRole.UserRole, product.name)
+            item.setIcon(self._color_dot(products_module.color_for(self.products, product.name)))
+            self.products_list.addItem(item)
+
+    @staticmethod
+    def _color_dot(color: str, size: int = 12) -> QIcon:
+        """Кружок цвета продукта — тот же, что и на метке в списке задач."""
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(color))
+        painter.drawEllipse(1, 1, size - 2, size - 2)
+        painter.end()
+        return QIcon(pixmap)
+
+    def _selected_product(self) -> int:
+        row = self.products_list.currentRow()
+        return row if 0 <= row < len(self.products) else -1
+
+    def _add_product(self) -> None:
+        dialog = ProductDialog(products_module.Product(), self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            product = dialog.result_product()
+            if not product.name:
+                return
+            if products_module.find(self.products, product.name) is not None:
+                QMessageBox.information(self, "Продукты", "Такой продукт уже есть в списке.")
+                return
+            self.products.append(product)
+            self._fill_products()
+            self.products_list.setCurrentRow(len(self.products) - 1)
+
+    def _edit_product(self) -> None:
+        index = self._selected_product()
+        if index < 0:
+            return
+        dialog = ProductDialog(self.products[index], self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            product = dialog.result_product()
+            if product.name:
+                self.products[index] = product
+                self._fill_products()
+                self.products_list.setCurrentRow(index)
+
+    def _remove_product(self) -> None:
+        index = self._selected_product()
+        if index < 0:
+            return
+        name = self.products[index].name
+        answer = QMessageBox.question(
+            self,
+            "Удалить продукт",
+            "Убрать «%s» из справочника?\nУ задач метка останется — её можно снять в карточке."
+            % name,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            del self.products[index]
+            self._fill_products()
+
+    def _make_shortcut(self, kind: str) -> None:
+        try:
+            path = shortcut.create(kind)
+        except OSError as exc:
+            QMessageBox.warning(self, "Ярлык", "Не удалось создать ярлык:\n%s" % exc)
+            return
+        self.status.setText("Ярлык создан: %s" % path)
+
+    def _integrations_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(4, 14, 4, 4)
+        layout.setSpacing(10)
+
+        layout.addWidget(section_label("jira"))
+        self.jira_url = QLineEdit()
+        self.jira_url.setPlaceholderText("https://mycompany.atlassian.net")
+        layout.addWidget(self.jira_url)
+        jira_note = QLabel(
+            "Адрес нужен только для ссылок «Открыть в Jira». Ключи задач вы указываете вручную."
+        )
+        jira_note.setWordWrap(True)
+        jira_note.setProperty("faint", "true")
+        layout.addWidget(jira_note)
+
+        layout.addWidget(hline())
+        layout.addWidget(section_label("obsidian"))
+        vault_row = QHBoxLayout()
+        self.vault_edit = QLineEdit()
+        self.vault_edit.setPlaceholderText("Путь к хранилищу, например D:\\Obsidian\\Работа")
+        vault_row.addWidget(self.vault_edit, 1)
+        browse = _button("Выбрать…", "flat")
+        browse.clicked.connect(self._pick_vault)
+        vault_row.addWidget(browse)
+        layout.addLayout(vault_row)
+
+        subdirs = QFormLayout()
+        subdirs.setSpacing(8)
+        self.daily_subdir = QLineEdit()
+        self.weekly_subdir = QLineEdit()
+        subdirs.addRow("Папка для дней", self.daily_subdir)
+        subdirs.addRow("Папка для недель", self.weekly_subdir)
+        layout.addLayout(subdirs)
+
+        layout.addWidget(hline())
+        layout.addWidget(section_label("confluence"))
+        form = QFormLayout()
+        form.setSpacing(8)
+        self.cf_url = QLineEdit()
+        self.cf_url.setPlaceholderText("https://mycompany.atlassian.net/wiki")
+        self.cf_email = QLineEdit()
+        self.cf_token = QLineEdit()
+        self.cf_token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.cf_space = QLineEdit()
+        self.cf_parent = QLineEdit()
+        self.cf_parent.setPlaceholderText("ID родительской страницы, необязательно")
+        form.addRow("Адрес", self.cf_url)
+        form.addRow("E-mail", self.cf_email)
+        form.addRow("API-токен", self.cf_token)
+        form.addRow("Ключ пространства", self.cf_space)
+        form.addRow("Родительская страница", self.cf_parent)
+        layout.addLayout(form)
+
+        check_row = QHBoxLayout()
+        check = _button("Проверить связь", "flat")
+        check.clicked.connect(self._check_confluence)
+        check_row.addWidget(check)
+        check_row.addStretch(1)
+        layout.addLayout(check_row)
+
+        cf_note = QLabel(
+            "Токен хранится в settings.json в вашем профиле. Публикация происходит "
+            "только по кнопке в окне недельного отчёта."
+        )
+        cf_note.setWordWrap(True)
+        cf_note.setProperty("faint", "true")
+        layout.addWidget(cf_note)
+
+        layout.addStretch(1)
+        return page
+
+    # --- Данные ---------------------------------------------------------------
+
+    def _load(self) -> None:
+        s = self.settings
+        index = self.theme_box.findData(s.get("theme", "dark"))
+        self.theme_box.setCurrentIndex(max(index, 0))
+        self.stale_spin.setValue(s.get_int("stale_days", 5))
+        self.tray_check.setChecked(bool(s.get("minimize_to_tray", True)))
+        self.autostart_check.setChecked(autostart.is_enabled())
+
+        self.eod_check.setChecked(bool(s.get("eod.enabled", True)))
+        hours, minutes = self._split_time(s.get("eod.time", "17:30"), 17, 30)
+        self.eod_time.setTime(QTime(hours, minutes))
+        active_days = set(s.get("eod.weekdays", [0, 1, 2, 3, 4]) or [])
+        for index, box in enumerate(self.day_checks):
+            box.setChecked(index in active_days)
+
+        self.weekly_check.setChecked(bool(s.get("weekly.enabled", True)))
+        self.weekly_day.setCurrentIndex(s.get_int("weekly.weekday", 4))
+        hours, minutes = self._split_time(s.get("weekly.time", "09:30"), 9, 30)
+        self.weekly_time.setTime(QTime(hours, minutes))
+        index = self.grouping_box.findData(s.get("weekly.grouping", GROUPING_BY_DAYS))
+        self.grouping_box.setCurrentIndex(max(index, 0))
+
+        self.planning_check.setChecked(bool(s.get("planning.notify_enabled", True)))
+        self.planning_days.setValue(s.get_int("planning.notify_days", 7))
+        self.products = products_module.load(s)
+        self.autodetect_check.setChecked(bool(s.get("products_autodetect", True)))
+        self._fill_products()
+
+        self.jira_url.setText(s.get("jira.base_url", ""))
+        self.vault_edit.setText(s.get("obsidian.vault_path", ""))
+        self.daily_subdir.setText(s.get("obsidian.daily_subdir", ""))
+        self.weekly_subdir.setText(s.get("obsidian.weekly_subdir", ""))
+
+        self.cf_url.setText(s.get("confluence.base_url", ""))
+        self.cf_email.setText(s.get("confluence.email", ""))
+        self.cf_token.setText(s.get("confluence.token", ""))
+        self.cf_space.setText(s.get("confluence.space_key", ""))
+        self.cf_parent.setText(s.get("confluence.parent_id", ""))
+
+    @staticmethod
+    def _split_time(value: str, default_h: int, default_m: int) -> tuple[int, int]:
+        try:
+            hours, minutes = str(value).split(":")
+            return int(hours), int(minutes)
+        except (ValueError, AttributeError):
+            return default_h, default_m
+
+    def _pick_vault(self) -> None:
+        path = QFileDialog.getExistingDirectory(
+            self, "Папка хранилища Obsidian", self.vault_edit.text() or str(data_dir())
+        )
+        if path:
+            self.vault_edit.setText(path)
+
+    def _confluence_config(self) -> ConfluenceConfig:
+        return ConfluenceConfig(
+            base_url=self.cf_url.text().strip(),
+            email=self.cf_email.text().strip(),
+            token=self.cf_token.text().strip(),
+            space_key=self.cf_space.text().strip(),
+            parent_id=self.cf_parent.text().strip(),
+        )
+
+    def _check_confluence(self) -> None:
+        config = self._confluence_config()
+        if not config.is_configured:
+            self.status.setText("Заполните адрес, e-mail, токен и ключ пространства.")
+            return
+        self.status.setText("Проверяю доступ…")
+        try:
+            name = ConfluenceClient(config).check_connection()
+        except ConfluenceError as exc:
+            self.status.setText("")
+            QMessageBox.warning(self, "Confluence", str(exc))
+            return
+        self.status.setText("Связь есть. Пространство: %s" % name)
+
+    def _open_data_dir(self) -> None:
+        path = str(data_dir())
+        try:
+            os.startfile(path)  # noqa: S606 (штатный способ открыть проводник)
+        except (OSError, AttributeError):
+            subprocess.Popen(["explorer", path])
+
+    def _save(self) -> None:
+        s = self.settings
+        s.set("theme", self.theme_box.currentData())
+        s.set("stale_days", self.stale_spin.value())
+        s.set("minimize_to_tray", self.tray_check.isChecked())
+
+        s.set("eod.enabled", self.eod_check.isChecked())
+        s.set("eod.time", self.eod_time.time().toString("HH:mm"))
+        s.set("eod.weekdays", [i for i, box in enumerate(self.day_checks) if box.isChecked()])
+
+        s.set("weekly.enabled", self.weekly_check.isChecked())
+        s.set("weekly.weekday", self.weekly_day.currentData())
+        s.set("weekly.time", self.weekly_time.time().toString("HH:mm"))
+        s.set("weekly.grouping", self.grouping_box.currentData())
+        s.set("planning.notify_enabled", self.planning_check.isChecked())
+        s.set("planning.notify_days", self.planning_days.value())
+        s.set("products_autodetect", self.autodetect_check.isChecked())
+        products_module.save(s, self.products)
+
+        s.set("jira.base_url", self.jira_url.text().strip().rstrip("/"))
+        s.set("obsidian.vault_path", self.vault_edit.text().strip())
+        s.set("obsidian.daily_subdir", self.daily_subdir.text().strip())
+        s.set("obsidian.weekly_subdir", self.weekly_subdir.text().strip())
+        s.set("obsidian.enabled", bool(self.vault_edit.text().strip()))
+
+        config = self._confluence_config()
+        s.set("confluence.base_url", config.base_url)
+        s.set("confluence.email", config.email)
+        s.set("confluence.token", config.token)
+        s.set("confluence.space_key", config.space_key)
+        s.set("confluence.parent_id", config.parent_id)
+        s.set("confluence.enabled", config.is_configured)
+
+        wanted = self.autostart_check.isChecked()
+        if wanted != autostart.is_enabled():
+            try:
+                autostart.apply(wanted)
+            except OSError as exc:
+                QMessageBox.warning(self, "Автозапуск", "Не удалось изменить автозапуск:\n%s" % exc)
+        s.set("autostart", autostart.is_enabled())
+
+        s.save()
+        self.accept()
+
+
+class ProductDialog(QDialog):
+    """Маленькая форма продукта: название и ключевые слова для автоопределения."""
+
+    def __init__(self, product: products_module.Product, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Продукт")
+        self.setMinimumWidth(460)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(10)
+
+        layout.addWidget(section_label("название"))
+        self.name_edit = QLineEdit(product.name)
+        self.name_edit.setPlaceholderText("Например: Личный кабинет")
+        layout.addWidget(self.name_edit)
+
+        layout.addWidget(section_label("ключевые слова"))
+        self.keywords_edit = QLineEdit(", ".join(product.keywords))
+        self.keywords_edit.setPlaceholderText("лк, кабинет, профиль — через запятую")
+        layout.addWidget(self.keywords_edit)
+
+        hint = QLabel(
+            "Если слово встретится в названии или заметках задачи, продукт "
+            "подставится сам. Само название продукта тоже ищется — его "
+            "перечислять не нужно."
+        )
+        hint.setWordWrap(True)
+        hint.setProperty("faint", "true")
+        layout.addWidget(hint)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = _button("Отмена", "flat")
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+        save = _button("Сохранить", "accent")
+        save.clicked.connect(self.accept)
+        save.setDefault(True)
+        buttons.addWidget(save)
+        layout.addLayout(buttons)
+
+        self.color = product.color
+        self.name_edit.setFocus()
+
+    def result_product(self) -> products_module.Product:
+        keywords = [k.strip() for k in self.keywords_edit.text().split(",") if k.strip()]
+        return products_module.Product(
+            name=self.name_edit.text().strip(), keywords=keywords, color=self.color
+        )
