@@ -6,8 +6,16 @@
 подключаются к приложению и доступны только ему. Установка в Windows не нужна,
 права администратора тоже.
 
-Готовый шрифт Minecraft сюда не входит: это ресурс игры, распространять его
-нельзя. Свой файл можно положить самому — программа подхватит любой .ttf/.otf.
+Внутри две папки:
+
+* ``fonts/bundled`` — шрифты, которые идут вместе с программой. Там только те,
+  чья лицензия разрешает распространение (SIL Open Font License).
+* ``fonts`` — ваши собственные файлы. Они не попадают ни в репозиторий, ни в
+  архив и остаются на месте при обновлении.
+
+Шрифта Minecraft в поставке нет и быть не может: это ресурс игры, его лицензия
+распространение не разрешает. Свой файл можно положить рядом — программа
+подхватит любой .ttf/.otf.
 """
 
 from __future__ import annotations
@@ -24,13 +32,29 @@ _loaded: list[str] = []
 
 
 def fonts_dir() -> Path:
+    """Папка для своих шрифтов."""
     path = app_dir() / "fonts"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
+def bundled_dir() -> Path:
+    """Папка со шрифтами, которые идут вместе с программой."""
+    return fonts_dir() / "bundled"
+
+
 def files() -> list[Path]:
-    return sorted(p for p in fonts_dir().iterdir() if p.suffix.lower() in SUFFIXES)
+    """Все файлы шрифтов: сначала свои, потом входящие в поставку.
+
+    Свои идут первыми: если человек положил шрифт сам, он и должен победить.
+    """
+    own = sorted(p for p in fonts_dir().iterdir() if p.suffix.lower() in SUFFIXES)
+    shipped = []
+    if bundled_dir().is_dir():
+        shipped = sorted(
+            p for p in bundled_dir().iterdir() if p.suffix.lower() in SUFFIXES
+        )
+    return own + shipped
 
 
 def loaded_families() -> list[str]:

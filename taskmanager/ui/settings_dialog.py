@@ -821,17 +821,12 @@ class SettingsDialog(QDialog):
         index = self.pixel_font_box.findData(current)
         self.pixel_font_box.setCurrentIndex(max(index, 0))
 
-        if own:
-            self.font_note.setText(
-                "Шрифты из папки %s подключаются при запуске, ставить их в Windows не нужно."
-                % fonts_module.fonts_dir()
-            )
-        else:
-            self.font_note.setText(
-                "Своих шрифтов пока нет. Положите .ttf в папку %s (или нажмите "
-                "«Добавить файл…») — тогда пиксельное оформление будет выглядеть "
-                "одинаково на любом компьютере." % fonts_module.fonts_dir()
-            )
+        self.font_note.setText(
+            "Вместе с программой идут свободные пиксельные шрифты (Tiny5, Handjet) — "
+            "они работают сразу и на любом компьютере. Свой файл можно добавить "
+            "кнопкой рядом: он ляжет в папку %s, подключится без установки в Windows "
+            "и переживёт обновление." % fonts_module.fonts_dir()
+        )
 
     def _add_font(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
