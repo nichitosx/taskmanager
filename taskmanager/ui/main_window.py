@@ -831,6 +831,7 @@ class MainWindow(QMainWindow):
         return JiraConfig.from_settings(
             self.settings.get("jira", {}) or {},
             self.settings.get("network.ca_file", ""),
+            self.settings.get("network.proxy", ""),
         )
 
     def _jira_ready(self) -> bool:

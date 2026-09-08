@@ -16,6 +16,8 @@ from __future__ import annotations
 import socket
 import ssl
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 # Назначение «проверка подлинности сервера»: только такие корни имеют смысл.
@@ -72,6 +74,36 @@ def context_from_settings(settings) -> ssl.SSLContext:
     return ssl_context(settings.get("network.ca_file", "") if settings else "")
 
 
+def normalize_proxy(address: str) -> str:
+    """Приводит адрес прокси к виду, который понимает urllib."""
+    address = (address or "").strip()
+    if not address:
+        return ""
+    if "://" not in address:
+        address = "http://" + address
+    return address.rstrip("/")
+
+
+def opener(ca_file: str = "", proxy: str = "") -> urllib.request.OpenerDirector:
+    """Открыватель запросов: сертификаты и прокси в одном месте.
+
+    Без указанного прокси остаются системные настройки Windows — их urllib
+    читает сам. Явный адрес нужен там, где браузер ходит через прокси по
+    автонастройке (PAC): её urllib не умеет, и адрес приходится назвать руками.
+    """
+    handlers: list = [urllib.request.HTTPSHandler(context=ssl_context(ca_file))]
+    address = normalize_proxy(proxy)
+    if address:
+        handlers.insert(0, urllib.request.ProxyHandler({"http": address, "https": address}))
+    return urllib.request.build_opener(*handlers)
+
+
+def opener_from_settings(settings) -> urllib.request.OpenerDirector:
+    if settings is None:
+        return opener()
+    return opener(settings.get("network.ca_file", ""), settings.get("network.proxy", ""))
+
+
 def is_certificate_error(exc: BaseException) -> bool:
     if isinstance(exc, ssl.SSLCertVerificationError):
         return True
@@ -105,4 +137,10 @@ def describe(exc: BaseException, host: str = "") -> str:
             "Адрес %s есть, но соединение отклонено: проверьте порт в адресе."
             % where
         )
-    return str(exc)
+    text = str(exc)
+    if "tunnel" in text.lower() or "cannot connect to proxy" in text.lower():
+        # Прокси есть, но не пропускает: обычно так выглядит доступ извне.
+        return (
+            "Прокси не пропустил соединение с %s. %s" % (where, VPN_HINT)
+        )
+    return text

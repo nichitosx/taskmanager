@@ -31,12 +31,17 @@ class ConfluenceConfig:
     space_key: str = ""
     parent_id: str = ""
     ca_file: str = ""
+    proxy: str = ""
 
     @classmethod
-    def from_settings(cls, data: dict[str, Any], ca_file: str = "") -> "ConfluenceConfig":
+    def from_settings(
+        cls, data: dict[str, Any], ca_file: str = "", proxy: str = ""
+    ) -> "ConfluenceConfig":
         data = dict(data or {})
         if ca_file and not data.get("ca_file"):
             data["ca_file"] = ca_file
+        if proxy and not data.get("proxy"):
+            data["proxy"] = proxy
         return cls(
             base_url=(data.get("base_url") or "").strip(),
             email=(data.get("email") or "").strip(),
@@ -44,6 +49,7 @@ class ConfluenceConfig:
             space_key=(data.get("space_key") or "").strip(),
             parent_id=str(data.get("parent_id") or "").strip(),
             ca_file=str(data.get("ca_file") or "").strip(),
+            proxy=str(data.get("proxy") or "").strip(),
         )
 
     @property
@@ -162,11 +168,9 @@ class ConfluenceClient:
         request.add_header("Authorization", "Basic " + auth)
         request.add_header("Content-Type", "application/json")
         request.add_header("Accept", "application/json")
-        context = net.ssl_context(self.config.ca_file)
+        opener = net.opener(self.config.ca_file, self.config.proxy)
         try:
-            with urllib.request.urlopen(
-                request, timeout=self.timeout, context=context
-            ) as response:
+            with opener.open(request, timeout=self.timeout) as response:
                 body = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")[:400]

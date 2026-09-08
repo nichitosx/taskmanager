@@ -205,6 +205,7 @@ class WeeklyReportDialog(QDialog):
         config = ConfluenceConfig.from_settings(
             self.settings.get("confluence", {}) or {},
             self.settings.get("network.ca_file", ""),
+            self.settings.get("network.proxy", ""),
         )
         cf_on = bool(self.settings.get("confluence.enabled", False)) and config.is_configured
         self.confluence_button.setVisible(cf_on)
@@ -440,6 +441,7 @@ class WeeklyReportDialog(QDialog):
         config = ConfluenceConfig.from_settings(
             self.settings.get("confluence", {}) or {},
             self.settings.get("network.ca_file", ""),
+            self.settings.get("network.proxy", ""),
         )
         title = "Отчёт за неделю %s — %s" % (fmt_date(self.start), fmt_date(self.end))
         answer = QMessageBox.question(

@@ -36,6 +36,7 @@ from .. import demo
 from .. import products as products_module
 from .. import shortcut
 from ..config import Settings, data_dir, is_portable
+from ..integrations import net
 from ..integrations.confluence import ConfluenceClient, ConfluenceConfig, ConfluenceError
 from ..integrations.jira import (
     AUTH_LABELS,
@@ -421,6 +422,7 @@ class SettingsDialog(QDialog):
             jql_active=self.jira_jql_active.text().strip() or DEFAULT_JQL_ACTIVE,
             enabled=self.jira_check.isChecked(),
             ca_file=self.ca_edit.text().strip(),
+            proxy=self.proxy_edit.text().strip(),
             auth=self.jira_auth.currentData() or "auto",
         )
 
@@ -737,6 +739,20 @@ class SettingsDialog(QDialog):
         ca_row.addWidget(ca_browse)
         layout.addLayout(ca_row)
 
+        self.proxy_edit = QLineEdit()
+        self.proxy_edit.setPlaceholderText("прокси, например proxy.company.ru:8080")
+        layout.addWidget(self.proxy_edit)
+
+        proxy_note = QLabel(
+            "Прокси нужен, только если рабочие сайты открываются через него. Обычно "
+            "программа берёт настройки прокси из Windows сама; вписать адрес стоит, "
+            "когда браузер настроен автоматическим сценарием и отвечает ошибкой "
+            "туннеля. Пусто — как настроено в Windows."
+        )
+        proxy_note.setWordWrap(True)
+        proxy_note.setProperty("faint", "true")
+        layout.addWidget(proxy_note)
+
         ca_note = QLabel(
             "Обычно ничего указывать не нужно: программа доверяет сертификатам из "
             "хранилища Windows. Поле пригодится, если трафик проверяет корпоративная "
@@ -846,6 +862,7 @@ class SettingsDialog(QDialog):
         self.jira_check.setChecked(bool(s.get("jira.enabled", True)))
         self.jira_url.setText(s.get("jira.base_url", ""))
         self.ca_edit.setText(s.get("network.ca_file", ""))
+        self.proxy_edit.setText(s.get("network.proxy", ""))
         index = self.jira_auth.findData(s.get("jira.auth", "auto"))
         self.jira_auth.setCurrentIndex(max(index, 0))
         self._sync_jira_auth_hint()
@@ -941,6 +958,7 @@ class SettingsDialog(QDialog):
             space_key=self.cf_space.text().strip(),
             parent_id=self.cf_parent.text().strip(),
             ca_file=self.ca_edit.text().strip(),
+            proxy=self.proxy_edit.text().strip(),
         )
 
     def _check_confluence(self) -> None:
@@ -989,6 +1007,7 @@ class SettingsDialog(QDialog):
 
         s.set("jira.enabled", self.jira_check.isChecked())
         s.set("network.ca_file", self.ca_edit.text().strip())
+        s.set("network.proxy", net.normalize_proxy(self.proxy_edit.text()))
         s.set("jira.auth", self.jira_auth.currentData() or "auto")
         s.set("jira.email", self.jira_email.text().strip())
         s.set("jira.token", self.jira_token.text().strip())

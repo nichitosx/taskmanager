@@ -175,6 +175,7 @@ class JiraConfig:
     jql_active: str = DEFAULT_JQL_ACTIVE
     enabled: bool = True
     ca_file: str = ""
+    proxy: str = ""
     auth: str = AUTH_AUTO
 
     @property
@@ -194,10 +195,14 @@ class JiraConfig:
         return [AUTH_BASIC, AUTH_BEARER] if self.email.strip() else [AUTH_BEARER, AUTH_BASIC]
 
     @classmethod
-    def from_settings(cls, raw: dict[str, Any], ca_file: str = "") -> "JiraConfig":
+    def from_settings(
+        cls, raw: dict[str, Any], ca_file: str = "", proxy: str = ""
+    ) -> "JiraConfig":
         raw = dict(raw or {})
         if ca_file and not raw.get("ca_file"):
             raw["ca_file"] = ca_file
+        if proxy and not raw.get("proxy"):
+            raw["proxy"] = proxy
         return cls(
             base_url=normalize_base_url(str(raw.get("base_url", ""))),
             email=str(raw.get("email", "")).strip(),
@@ -206,6 +211,7 @@ class JiraConfig:
             jql_active=str(raw.get("jql_active", "") or DEFAULT_JQL_ACTIVE).strip(),
             enabled=bool(raw.get("enabled", True)),
             ca_file=str(raw.get("ca_file", "")).strip(),
+            proxy=str(raw.get("proxy", "")).strip(),
             auth=str(raw.get("auth", AUTH_AUTO)).strip() or AUTH_AUTO,
         )
 
@@ -257,8 +263,8 @@ class JiraClient:
         request = urllib.request.Request(url)
         request.add_header("Authorization", self._auth_header(scheme))
         request.add_header("Accept", "application/json")
-        context = net.ssl_context(self.config.ca_file)
-        with urllib.request.urlopen(request, timeout=self.timeout, context=context) as response:
+        opener = net.opener(self.config.ca_file, self.config.proxy)
+        with opener.open(request, timeout=self.timeout) as response:
             body = response.read().decode("utf-8", "replace")
             final_url = response.geturl()
             content_type = response.headers.get_content_type()
