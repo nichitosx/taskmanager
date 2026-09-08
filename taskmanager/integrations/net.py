@@ -13,6 +13,7 @@ Harmony, Kaspersky и подобные): оно подменяет сертиф�
 
 from __future__ import annotations
 
+import socket
 import ssl
 import sys
 from pathlib import Path
@@ -78,8 +79,30 @@ def is_certificate_error(exc: BaseException) -> bool:
     return "certificate verify failed" in text or "certificate_verify_failed" in text
 
 
-def describe(exc: BaseException) -> str:
+VPN_HINT = (
+    "Внутренний адрес виден только из рабочей сети, поэтому из дома нужен VPN."
+)
+
+
+def describe(exc: BaseException, host: str = "") -> str:
     """Человеческое объяснение сетевой ошибки."""
     if is_certificate_error(exc):
         return "Сертификат сервера не прошёл проверку. " + CERT_HINT
+
+    where = "«%s»" % host if host else "этот адрес"
+    if isinstance(exc, socket.gaierror):
+        # Имя не превратилось в адрес: опечатка либо DNS рабочей сети недоступен.
+        return (
+            "Не нашёл в сети имя %s. Проверьте адрес на опечатку и подключение "
+            "к рабочей сети. %s" % (where, VPN_HINT)
+        )
+    if isinstance(exc, (socket.timeout, TimeoutError)):
+        return (
+            "Адрес %s найден, но не ответил вовремя. %s" % (where, VPN_HINT)
+        )
+    if isinstance(exc, ConnectionRefusedError):
+        return (
+            "Адрес %s есть, но соединение отклонено: проверьте порт в адресе."
+            % where
+        )
     return str(exc)

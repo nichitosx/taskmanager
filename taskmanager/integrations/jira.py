@@ -293,7 +293,8 @@ class JiraClient:
                     break                 # 401/403 — способ не подошёл целиком
                 except urllib.error.URLError as exc:
                     raise JiraError(
-                        "Не удалось соединиться с Jira: %s" % net.describe(exc.reason)
+                        "Не удалось соединиться с Jira: %s"
+                        % net.describe(exc.reason, self._host())
                     ) from exc
                 except ssl.SSLError as exc:
                     raise JiraError("Jira: %s" % net.describe(exc)) from exc
@@ -320,6 +321,10 @@ class JiraClient:
         raise JiraError(
             "\n\n".join(unique) or "Jira не приняла ни один способ входа."
         )
+
+    def _host(self) -> str:
+        """Имя сервера из настроек — чтобы называть его в сообщениях об ошибке."""
+        return urllib.parse.urlsplit(self.config.base_url).hostname or ""
 
     def _search_paths(self) -> tuple[str, ...]:
         """Какой адрес поиска пробовать первым — облачный или свой."""
@@ -350,7 +355,8 @@ class JiraClient:
                 raise JiraError(self._http_message(exc, scheme)) from exc
             except urllib.error.URLError as exc:
                 raise JiraError(
-                    "Не удалось соединиться с Jira: %s" % net.describe(exc.reason)
+                    "Не удалось соединиться с Jira: %s"
+                    % net.describe(exc.reason, self._host())
                 ) from exc
             except ssl.SSLError as exc:
                 raise JiraError("Jira: %s" % net.describe(exc)) from exc
