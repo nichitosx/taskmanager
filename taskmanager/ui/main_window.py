@@ -903,15 +903,25 @@ class MainWindow(QMainWindow):
 
         self.empty_box.hide()
         self.list.show()
+        stale_days = self.settings.get_int("stale_days", 5)
+        catalog = products_module.load(self.settings)
+        progress = self.storage.subtask_progress_map()
         for issue in issues:
-            already = self.storage.find_by_jira_key(issue.key) is not None
-            row = JiraIssueRow(issue, self.colors, already)
-            row.activated.connect(
-                lambda key: jira.open_issue(self.settings.get("jira.base_url", ""), key)
-            )
-            row.take.connect(self._take_jira_issue)
+            # Задача, заведённая руками, главнее зеркала из Jira: показываем её
+            # саму, чтобы одна и та же работа не превратилась в две строки.
+            mine = self.storage.find_by_jira_key(issue.key)
+            if mine is not None:
+                row = self._task_row(mine, stale_days, catalog, progress)
+            else:
+                row = JiraIssueRow(issue, self.colors)
+                row.activated.connect(
+                    lambda key: jira.open_issue(self.settings.get("jira.base_url", ""), key)
+                )
+                row.take.connect(self._take_jira_issue)
             item = QListWidgetItem()
             item.setSizeHint(QSize(0, self._row_height(row)))
+            if mine is not None:
+                item.setData(Qt.ItemDataRole.UserRole, mine.id)
             self.list.addItem(item)
             self.list.setItemWidget(item, row)
 
@@ -924,6 +934,25 @@ class MainWindow(QMainWindow):
             )
         )
 
+    def _task_row(self, task: Task, stale_days: int, catalog, progress: dict) -> TaskRow:
+        """Собирает строку задачи и подключает её к окну."""
+        color = products_module.color_for(catalog, task.product, self.colors["info"])
+        row = TaskRow(
+            task,
+            self.colors,
+            stale_days,
+            color,
+            bool(self.settings.get("jira.enabled", True)),
+            progress.get(task.id, (0, 0)),
+        )
+        row.toggled.connect(self._toggle_task)
+        row.activated.connect(self.open_task)
+        row.clicked.connect(self._select_task)
+        row.jira_requested.connect(self._ask_jira_key)
+        row.product_requested.connect(self._ask_product)
+        self.rows[task.id] = row
+        return row
+
     def _show_empty(self, text: str) -> None:
         self.empty_label.setText(text)
         self.empty_box.show()
@@ -934,6 +963,13 @@ class MainWindow(QMainWindow):
         every = self._jira_issues.get(JIRA_ACTIVE, []) + self._jira_issues.get(JIRA_PLAN, [])
         issue = next((i for i in every if i.key == key), None)
         if issue is None:
+            return
+        mine = self.storage.find_by_jira_key(issue.key)
+        if mine is not None:
+            # Такая задача уже заведена руками — просто показываем её.
+            self.selected_id = mine.id
+            self.statusBar().showMessage("Задача %s у вас уже есть" % issue.key, 3000)
+            self.refresh(keep_selection=True)
             return
         task = Task(title=issue.summary or issue.key, jira_key=issue.key)
         task.jira_state = JIRA_CREATED
@@ -1072,7 +1108,6 @@ class MainWindow(QMainWindow):
         tasks = self.visible_tasks()
         catalog = products_module.load(self.settings)
 
-        show_jira = bool(self.settings.get("jira.enabled", True))
         progress = self.storage.subtask_progress_map()
         # Плановые задачи идут в конце списка, за чертой: работать по ним ещё рано.
         current = [t for t in tasks if not t.is_planned]
@@ -1081,21 +1116,12 @@ class MainWindow(QMainWindow):
         separator_before = current[-1].id if current and upcoming else None
 
         for task in ordered:
-            color = products_module.color_for(catalog, task.product, self.colors["info"])
-            row = TaskRow(
-                task, self.colors, stale_days, color, show_jira, progress.get(task.id, (0, 0))
-            )
-            row.toggled.connect(self._toggle_task)
-            row.activated.connect(self.open_task)
-            row.clicked.connect(self._select_task)
-            row.jira_requested.connect(self._ask_jira_key)
-            row.product_requested.connect(self._ask_product)
+            row = self._task_row(task, stale_days, catalog, progress)
             item = QListWidgetItem()
             item.setSizeHint(QSize(0, self._row_height(row)))
             item.setData(Qt.ItemDataRole.UserRole, task.id)
             self.list.addItem(item)
             self.list.setItemWidget(item, row)
-            self.rows[task.id] = row
             if separator_before is not None and task.id == separator_before:
                 self._add_planned_separator(len(upcoming))
 
@@ -1461,6 +1487,17 @@ class MainWindow(QMainWindow):
         if not jira.is_valid_key(key):
             answer = QMessageBox.question(
                 self, "Jira", "«%s» не похоже на ключ. Всё равно сохранить?" % key
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        twin = self.storage.find_by_jira_key(key)
+        if twin is not None and twin.id != task.id:
+            # Один ключ на две задачи — верный способ сделать двойную работу.
+            answer = QMessageBox.question(
+                self,
+                "Jira",
+                "Ключ %s уже стоит у задачи «%s». Всё равно поставить его и сюда?"
+                % (key, twin.title),
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return
