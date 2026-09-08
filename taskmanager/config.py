@@ -31,6 +31,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "base_url": "",
         "auto_detect_keys": True,
         # Доступы для чтения задач из Jira (раздел «В планах»).
+        # auth: "auto" — подобрать, "basic" — облако (e-mail + API-токен),
+        # "bearer" — своя Jira Server/DC (личный токен).
+        "auth": "auto",
         "email": "",
         "token": "",
         "jql": 'assignee = currentUser() AND statusCategory = "To Do" ORDER BY duedate ASC',

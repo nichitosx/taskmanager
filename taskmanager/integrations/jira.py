@@ -79,6 +79,21 @@ from typing import Any
 # Порядок попыток: новый эндпоинт Jira Cloud, прежний, затем Server/Data Center.
 SEARCH_PATHS = ("/rest/api/3/search/jql", "/rest/api/3/search", "/rest/api/2/search")
 
+# Кто я — самый простой способ проверить, что вход вообще принят.
+WHOAMI_PATHS = ("/rest/api/2/myself", "/rest/api/3/myself")
+
+# Способы входа. В облачной Jira (*.atlassian.net) — почта и API-токен, в
+# корпоративной Jira Server/Data Center — личный токен (PAT) в заголовке Bearer.
+AUTH_AUTO = "auto"
+AUTH_BASIC = "basic"
+AUTH_BEARER = "bearer"
+
+AUTH_LABELS = {
+    AUTH_AUTO: "Подобрать автоматически",
+    AUTH_BASIC: "Облачная Jira: e-mail и API-токен",
+    AUTH_BEARER: "Своя Jira (Server/DC): личный токен",
+}
+
 DEFAULT_JQL = 'assignee = currentUser() AND statusCategory = "To Do" ORDER BY duedate ASC'
 
 FIELDS = "summary,status,duedate,priority,assignee"
@@ -108,10 +123,23 @@ class JiraConfig:
     jql: str = DEFAULT_JQL
     enabled: bool = True
     ca_file: str = ""
+    auth: str = AUTH_AUTO
 
     @property
     def is_configured(self) -> bool:
-        return bool(self.base_url.strip() and self.email.strip() and self.token.strip())
+        """Личному токену почта не нужна, паре «почта + токен» — нужна."""
+        if not (self.base_url.strip() and self.token.strip()):
+            return False
+        if self.auth == AUTH_BEARER:
+            return True
+        return bool(self.email.strip()) or self.auth == AUTH_AUTO
+
+    def schemes(self) -> list[str]:
+        """Порядок, в котором пробуем входить."""
+        if self.auth in (AUTH_BASIC, AUTH_BEARER):
+            return [self.auth]
+        # Без почты пара «логин:токен» не соберётся — начинаем с личного токена.
+        return [AUTH_BASIC, AUTH_BEARER] if self.email.strip() else [AUTH_BEARER, AUTH_BASIC]
 
     @classmethod
     def from_settings(cls, raw: dict[str, Any], ca_file: str = "") -> "JiraConfig":
@@ -125,6 +153,7 @@ class JiraConfig:
             jql=str(raw.get("jql", "") or DEFAULT_JQL).strip(),
             enabled=bool(raw.get("enabled", True)),
             ca_file=str(raw.get("ca_file", "")).strip(),
+            auth=str(raw.get("auth", AUTH_AUTO)).strip() or AUTH_AUTO,
         )
 
 
@@ -144,19 +173,66 @@ class JiraClient:
         self.config = config
         self.timeout = timeout
 
-    def _auth_header(self) -> str:
+    def _auth_header(self, scheme: str) -> str:
+        if scheme == AUTH_BEARER:
+            return "Bearer " + self.config.token
         pair = "%s:%s" % (self.config.email, self.config.token)
         return "Basic " + base64.b64encode(pair.encode("utf-8")).decode("ascii")
 
-    def _get(self, path: str, params: dict[str, str]) -> dict:
+    def _get(self, path: str, params: dict[str, str], scheme: str) -> dict:
         base = self.config.base_url.strip().rstrip("/")
-        url = base + path + "?" + urllib.parse.urlencode(params)
+        url = base + path
+        if params:
+            url += "?" + urllib.parse.urlencode(params)
         request = urllib.request.Request(url)
-        request.add_header("Authorization", self._auth_header())
+        request.add_header("Authorization", self._auth_header(scheme))
         request.add_header("Accept", "application/json")
         context = net.ssl_context(self.config.ca_file)
         with urllib.request.urlopen(request, timeout=self.timeout, context=context) as response:
             return json.loads(response.read().decode("utf-8"))
+
+    def whoami(self) -> tuple[str, str]:
+        """Проверяет вход. Возвращает (имя пользователя, способ входа).
+
+        Пробует оба способа: облачная Jira принимает почту с API-токеном, а
+        Jira Server/Data Center — личный токен в заголовке Bearer. Ошибки от
+        обоих попыток запоминаем, чтобы объяснить причину человеку.
+        """
+        if not self.config.is_configured:
+            raise JiraError("Заполните адрес Jira и токен в настройках.")
+
+        problems: list[str] = []
+        for scheme in self.config.schemes():
+            if scheme == AUTH_BASIC and not self.config.email.strip():
+                continue
+            for path in WHOAMI_PATHS:
+                try:
+                    payload = self._get(path, {}, scheme)
+                except urllib.error.HTTPError as exc:
+                    if exc.code in (404, 410):
+                        continue          # этого адреса нет — пробуем следующий
+                    problems.append(self._http_message(exc, scheme))
+                    break                 # 401/403 — способ не подошёл целиком
+                except urllib.error.URLError as exc:
+                    raise JiraError(
+                        "Не удалось соединиться с Jira: %s" % net.describe(exc.reason)
+                    ) from exc
+                except ssl.SSLError as exc:
+                    raise JiraError("Jira: %s" % net.describe(exc)) from exc
+                except ValueError as exc:
+                    problems.append("Неожиданный ответ Jira: %s" % exc)
+                    break
+
+                self._scheme = scheme
+                name = (
+                    payload.get("displayName")
+                    or payload.get("name")
+                    or payload.get("emailAddress")
+                    or "пользователь"
+                )
+                return name, scheme
+
+        raise JiraError("\n".join(problems) or "Jira не приняла ни один способ входа.")
 
     def search(self, jql: str = "", limit: int = 50) -> list[JiraIssue]:
         """Возвращает задачи по JQL. Бросает JiraError с понятным текстом."""
@@ -165,15 +241,19 @@ class JiraClient:
         query = (jql or self.config.jql or DEFAULT_JQL).strip()
         params = {"jql": query, "maxResults": str(limit), "fields": FIELDS}
 
+        scheme = getattr(self, "_scheme", "")
+        if not scheme:
+            _, scheme = self.whoami()  # заодно поймём, какой вход работает
+
         last_error: Exception | None = None
         for path in SEARCH_PATHS:
             try:
-                payload = self._get(path, params)
+                payload = self._get(path, params, scheme)
             except urllib.error.HTTPError as exc:
                 if exc.code in (404, 410):  # эндпоинта нет — пробуем следующий
                     last_error = exc
                     continue
-                raise JiraError(self._http_message(exc)) from exc
+                raise JiraError(self._http_message(exc, scheme)) from exc
             except urllib.error.URLError as exc:
                 raise JiraError(
                     "Не удалось соединиться с Jira: %s" % net.describe(exc.reason)
@@ -189,9 +269,25 @@ class JiraClient:
         )
 
     @staticmethod
-    def _http_message(exc: urllib.error.HTTPError) -> str:
-        if exc.code in (401, 403):
-            return "Jira отклонила доступ (%d): проверьте e-mail и API-токен." % exc.code
+    def _http_message(exc: urllib.error.HTTPError, scheme: str = "") -> str:
+        """Объясняет ответ Jira так, чтобы было понятно, что делать дальше."""
+        if exc.code == 401:
+            if scheme == AUTH_BEARER:
+                return (
+                    "401: Jira не приняла личный токен. Проверьте, что токен создан "
+                    "в вашем профиле Jira (Profile → Personal Access Tokens) и не истёк."
+                )
+            return (
+                "401: Jira не приняла пару «e-mail + API-токен». Так входят только в "
+                "облачную Jira (адрес вида *.atlassian.net). Если Jira корпоративная, "
+                "выберите способ входа «Своя Jira (Server/DC)» и укажите личный токен."
+            )
+        if exc.code == 403:
+            return (
+                "403: доступ запрещён. Частая причина — Jira потребовала капчу после "
+                "неудачных попыток входа: откройте Jira в браузере, войдите, введите "
+                "капчу и повторите. Ещё вариант — у токена нет прав на чтение задач."
+            )
         if exc.code == 400:
             detail = ""
             try:

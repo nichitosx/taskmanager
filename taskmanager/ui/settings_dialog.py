@@ -37,7 +37,13 @@ from .. import products as products_module
 from .. import shortcut
 from ..config import Settings, data_dir, is_portable
 from ..integrations.confluence import ConfluenceClient, ConfluenceConfig, ConfluenceError
-from ..integrations.jira import DEFAULT_JQL, JiraClient, JiraConfig, JiraError
+from ..integrations.jira import (
+    AUTH_LABELS,
+    DEFAULT_JQL,
+    JiraClient,
+    JiraConfig,
+    JiraError,
+)
 from ..reports import GROUPING_BY_DAYS, GROUPING_LABELS, WEEKDAY_NAMES
 from . import theme
 from .widgets import manage_window, hline, section_label
@@ -413,28 +419,65 @@ class SettingsDialog(QDialog):
             jql=self.jira_jql.text().strip() or DEFAULT_JQL,
             enabled=self.jira_check.isChecked(),
             ca_file=self.ca_edit.text().strip(),
+            auth=self.jira_auth.currentData() or "auto",
         )
+
+    def _sync_jira_auth_hint(self) -> None:
+        """Подсказка под полями: что именно вводить при выбранном способе."""
+        mode = self.jira_auth.currentData()
+        if mode == "basic":
+            text = (
+                "Облачная Jira (адрес вида mycompany.atlassian.net): e-mail учётной "
+                "записи и API-токен из id.atlassian.com → Security → API tokens. "
+                "Пароль от учётной записи не подойдёт."
+            )
+        elif mode == "bearer":
+            text = (
+                "Своя Jira (Server или Data Center): личный токен из профиля Jira — "
+                "аватар → Profile → Personal Access Tokens → Create token. Поле "
+                "«E-mail или логин» при этом не используется."
+            )
+        else:
+            text = (
+                "Программа сама попробует оба способа: сначала пару «e-mail + токен» "
+                "(облачная Jira), затем личный токен (своя Jira Server/DC)."
+            )
+        self.jira_auth_note.setText(text)
 
     def _check_jira(self) -> None:
         config = self._jira_config()
         if not config.is_configured:
             QMessageBox.information(
-                self, "Jira", "Заполните адрес, e-mail и API-токен, чтобы проверить фильтр."
+                self, "Jira", "Заполните адрес Jira и токен, чтобы проверить связь."
             )
             return
         self.status.setText("Спрашиваю Jira…")
         QApplication.processEvents()
+
+        client = JiraClient(config)
         try:
-            issues = JiraClient(config).search(limit=10)
+            name, scheme = client.whoami()
         except JiraError as exc:
             self.status.setText("")
             QMessageBox.warning(self, "Jira", str(exc))
             return
+
+        way = "e-mail и API-токен" if scheme == "basic" else "личный токен"
+        try:
+            issues = client.search(limit=10)
+        except JiraError as exc:
+            self.status.setText("Вход выполнен (%s), но фильтр не сработал." % way)
+            QMessageBox.warning(self, "Jira", str(exc))
+            return
+
         if not issues:
-            self.status.setText("Связь есть, но под фильтр не попала ни одна задача.")
+            self.status.setText(
+                "Вошли как %s (%s). Под фильтр не попала ни одна задача." % (name, way)
+            )
             return
         self.status.setText(
-            "Связь есть. Первая задача: %s — %s" % (issues[0].key, issues[0].summary)
+            "Вошли как %s (%s). Первая задача: %s — %s"
+            % (name, way, issues[0].key, issues[0].summary)
         )
 
     def _sync_integrations(self) -> None:
@@ -442,6 +485,7 @@ class SettingsDialog(QDialog):
         jira_on = self.jira_check.isChecked()
         for widget in (
             self.jira_url,
+            self.jira_auth,
             self.jira_email,
             self.jira_token,
             self.jira_jql,
@@ -631,13 +675,18 @@ class SettingsDialog(QDialog):
 
         jira_form = QFormLayout()
         jira_form.setSpacing(8)
+        self.jira_auth = QComboBox()
+        for key, title in AUTH_LABELS.items():
+            self.jira_auth.addItem(title, key)
+        self.jira_auth.currentIndexChanged.connect(self._sync_jira_auth_hint)
+        jira_form.addRow("Способ входа", self.jira_auth)
         self.jira_email = QLineEdit()
         self.jira_email.setPlaceholderText("почта учётной записи Atlassian")
         self.jira_token = QLineEdit()
         self.jira_token.setEchoMode(QLineEdit.EchoMode.Password)
         self.jira_jql = QLineEdit()
         self.jira_jql.setPlaceholderText(DEFAULT_JQL)
-        jira_form.addRow("E-mail", self.jira_email)
+        jira_form.addRow("E-mail или логин", self.jira_email)
         jira_form.addRow("API-токен", self.jira_token)
         jira_form.addRow("Фильтр (JQL)", self.jira_jql)
         layout.addLayout(jira_form)
@@ -651,6 +700,11 @@ class SettingsDialog(QDialog):
         jira_check_row.addWidget(reset_jql)
         jira_check_row.addStretch(1)
         layout.addLayout(jira_check_row)
+
+        self.jira_auth_note = QLabel()
+        self.jira_auth_note.setWordWrap(True)
+        self.jira_auth_note.setProperty("faint", "true")
+        layout.addWidget(self.jira_auth_note)
 
         jql_note = QLabel(
             "Доступы нужны только для списка «В планах» — он показывает задачи прямо из Jira. "
@@ -782,6 +836,9 @@ class SettingsDialog(QDialog):
         self.jira_check.setChecked(bool(s.get("jira.enabled", True)))
         self.jira_url.setText(s.get("jira.base_url", ""))
         self.ca_edit.setText(s.get("network.ca_file", ""))
+        index = self.jira_auth.findData(s.get("jira.auth", "auto"))
+        self.jira_auth.setCurrentIndex(max(index, 0))
+        self._sync_jira_auth_hint()
         self.jira_email.setText(s.get("jira.email", ""))
         self.jira_token.setText(s.get("jira.token", ""))
         self.jira_jql.setText(s.get("jira.jql", "") or DEFAULT_JQL)
@@ -921,6 +978,7 @@ class SettingsDialog(QDialog):
 
         s.set("jira.enabled", self.jira_check.isChecked())
         s.set("network.ca_file", self.ca_edit.text().strip())
+        s.set("jira.auth", self.jira_auth.currentData() or "auto")
         s.set("jira.email", self.jira_email.text().strip())
         s.set("jira.token", self.jira_token.text().strip())
         s.set("jira.jql", self.jira_jql.text().strip() or DEFAULT_JQL)
