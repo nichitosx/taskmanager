@@ -14,10 +14,11 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QAction, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QCursor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QInputDialog,
     QFrame,
     QGraphicsOpacityEffect,
     QScrollArea,
@@ -48,6 +49,7 @@ from ..horizons import (
     HORIZON_LABELS,
     default_due,
     in_horizon,
+    sort_tasks,
     start_text,
 )
 from ..integrations import jira
@@ -65,6 +67,7 @@ from ..reports import fmt_date
 from ..scheduler import Scheduler
 from ..storage import Storage
 from . import theme
+from .calendar_view import CalendarDialog
 from .dialogs import DailyReportDialog, LogWorkDialog, TaskDialog, UpcomingTasksDialog
 from .reports_ui import HistoryDialog, WeeklyReportDialog
 from .settings_dialog import SettingsDialog
@@ -546,6 +549,11 @@ class MainWindow(QMainWindow):
         daily.clicked.connect(self.open_daily)
         layout.addWidget(daily)
 
+        calendar_button = QPushButton("Календарь")
+        calendar_button.setProperty("flat", "true")
+        calendar_button.clicked.connect(self.open_calendar)
+        layout.addWidget(calendar_button)
+
         weekly = QPushButton("Неделя")
         weekly.setProperty("flat", "true")
         weekly.clicked.connect(lambda: self.open_weekly())
@@ -877,6 +885,9 @@ class MainWindow(QMainWindow):
         )
 
     def _build_tray(self) -> None:
+        # На некоторых машинах области уведомлений нет вовсе; тогда прятать окно
+        # в трей нельзя — программа просто исчезнет без следа.
+        self.tray_available = QSystemTrayIcon.isSystemTrayAvailable()
         self.tray = QSystemTrayIcon(self.windowIcon(), self)
         self.tray.setToolTip("TaskManager")
         menu = QMenu()
@@ -896,13 +907,15 @@ class MainWindow(QMainWindow):
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self._tray_activated)
         self.tray.messageClicked.connect(self._restore)
-        self.tray.show()
+        if self.tray_available:
+            self.tray.show()
 
     def _build_shortcuts(self) -> None:
         QShortcut(QKeySequence("Ctrl+N"), self, activated=self.quick_add.setFocus)
         QShortcut(QKeySequence("Ctrl+F"), self, activated=self.search.setFocus)
         QShortcut(QKeySequence("Ctrl+D"), self, activated=self.open_daily)
         QShortcut(QKeySequence("Ctrl+R"), self, activated=lambda: self.open_weekly())
+        QShortcut(QKeySequence("Ctrl+K"), self, activated=self.open_calendar)
         QShortcut(QKeySequence("Ctrl+E"), self, activated=self._log_selected)
         QShortcut(QKeySequence("Ctrl+,"), self, activated=self.open_settings)
 
@@ -922,16 +935,19 @@ class MainWindow(QMainWindow):
         tasks = self.storage.list_tasks(include_done=False)
         if self.filter.startswith(PRODUCT_PREFIX):
             name = self.filter[len(PRODUCT_PREFIX):].lower()
-            return [t for t in tasks if t.product.lower() == name]
-        if self.filter in HORIZON_LABELS:
-            return [t for t in tasks if in_horizon(t, self.filter)]
-        if self.filter == "overdue":
-            return [t for t in tasks if t.is_overdue]
-        if self.filter == "stale":
-            return [t for t in tasks if t.is_stale(stale_days)]
-        if self.filter == "jira":
-            return [t for t in tasks if t.needs_jira()]
-        return tasks
+            chosen = [t for t in tasks if t.product.lower() == name]
+        elif self.filter in HORIZON_LABELS:
+            chosen = [t for t in tasks if in_horizon(t, self.filter)]
+        elif self.filter == "overdue":
+            chosen = [t for t in tasks if t.is_overdue]
+        elif self.filter == "stale":
+            chosen = [t for t in tasks if t.is_stale(stale_days)]
+        elif self.filter == "jira":
+            chosen = [t for t in tasks if t.needs_jira()]
+        else:
+            chosen = tasks
+        # Порядок один на все списки: важность, затем срочность.
+        return sort_tasks(chosen)
 
     def refresh(self, keep_selection: bool = True) -> None:
         previous = self.selected_id if keep_selection else None
@@ -964,6 +980,8 @@ class MainWindow(QMainWindow):
             row.toggled.connect(self._toggle_task)
             row.activated.connect(self.open_task)
             row.clicked.connect(self._select_task)
+            row.jira_requested.connect(self._ask_jira_key)
+            row.product_requested.connect(self._ask_product)
             item = QListWidgetItem()
             item.setSizeHint(QSize(0, self._row_height(row)))
             item.setData(Qt.ItemDataRole.UserRole, task.id)
@@ -1289,6 +1307,7 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         menu.addAction("Открыть карточку", lambda: self.open_task(task_id))
         menu.addAction("Отметить работу", lambda: self.detail._log_work())
+        self._add_product_menu(menu, task)
         menu.addSeparator()
         if task.is_done:
             menu.addAction("Вернуть в работу", lambda: self._toggle_task(task_id, False))
@@ -1307,6 +1326,99 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction("Удалить", lambda: self._delete_task(task))
         menu.exec(self.list.viewport().mapToGlobal(position))
+
+    def _ask_jira_key(self, task_id: int) -> None:
+        """Клик по метке «jira?»: вписать ключ, не открывая карточку."""
+        task = self.storage.get_task(task_id)
+        if task is None:
+            return
+        menu = QMenu(self)
+        menu.addAction("Указать ключ…", lambda: self._enter_jira_key(task))
+        menu.addAction("Jira не нужна", lambda: self._set_no_jira(task))
+        base = self.settings.get("jira.base_url", "")
+        if base:
+            menu.addAction("Создать задачу в Jira", self._open_jira_form)
+        menu.exec(QCursor.pos())
+
+    def _enter_jira_key(self, task: Task) -> None:
+        key, accepted = QInputDialog.getText(
+            self, "Ключ Jira", "Ключ задачи для «%s»:" % task.title, text=task.jira_key
+        )
+        if not accepted:
+            return
+        key = jira.normalize_key(key)
+        if not key:
+            return
+        if not jira.is_valid_key(key):
+            answer = QMessageBox.question(
+                self, "Jira", "«%s» не похоже на ключ. Всё равно сохранить?" % key
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        task.jira_key = key
+        task.jira_state = JIRA_CREATED
+        self.storage.update_task(task, touch_activity=False)
+        self.refresh(keep_selection=True)
+        self.statusBar().showMessage("Задаче присвоен ключ %s" % key, 3000)
+
+    def _open_jira_form(self) -> None:
+        import webbrowser
+
+        url = jira.create_issue_url(self.settings.get("jira.base_url", ""))
+        if url:
+            webbrowser.open(url)
+
+    def _add_product_menu(self, menu: QMenu, task: Task) -> None:
+        """Подменю «Продукт» в контекстном меню задачи."""
+        catalog = products_module.load(self.settings)
+        names = products_module.names(catalog)
+        for name in self.storage.products_in_use():
+            if name not in names:
+                names.append(name)
+        if not names:
+            return
+
+        submenu = menu.addMenu("Продукт")
+        for name in names:
+            action = submenu.addAction(name)
+            action.setCheckable(True)
+            action.setChecked(name == task.product)
+            action.triggered.connect(lambda _=False, n=name: self._set_product(task, n))
+        if task.product:
+            submenu.addSeparator()
+            submenu.addAction("Убрать", lambda: self._set_product(task, ""))
+
+    def _ask_product(self, task_id: int) -> None:
+        """Клик по метке продукта: выбрать продукт из справочника."""
+        task = self.storage.get_task(task_id)
+        if task is None:
+            return
+        catalog = products_module.load(self.settings)
+        names = products_module.names(catalog)
+        for name in self.storage.products_in_use():
+            if name not in names:
+                names.append(name)
+
+        menu = QMenu(self)
+        if not names:
+            menu.addAction("Продукты не заведены — «Настройки → Продукты»").setEnabled(False)
+        for name in names:
+            action = menu.addAction(name)
+            action.setCheckable(True)
+            action.setChecked(name == task.product)
+            action.triggered.connect(lambda _=False, n=name: self._set_product(task, n))
+        if task.product:
+            menu.addSeparator()
+            menu.addAction("Убрать продукт", lambda: self._set_product(task, ""))
+        menu.exec(QCursor.pos())
+
+    def _set_product(self, task: Task, name: str) -> None:
+        task.product = name
+        self.storage.update_task(task, touch_activity=False)
+        self.refresh(keep_selection=True)
+        self.statusBar().showMessage(
+            ("Продукт: %s" % name) if name else "Продукт убран", 2500
+        )
 
     def _set_no_jira(self, task: Task) -> None:
         task.jira_state = JIRA_NOT_NEEDED
@@ -1334,6 +1446,13 @@ class MainWindow(QMainWindow):
 
     def open_weekly(self, start: date | None = None) -> None:
         dialog = WeeklyReportDialog(self.storage, self.settings, start, self)
+        dialog.exec()
+        self.refresh(keep_selection=True)
+
+    def open_calendar(self) -> None:
+        """Месяц целиком: где какие сроки."""
+        dialog = CalendarDialog(self.storage, self.settings, self)
+        dialog.open_task.connect(self.open_task)
         dialog.exec()
         self.refresh(keep_selection=True)
 
@@ -1444,7 +1563,11 @@ class MainWindow(QMainWindow):
             app.quit()
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
-        if not self._force_quit and self.settings.get("minimize_to_tray", True):
+        if (
+            not self._force_quit
+            and self.settings.get("minimize_to_tray", True)
+            and getattr(self, "tray_available", True)
+        ):
             event.ignore()
             self.hide()
             self.tray.showMessage(

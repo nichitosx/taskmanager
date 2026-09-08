@@ -70,11 +70,26 @@ def main() -> int:
         # Монитор мог смениться: возвращаем окно в видимую область.
         move_onto_screen(window)
 
-    # Сервер для перехвата повторного запуска: показываем уже открытое окно.
+    # Сервер для связи с другими запусками: показать окно или закрыть программу
+    # (последнее нужно обновлению — заменять файлы под работающей программой
+    # нельзя).
     QLocalServer.removeServer(SERVER_NAME)
     server = QLocalServer(app)
     server.listen(SERVER_NAME)
-    server.newConnection.connect(lambda: QTimer.singleShot(0, window._restore))
+
+    def on_connection() -> None:
+        socket = server.nextPendingConnection()
+        if socket is None:
+            return
+        socket.waitForReadyRead(300)
+        command = bytes(socket.readAll()).decode("utf-8", "ignore").strip()
+        socket.disconnectFromServer()
+        if command == "quit":
+            QTimer.singleShot(0, window._quit)
+        else:
+            QTimer.singleShot(0, window._restore)
+
+    server.newConnection.connect(on_connection)
 
     if "--tray" in sys.argv:
         window.hide()

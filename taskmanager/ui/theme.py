@@ -558,10 +558,9 @@ QLabel[section="true"] {
     letter-spacing: %(section_spacing)spx;
 }
 QFrame[hline="true"] { background: %(border_soft)s; max-height: 1px; border: none; }
-/* Полоска под шапкой: слева подкрашена акцентом и растворяется вправо. */
+/* Полоска под шапкой — сплошная акцентная линия во всю ширину. */
 QFrame[headline="true"] {
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 %(accent)s, stop:0.22 %(accent_soft)s, stop:1 %(border_soft)s);
+    background: %(accent)s;
     max-height: 1px;
     border: none;
 }

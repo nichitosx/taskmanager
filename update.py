@@ -17,8 +17,10 @@ from __future__ import annotations
 import json
 import shutil
 import ssl
+import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -49,6 +51,9 @@ ROOT_FILES = [
 ]
 
 TIMEOUT = 30
+
+# Имя канала одиночного запуска — через него просим программу закрыться.
+SERVER_NAME = "TaskManager.SingleInstance"
 
 
 def say(text: str = "") -> None:
@@ -177,6 +182,56 @@ def apply(source: Path) -> bool:
     return True
 
 
+def ask_running_app_to_quit() -> bool:
+    """Просит работающую программу закрыться. True — она была запущена.
+
+    Файлы можно менять и под работающей программой, но она продолжит выполнять
+    старый код и запишет свои настройки поверх новых. Поэтому сначала закрываем.
+    """
+    try:
+        from PySide6.QtCore import QCoreApplication
+        from PySide6.QtNetwork import QLocalSocket
+    except ImportError:
+        return False
+
+    application = QCoreApplication.instance() or QCoreApplication([])
+    socket = QLocalSocket()
+    socket.connectToServer(SERVER_NAME)
+    if not socket.waitForConnected(400):
+        return False
+
+    say("Программа запущена — прошу её закрыться…")
+    socket.write(b"quit")
+    socket.flush()
+    socket.waitForBytesWritten(400)
+    socket.disconnectFromServer()
+
+    # Ждём, пока канал освободится: значит, программа действительно закрылась.
+    for _ in range(15):
+        time.sleep(0.4)
+        probe = QLocalSocket()
+        probe.connectToServer(SERVER_NAME)
+        alive = probe.waitForConnected(200)
+        probe.abort()
+        if not alive:
+            say("Программа закрыта.")
+            return True
+    say("Программа закрывается дольше обычного — продолжаю обновление.")
+    return True
+
+
+def relaunch() -> None:
+    """Запускает программу заново — уже с новыми файлами."""
+    interpreter = Path(sys.executable)
+    pythonw = interpreter.with_name("pythonw.exe")
+    executable = str(pythonw if pythonw.exists() else interpreter)
+    try:
+        subprocess.Popen([executable, str(APP_DIR / "run.py")], cwd=str(APP_DIR))
+        say("Программа запущена заново.")
+    except OSError as exc:
+        say("Запустить заново не получилось: %s" % exc)
+
+
 def main() -> int:
     say("TaskManager — обновление")
     say("Папка программы: %s" % APP_DIR)
@@ -209,14 +264,17 @@ def main() -> int:
     source = unpack(archive)
     if source is None:
         return 1
+
+    was_running = ask_running_app_to_quit()
     if not apply(source):
         return 1
 
     remember(fresh)
     say()
     say("Готово: обновлено до %s от %s." % (fresh["sha"], fresh["date"]))
-    say("Задачи, настройки и шрифты остались на месте.")
-    say("Если программа была открыта — закройте её и запустите заново.")
+    say("Задачи, настройки и свои шрифты остались на месте.")
+    if was_running:
+        relaunch()
     return 0
 
 

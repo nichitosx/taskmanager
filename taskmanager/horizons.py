@@ -24,7 +24,7 @@ HORIZON_LABELS = {
 }
 
 HORIZON_HINTS = {
-    HORIZON_TODAY: "Срок сегодня или раньше, плюс всё, что стартует сегодня.",
+    HORIZON_TODAY: "Всё со сроком, чем можно заняться сегодня: срочное сверху.",
     HORIZON_WEEK: "Всё, что нужно закрыть до воскресенья.",
     HORIZON_MONTH: "Задачи со сроком до конца месяца.",
     HORIZON_PLANNED: "Работа ещё не началась — старт впереди.",
@@ -98,9 +98,14 @@ def in_horizon(task: Task, horizon: str, today: date | None = None) -> bool:
     if task.is_planned:
         return task.start_date is not None and task.start_date <= bound
     if task.due_date is None:
-        # Без срока: в «сегодня» не лезем, но в более широкие горизонты попадём,
-        # только если работа уже идёт — иначе список превратится в свалку.
+        # Без срока задача никуда по времени не относится: её место — в общем
+        # списке, иначе горизонты превратятся в свалку.
         return False
+    if horizon == HORIZON_TODAY:
+        # «Сегодня» — это то, чем можно заниматься сегодня: просроченное,
+        # сегодняшнее и всё, у чего срок ещё впереди. Сегодняшний день входит
+        # в число дней до любого будущего срока.
+        return True
     return task.due_date <= bound
 
 
@@ -113,6 +118,29 @@ def horizon_counts(tasks: list[Task], today: date | None = None) -> dict[str, in
     return {
         key: sum(1 for t in tasks if in_horizon(t, key, today)) for key in HORIZON_LABELS
     }
+
+
+def order_key(task: Task, today: date | None = None) -> tuple:
+    """Ключ сортировки списка задач.
+
+    Сначала важность: критичное всегда выше обычного. Внутри одной важности —
+    срочность: просроченное, потом сегодняшнее, потом по возрастанию срока, а
+    задачи без срока в самом конце. Плановые уезжают ниже всех: работать по ним
+    ещё рано.
+    """
+    today = today or date.today()
+    days_left = (task.due_date - today).days if task.due_date else None
+    return (
+        1 if task.is_planned else 0,      # плановые — в конец
+        -task.priority,                   # важность: критичное выше
+        0 if days_left is not None else 1,  # без срока — после сроковых
+        days_left if days_left is not None else 0,  # ближайший срок выше
+        task.title.lower(),
+    )
+
+
+def sort_tasks(tasks: list[Task], today: date | None = None) -> list[Task]:
+    return sorted(tasks, key=lambda task: order_key(task, today))
 
 
 def start_text(task: Task) -> str:

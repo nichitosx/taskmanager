@@ -484,6 +484,9 @@ def text_width(widget, text: str) -> int:
 class Pill(QLabel):
     """Компактная метка: срок, ключ Jira, приоритет, продукт, простой.
 
+    Метку можно сделать кнопкой: тогда по ней кликают, чтобы что-то заполнить —
+    например, вписать ключ Jira прямо из списка.
+
     Высота фиксированная, текст по центру: у моноширинных шрифтов запас под
     нижние выносные элементы разный, и без этого надпись съезжает вниз.
     """
@@ -515,6 +518,18 @@ class Pill(QLabel):
         )
         self.setFixedWidth(text_width(self, text) + left_padding + PILL_PADDING + 4)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+    clicked = Signal()
+
+    def make_clickable(self, tooltip: str = "") -> "Pill":
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        if tooltip:
+            self.setToolTip(tooltip)
+        return self
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        self.clicked.emit()
+        super().mousePressEvent(event)
 
 
 class ProductPill(Pill):
@@ -575,6 +590,8 @@ class TaskRow(Card):
     activated = Signal(int)
     clicked = Signal(int)
     log_requested = Signal(int)
+    jira_requested = Signal(int)      # кликнули по метке «jira?»
+    product_requested = Signal(int)   # кликнули по метке продукта
 
     def __init__(
         self,
@@ -649,7 +666,11 @@ class TaskRow(Card):
         pills: list[QWidget] = []
 
         if task.product:
-            pills.append(ProductPill(task.product, self.product_color or c["info"]))
+            product = ProductPill(task.product, self.product_color or c["info"])
+            product.make_clickable("Сменить продукт")
+            product.clicked.connect(lambda: self.product_requested.emit(task.id))
+            pills.append(product)
+
 
         if task.is_planned:
             pills.append(Pill(start_text(task), c["info"]))
@@ -688,7 +709,10 @@ class TaskRow(Card):
             elif task.jira_state == JIRA_NOT_NEEDED:
                 pills.append(Pill("без jira", c["text_faint"]))
             elif not task.is_done:
-                pills.append(Pill("jira?", c["warning"]))
+                ask_jira = Pill("jira?", c["warning"])
+                ask_jira.make_clickable("Указать ключ Jira")
+                ask_jira.clicked.connect(lambda: self.jira_requested.emit(task.id))
+                pills.append(ask_jira)
 
         if task.is_stale(self.stale_days):
             pills.append(Pill("тишина %d дн." % task.days_since_activity, c["text_faint"]))
