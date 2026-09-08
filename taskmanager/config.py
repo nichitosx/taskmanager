@@ -36,6 +36,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "auth": "auto",
         "email": "",
         "token": "",
+        # Два списка: что уже в работе и что только предстоит.
+        "jql_active": 'assignee = currentUser() AND statusCategory = "In Progress" ORDER BY updated DESC',
         "jql": 'assignee = currentUser() AND statusCategory = "To Do" ORDER BY duedate ASC',
     },
     # Напоминание в конце дня.

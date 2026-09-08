@@ -94,13 +94,59 @@ AUTH_LABELS = {
     AUTH_BEARER: "Своя Jira (Server/DC): личный токен",
 }
 
+# «Плановые» — то, что ещё не начато; «актуальные» — то, что уже в работе.
 DEFAULT_JQL = 'assignee = currentUser() AND statusCategory = "To Do" ORDER BY duedate ASC'
+DEFAULT_JQL_ACTIVE = (
+    'assignee = currentUser() AND statusCategory = "In Progress" ORDER BY updated DESC'
+)
 
 FIELDS = "summary,status,duedate,priority,assignee"
 
 
 class JiraError(Exception):
     """Не удалось получить данные из Jira — текст пригоден для показа пользователю."""
+
+
+def describe_non_json(url: str, final_url: str, content_type: str, body: str) -> str:
+    """Объясняет, почему вместо данных пришла страница."""
+    preview = " ".join(body.split())[:160]
+    looks_html = "html" in (content_type or "").lower() or preview.lower().startswith(
+        ("<!doctype", "<html", "<?xml")
+    )
+    login_page = any(
+        marker in (final_url + " " + preview).lower()
+        for marker in ("login", "signin", "sso", "auth/realms", "adfs")
+    )
+
+    lines = ["Jira ответила не данными, а страницей — запрос не дошёл до API."]
+    lines.append("Запрашивали: %s" % url)
+    if final_url and final_url != url:
+        lines.append("Перенаправило на: %s" % final_url)
+    if content_type:
+        lines.append("Тип ответа: %s" % content_type)
+    if preview:
+        lines.append("Начало ответа: %s" % preview[:120])
+
+    lines.append("")
+    if login_page:
+        lines.append(
+            "Похоже на страницу входа: вход идёт через SSO, а REST такой сессии не "
+            "видит. Нужен личный токен (Profile → Personal Access Tokens) и способ "
+            "входа «Своя Jira (Server/DC)»."
+        )
+    elif looks_html:
+        lines.append(
+            "Похоже на обычную веб-страницу. Проверьте адрес: он должен вести в "
+            "корень Jira (например https://jira.company.ru или "
+            "https://company.ru/jira), без /browse и /secure. Ещё вариант — ответ "
+            "подменил прокси или средство защиты трафика."
+        )
+    else:
+        lines.append(
+            "Ответ не похож на JSON. Проверьте адрес Jira и не перехватывает ли "
+            "запросы прокси."
+        )
+    return "\n".join(lines)
 
 
 @dataclass
@@ -121,6 +167,7 @@ class JiraConfig:
     email: str = ""
     token: str = ""
     jql: str = DEFAULT_JQL
+    jql_active: str = DEFAULT_JQL_ACTIVE
     enabled: bool = True
     ca_file: str = ""
     auth: str = AUTH_AUTO
@@ -147,14 +194,32 @@ class JiraConfig:
         if ca_file and not raw.get("ca_file"):
             raw["ca_file"] = ca_file
         return cls(
-            base_url=str(raw.get("base_url", "")).strip(),
+            base_url=normalize_base_url(str(raw.get("base_url", ""))),
             email=str(raw.get("email", "")).strip(),
             token=str(raw.get("token", "")).strip(),
             jql=str(raw.get("jql", "") or DEFAULT_JQL).strip(),
+            jql_active=str(raw.get("jql_active", "") or DEFAULT_JQL_ACTIVE).strip(),
             enabled=bool(raw.get("enabled", True)),
             ca_file=str(raw.get("ca_file", "")).strip(),
             auth=str(raw.get("auth", AUTH_AUTO)).strip() or AUTH_AUTO,
         )
+
+
+def normalize_base_url(value: str) -> str:
+    """Приводит адрес Jira к корню.
+
+    Люди копируют адрес из строки браузера — вместе с /browse/PROJ-1,
+    /secure/Dashboard.jspa или параметрами. По такому адресу REST не отвечает.
+    """
+    base = (value or "").strip().rstrip("/")
+    if not base:
+        return ""
+    for marker in ("/browse/", "/secure/", "/projects/", "/jira/software/", "/issues/"):
+        position = base.find(marker)
+        if position > 0:
+            base = base[:position]
+            break
+    return base.rstrip("/")
 
 
 def _parse_date(value: str | None) -> date | None:
@@ -180,7 +245,7 @@ class JiraClient:
         return "Basic " + base64.b64encode(pair.encode("utf-8")).decode("ascii")
 
     def _get(self, path: str, params: dict[str, str], scheme: str) -> dict:
-        base = self.config.base_url.strip().rstrip("/")
+        base = normalize_base_url(self.config.base_url)
         url = base + path
         if params:
             url += "?" + urllib.parse.urlencode(params)
@@ -189,7 +254,15 @@ class JiraClient:
         request.add_header("Accept", "application/json")
         context = net.ssl_context(self.config.ca_file)
         with urllib.request.urlopen(request, timeout=self.timeout, context=context) as response:
-            return json.loads(response.read().decode("utf-8"))
+            body = response.read().decode("utf-8", "replace")
+            final_url = response.geturl()
+            content_type = response.headers.get_content_type()
+        try:
+            return json.loads(body)
+        except ValueError:
+            # Ответ пришёл, но это не данные: чаще всего страница входа,
+            # заглушка прокси или адрес, указывающий не на Jira.
+            raise JiraError(describe_non_json(url, final_url, content_type, body)) from None
 
     def whoami(self) -> tuple[str, str]:
         """Проверяет вход. Возвращает (имя пользователя, способ входа).
@@ -219,8 +292,10 @@ class JiraClient:
                     ) from exc
                 except ssl.SSLError as exc:
                     raise JiraError("Jira: %s" % net.describe(exc)) from exc
-                except ValueError as exc:
-                    problems.append("Неожиданный ответ Jira: %s" % exc)
+                except JiraError as exc:
+                    # Пришла страница, а не данные — значит неверен сам адрес,
+                    # и другие версии API ответят тем же. Пробуем другой вход.
+                    problems.append(str(exc))
                     break
 
                 self._scheme = scheme
@@ -232,7 +307,14 @@ class JiraClient:
                 )
                 return name, scheme
 
-        raise JiraError("\n".join(problems) or "Jira не приняла ни один способ входа.")
+        # Одинаковые жалобы от разных способов входа не повторяем.
+        unique: list[str] = []
+        for message in problems:
+            if message not in unique:
+                unique.append(message)
+        raise JiraError(
+            "\n\n".join(unique) or "Jira не приняла ни один способ входа."
+        )
 
     def search(self, jql: str = "", limit: int = 50) -> list[JiraIssue]:
         """Возвращает задачи по JQL. Бросает JiraError с понятным текстом."""
@@ -260,8 +342,6 @@ class JiraClient:
                 ) from exc
             except ssl.SSLError as exc:
                 raise JiraError("Jira: %s" % net.describe(exc)) from exc
-            except ValueError as exc:
-                raise JiraError("Неожиданный ответ Jira: %s" % exc) from exc
             return [self._issue(item) for item in payload.get("issues", [])]
 
         raise JiraError(

@@ -105,8 +105,14 @@ FILTERS = HORIZON_FILTERS + STATE_FILTERS
 
 PRODUCT_PREFIX = "product:"
 
-# Список задач, прочитанных прямо из Jira: живёт отдельно от локальных задач.
-JIRA_PLAN = "jira_plan"
+# Списки задач, прочитанных прямо из Jira: живут отдельно от локальных задач.
+JIRA_PLAN = "jira_plan"        # то, что ещё предстоит
+JIRA_ACTIVE = "jira_active"    # то, что уже в работе
+
+JIRA_VIEWS = {
+    JIRA_ACTIVE: "Из Jira: в работе",
+    JIRA_PLAN: "Из Jira: планы",
+}
 
 # Сколько держим ответ Jira, прежде чем спрашивать снова.
 JIRA_CACHE_SECONDS = 300
@@ -124,7 +130,12 @@ class JiraFetch(QThread):
 
     def run(self) -> None:  # noqa: D102 (Qt naming)
         try:
-            self.done.emit(JiraClient(self.config).search())
+            client = JiraClient(self.config)
+            # Один вход, два запроса: списки собираются разными фильтрами.
+            self.done.emit({
+                JIRA_ACTIVE: client.search(self.config.jql_active),
+                JIRA_PLAN: client.search(self.config.jql),
+            })
         except JiraError as exc:
             self.failed.emit(str(exc))
         except Exception as exc:  # неожиданная ошибка не должна ронять приложение
@@ -363,7 +374,7 @@ class MainWindow(QMainWindow):
         self.settings = settings
         self.filter = "active"
         self.selected_id: int | None = None
-        self._jira_issues: list = []
+        self._jira_issues: dict[str, list] = {JIRA_ACTIVE: [], JIRA_PLAN: []}
         self._jira_error = ""
         self._jira_loaded_at = None
         self._jira_thread: JiraFetch | None = None
@@ -663,9 +674,16 @@ class MainWindow(QMainWindow):
             layout.addWidget(self._nav_item(key, title, HORIZON_HINTS.get(key, "")))
         layout.addWidget(
             self._nav_item(
+                JIRA_ACTIVE,
+                JIRA_VIEWS[JIRA_ACTIVE],
+                "Задачи из Jira, которые уже в работе (фильтр в настройках)",
+            )
+        )
+        layout.addWidget(
+            self._nav_item(
                 JIRA_PLAN,
-                "В планах",
-                "Задачи из Jira по вашему фильтру: статус «Сделать» и назначены на вас",
+                JIRA_VIEWS[JIRA_PLAN],
+                "Задачи из Jira, которые ещё предстоят (фильтр в настройках)",
             )
         )
 
@@ -838,20 +856,23 @@ class MainWindow(QMainWindow):
         thread.failed.connect(self._on_jira_failed)
         self._jira_thread = thread
         thread.start()
-        if self.filter == JIRA_PLAN:
+        if self.filter in JIRA_VIEWS:
             self.refresh(keep_selection=False)
 
-    def _on_jira_done(self, issues: list) -> None:
-        self._jira_issues = list(issues)
+    def _on_jira_done(self, issues: dict) -> None:
+        self._jira_issues = {
+            JIRA_ACTIVE: list(issues.get(JIRA_ACTIVE, [])),
+            JIRA_PLAN: list(issues.get(JIRA_PLAN, [])),
+        }
         self._jira_error = ""
         self._jira_loaded_at = datetime.now()
-        if self.filter == JIRA_PLAN:
+        if self.filter in JIRA_VIEWS:
             self.refresh(keep_selection=False)
 
     def _on_jira_failed(self, message: str) -> None:
         self._jira_error = message
         self._jira_loaded_at = datetime.now()
-        if self.filter == JIRA_PLAN:
+        if self.filter in JIRA_VIEWS:
             self.refresh(keep_selection=False)
 
     def _fill_jira_plan(self) -> None:
@@ -859,6 +880,7 @@ class MainWindow(QMainWindow):
         self.rows = {}
         self.list.clear()
         loading = self._jira_thread is not None and self._jira_thread.isRunning()
+        issues = self._jira_issues.get(self.filter, [])
 
         if not self._jira_ready():
             self._show_empty(
@@ -866,19 +888,22 @@ class MainWindow(QMainWindow):
                 "e-mail и API-токен в настройках."
             )
             return
-        if loading and not self._jira_issues:
+        if loading and not issues:
             self._show_empty("Спрашиваю Jira…")
             return
         if self._jira_error:
             self._show_empty(self._jira_error)
             return
-        if not self._jira_issues:
-            self._show_empty("Под ваш фильтр в Jira не попала ни одна задача.")
+        if not issues:
+            self._show_empty(
+                "Под фильтр «%s» в Jira не попала ни одна задача."
+                % JIRA_VIEWS.get(self.filter, "")
+            )
             return
 
         self.empty_box.hide()
         self.list.show()
-        for issue in self._jira_issues:
+        for issue in issues:
             already = self.storage.find_by_jira_key(issue.key) is not None
             row = JiraIssueRow(issue, self.colors, already)
             row.activated.connect(
@@ -891,7 +916,12 @@ class MainWindow(QMainWindow):
             self.list.setItemWidget(item, row)
 
         self.filter_label.setText(
-            "в планах: %d%s" % (len(self._jira_issues), " · обновляю…" if loading else "")
+            "%s: %d%s"
+            % (
+                JIRA_VIEWS.get(self.filter, "из jira").lower(),
+                len(issues),
+                " · обновляю…" if loading else "",
+            )
         )
 
     def _show_empty(self, text: str) -> None:
@@ -901,7 +931,8 @@ class MainWindow(QMainWindow):
 
     def _take_jira_issue(self, key: str) -> None:
         """Заводит локальную задачу по issue из Jira."""
-        issue = next((i for i in self._jira_issues if i.key == key), None)
+        every = self._jira_issues.get(JIRA_ACTIVE, []) + self._jira_issues.get(JIRA_PLAN, [])
+        issue = next((i for i in every if i.key == key), None)
         if issue is None:
             return
         task = Task(title=issue.summary or issue.key, jira_key=issue.key)
@@ -1030,7 +1061,7 @@ class MainWindow(QMainWindow):
         previous = self.selected_id if keep_selection else None
         stale_days = self.settings.get_int("stale_days", 5)
 
-        if self.filter == JIRA_PLAN and not self.search.text().strip():
+        if self.filter in JIRA_VIEWS and not self.search.text().strip():
             self._refresh_chrome(stale_days)
             self._fill_jira_plan()
             self.detail.show_task(None)
@@ -1106,8 +1137,9 @@ class MainWindow(QMainWindow):
         active_tasks = self.storage.list_tasks(include_done=False)
         self._sync_products_nav(active_tasks)
         self._sync_plans_box(active_tasks)
-        if JIRA_PLAN in self.nav_items:
-            self.nav_items[JIRA_PLAN].setVisible(self._jira_ready())
+        for key in JIRA_VIEWS:
+            if key in self.nav_items:
+                self.nav_items[key].setVisible(self._jira_ready())
         for key, item in self.nav_items.items():
             item.set_active(key == self.filter and not searching)
             item.set_count(self._nav_count(key, active_tasks, stale_days, counters))
@@ -1117,8 +1149,8 @@ class MainWindow(QMainWindow):
     def _filter_title(self) -> str:
         if self.filter.startswith(PRODUCT_PREFIX):
             return self.filter[len(PRODUCT_PREFIX):]
-        if self.filter == JIRA_PLAN:
-            return "В планах"
+        if self.filter in JIRA_VIEWS:
+            return JIRA_VIEWS[self.filter]
         return dict(FILTERS).get(self.filter, "")
 
     def _nav_count(
@@ -1128,8 +1160,8 @@ class MainWindow(QMainWindow):
         if key.startswith(PRODUCT_PREFIX):
             name = key[len(PRODUCT_PREFIX):].lower()
             return sum(1 for t in tasks if t.product.lower() == name)
-        if key == JIRA_PLAN:
-            return len(self._jira_issues)
+        if key in JIRA_VIEWS:
+            return len(self._jira_issues.get(key, []))
         if key == "done":
             return 0  # выполненных много, число тут только мешает
         return counters.get(key, 0)
@@ -1241,11 +1273,11 @@ class MainWindow(QMainWindow):
     # --- Действия со списком --------------------------------------------------
 
     def set_filter(self, key: str) -> None:
-        # Повторный клик по «В планах» — принудительное обновление из Jira.
-        force = key == JIRA_PLAN and self.filter == JIRA_PLAN
+        # Повторный клик по тому же списку — принудительное обновление из Jira.
+        force = key in JIRA_VIEWS and self.filter == key
         self.filter = key
         self.search.clear()
-        if key == JIRA_PLAN:
+        if key in JIRA_VIEWS:
             self.load_jira(force=force)
         self.refresh(keep_selection=False)
 

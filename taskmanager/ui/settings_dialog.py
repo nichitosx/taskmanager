@@ -40,6 +40,7 @@ from ..integrations.confluence import ConfluenceClient, ConfluenceConfig, Conflu
 from ..integrations.jira import (
     AUTH_LABELS,
     DEFAULT_JQL,
+    DEFAULT_JQL_ACTIVE,
     JiraClient,
     JiraConfig,
     JiraError,
@@ -417,10 +418,15 @@ class SettingsDialog(QDialog):
             email=self.jira_email.text().strip(),
             token=self.jira_token.text().strip(),
             jql=self.jira_jql.text().strip() or DEFAULT_JQL,
+            jql_active=self.jira_jql_active.text().strip() or DEFAULT_JQL_ACTIVE,
             enabled=self.jira_check.isChecked(),
             ca_file=self.ca_edit.text().strip(),
             auth=self.jira_auth.currentData() or "auto",
         )
+
+    def _reset_jql(self) -> None:
+        self.jira_jql_active.setText(DEFAULT_JQL_ACTIVE)
+        self.jira_jql.setText(DEFAULT_JQL)
 
     def _sync_jira_auth_hint(self) -> None:
         """Подсказка под полями: что именно вводить при выбранном способе."""
@@ -489,6 +495,7 @@ class SettingsDialog(QDialog):
             self.jira_email,
             self.jira_token,
             self.jira_jql,
+            self.jira_jql_active,
             self.jira_check_button,
         ):
             widget.setEnabled(jira_on)
@@ -684,19 +691,22 @@ class SettingsDialog(QDialog):
         self.jira_email.setPlaceholderText("почта учётной записи Atlassian")
         self.jira_token = QLineEdit()
         self.jira_token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.jira_jql_active = QLineEdit()
+        self.jira_jql_active.setPlaceholderText(DEFAULT_JQL_ACTIVE)
         self.jira_jql = QLineEdit()
         self.jira_jql.setPlaceholderText(DEFAULT_JQL)
         jira_form.addRow("E-mail или логин", self.jira_email)
         jira_form.addRow("API-токен", self.jira_token)
-        jira_form.addRow("Фильтр (JQL)", self.jira_jql)
+        jira_form.addRow("Актуальные (JQL)", self.jira_jql_active)
+        jira_form.addRow("Плановые (JQL)", self.jira_jql)
         layout.addLayout(jira_form)
 
         jira_check_row = QHBoxLayout()
         self.jira_check_button = _button("Проверить фильтр", "flat")
         self.jira_check_button.clicked.connect(self._check_jira)
         jira_check_row.addWidget(self.jira_check_button)
-        reset_jql = _button("Вернуть фильтр по умолчанию", "flat")
-        reset_jql.clicked.connect(lambda: self.jira_jql.setText(DEFAULT_JQL))
+        reset_jql = _button("Вернуть фильтры по умолчанию", "flat")
+        reset_jql.clicked.connect(self._reset_jql)
         jira_check_row.addWidget(reset_jql)
         jira_check_row.addStretch(1)
         layout.addLayout(jira_check_row)
@@ -707,9 +717,9 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.jira_auth_note)
 
         jql_note = QLabel(
-            "Доступы нужны только для списка «В планах» — он показывает задачи прямо из Jira. "
-            "По умолчанию берутся задачи со статусом «Сделать», назначенные на вас; фильтр "
-            "можно заменить любым своим JQL."
+            "Из Jira собираются два списка: «Из Jira: в работе» и «Из Jira: планы». "
+            "По умолчанию это назначенные на вас задачи в статусах «В работе» и "
+            "«Сделать»; любой фильтр можно заменить своим JQL."
         )
         jql_note.setWordWrap(True)
         jql_note.setProperty("faint", "true")
@@ -842,6 +852,7 @@ class SettingsDialog(QDialog):
         self.jira_email.setText(s.get("jira.email", ""))
         self.jira_token.setText(s.get("jira.token", ""))
         self.jira_jql.setText(s.get("jira.jql", "") or DEFAULT_JQL)
+        self.jira_jql_active.setText(s.get("jira.jql_active", "") or DEFAULT_JQL_ACTIVE)
         self.vault_edit.setText(s.get("obsidian.vault_path", ""))
         self.daily_subdir.setText(s.get("obsidian.daily_subdir", ""))
         self.weekly_subdir.setText(s.get("obsidian.weekly_subdir", ""))
@@ -982,6 +993,7 @@ class SettingsDialog(QDialog):
         s.set("jira.email", self.jira_email.text().strip())
         s.set("jira.token", self.jira_token.text().strip())
         s.set("jira.jql", self.jira_jql.text().strip() or DEFAULT_JQL)
+        s.set("jira.jql_active", self.jira_jql_active.text().strip() or DEFAULT_JQL_ACTIVE)
         s.set("jira.base_url", self.jira_url.text().strip().rstrip("/"))
         s.set("obsidian.vault_path", self.vault_edit.text().strip())
         s.set("obsidian.daily_subdir", self.daily_subdir.text().strip())
