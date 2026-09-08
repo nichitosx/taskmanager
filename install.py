@@ -127,17 +127,18 @@ def install_pyside() -> str:
 
 
 def remember_version() -> None:
-    """Записывает, какая версия установлена, — от неё считает «Обновить»."""
+    """Запоминает отпечаток установленных файлов.
+
+    Номер последнего коммита с GitHub сюда писать нельзя: архив мог быть собран
+    раньше, и тогда обновление решило бы, что ставить нечего.
+    """
     try:
         sys.path.insert(0, str(APP_DIR))
         import update
 
-        info = update.latest()
-        if info:
-            update.remember(info)
-            say("Версия: %s от %s" % (info["sha"], info["date"]))
+        update.remember({"sha": "", "date": "", "fingerprint": update.fingerprint(APP_DIR)})
     except Exception:
-        pass  # без интернета просто нечего записывать
+        pass  # не смогли — обновление всё равно сравнит файлы само
 
 
 def make_shortcuts() -> list[Path]:

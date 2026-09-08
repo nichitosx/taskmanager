@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import ssl
@@ -52,6 +53,11 @@ ROOT_FILES = [
 
 TIMEOUT = 30
 
+# Файлы, по которым считается «версия»: именно они и обновляются.
+FINGERPRINT_SUFFIXES = (".py", ".cmd", ".txt", ".md")
+
+TIMEOUT_NOTE = "Проверка обновлений"
+
 # Имя канала одиночного запуска — через него просим программу закрыться.
 SERVER_NAME = "TaskManager.SingleInstance"
 
@@ -86,6 +92,33 @@ def context():
     from taskmanager.integrations import net
 
     return net.ssl_context()
+
+
+def fingerprint(root: Path) -> str:
+    """Отпечаток версии — свёртка по содержимому файлов программы.
+
+    Отметка в файле врёт: её можно записать при установке старого архива. А
+    содержимое не соврёт — если файлы совпали, версия та же. Переводы строк
+    приводим к одному виду: git на Windows переписывает их, и одна и та же
+    версия иначе давала бы разные отпечатки.
+    """
+    digest = hashlib.sha256()
+    for name in [PACKAGE] + ROOT_FILES:
+        source = root / name
+        if source.is_dir():
+            items = sorted(p for p in source.rglob("*") if p.is_file())
+        elif source.is_file():
+            items = [source]
+        else:
+            continue
+        for item in items:
+            if item.suffix.lower() not in FINGERPRINT_SUFFIXES:
+                continue
+            if "__pycache__" in item.parts:
+                continue
+            digest.update(str(item.relative_to(root)).replace("\\", "/").encode("utf-8"))
+            digest.update(item.read_bytes().replace(b"\r\n", b"\n"))
+    return digest.hexdigest()[:16]
 
 
 def latest() -> dict | None:
@@ -250,14 +283,6 @@ def main() -> int:
         say("Последнее изменение: %s" % fresh["message"])
     say()
 
-    if current.get("sha") == fresh["sha"]:
-        say("У вас уже последняя версия.")
-        return 0
-
-    if "--check" in sys.argv:
-        say("Есть обновление. Запустите «Обновить.cmd», чтобы поставить его.")
-        return 0
-
     archive = download()
     if archive is None:
         return 1
@@ -265,10 +290,23 @@ def main() -> int:
     if source is None:
         return 1
 
+    # Сравниваем то, что лежит на диске, с тем, что пришло: отметка о версии
+    # может быть неверной, а файлы — нет.
+    if fingerprint(APP_DIR) == fingerprint(source):
+        say("У вас уже последняя версия: файлы совпадают.")
+        fresh["fingerprint"] = fingerprint(APP_DIR)
+        remember(fresh)
+        return 0
+
+    if "--check" in sys.argv:
+        say("Есть обновление. Запустите «Обновить.cmd», чтобы поставить его.")
+        return 0
+
     was_running = ask_running_app_to_quit()
     if not apply(source):
         return 1
 
+    fresh["fingerprint"] = fingerprint(APP_DIR)
     remember(fresh)
     say()
     say("Готово: обновлено до %s от %s." % (fresh["sha"], fresh["date"]))

@@ -200,6 +200,10 @@ class SettingsDialog(QDialog):
         self.update_button = _button("Проверить обновления")
         self.update_button.clicked.connect(self._run_update)
         update_row.addWidget(self.update_button)
+
+        self.update_check_box = QCheckBox("Проверять обновления при запуске")
+        self.update_check_box.setToolTip("Раз в сутки, в фоне; без интернета просто молчит")
+        update_row.addWidget(self.update_check_box)
         update_row.addStretch(1)
         layout.addLayout(update_row)
 
@@ -580,7 +584,6 @@ class SettingsDialog(QDialog):
         self.products = products_module.load(self.settings)
         self._fill_products()
         self._sync_demo_button()
-        self._sync_version()
         self.status.setText(
             "Добавлено задач-примеров: %d. Закройте настройки, чтобы увидеть их в списке."
             % len(created)
@@ -743,6 +746,8 @@ class SettingsDialog(QDialog):
 
     def _load(self) -> None:
         s = self.settings
+        self._sync_version()
+        self.update_check_box.setChecked(bool(s.get("updates.check_on_start", True)))
         index = self.theme_box.findData(s.get("theme", "dark"))
         self.theme_box.setCurrentIndex(max(index, 0))
         index = self.style_box.findData(s.get("ui_style", theme.STYLE_SOFT))
@@ -897,6 +902,7 @@ class SettingsDialog(QDialog):
         s.set("ui_style", self.style_box.currentData())
         s.set("pixel_font", self.pixel_font_box.currentData() or "")
         s.set("stale_days", self.stale_spin.value())
+        s.set("updates.check_on_start", self.update_check_box.isChecked())
         s.set("confirm_done", self.confirm_check.isChecked())
         s.set("minimize_to_tray", self.tray_check.isChecked())
 

@@ -54,6 +54,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "notify_enabled": True,
         "notify_days": 7,
     },
+    # Проверка обновлений при запуске (раз в сутки, в фоне).
+    "updates": {
+        "check_on_start": True,
+        "last_check": "",
+    },
     # Сеть: файл корневого сертификата, если трафик проверяет средство защиты.
     "network": {
         "ca_file": "",

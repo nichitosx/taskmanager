@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import date, datetime
 
 from PySide6.QtCore import (
@@ -39,6 +40,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import demo
+from .. import updates as updates_module
 from .. import products as products_module
 from .. import quickadd
 from .. import recurrence
@@ -391,6 +393,8 @@ class MainWindow(QMainWindow):
         demo.seed_if_empty(storage, settings)
         self._start_clock()
         self.refresh()
+        # Проверку откладываем: пусть окно сначала появится.
+        QTimer.singleShot(4000, self._check_updates)
 
     # --- Интерфейс ------------------------------------------------------------
 
@@ -423,6 +427,9 @@ class MainWindow(QMainWindow):
         center_layout.setContentsMargins(18, 0, 4, 0)
         center_layout.setSpacing(12)
         splitter.addWidget(center)
+
+        self.update_bar = self._update_bar()
+        center_layout.addWidget(self.update_bar)
 
         self.demo_bar = self._demo_bar()
         center_layout.addWidget(self.demo_bar)
@@ -486,6 +493,76 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self.detail)
         splitter.setSizes([700, detail_width])
         splitter.setCollapsible(0, False)
+
+    def _update_bar(self) -> QWidget:
+        """Полоса «вышла новая версия» с кнопкой обновления."""
+        c = self.colors
+        bar = Card(c)
+        bar.set_card_colors(
+            bg=theme.tint(c["accent"], 0.12), border=theme.tint(c["accent"], 0.34)
+        )
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(13, 8, 10, 8)
+        layout.setSpacing(10)
+
+        self.update_label = QLabel()
+        self.update_label.setWordWrap(True)
+        self.update_label.setStyleSheet("color: %s; background: transparent;" % c["text"])
+        layout.addWidget(self.update_label, 1)
+
+        install = QPushButton("Обновить")
+        install.setProperty("accent", "true")
+        install.setCursor(Qt.CursorShape.PointingHandCursor)
+        install.clicked.connect(self._start_update)
+        layout.addWidget(install)
+
+        later = QPushButton("Позже")
+        later.setProperty("flat", "true")
+        later.setCursor(Qt.CursorShape.PointingHandCursor)
+        later.clicked.connect(bar.hide)
+        layout.addWidget(later)
+
+        bar.hide()
+        return bar
+
+    def _check_updates(self) -> None:
+        """Раз в сутки тихо смотрит, не вышла ли новая версия."""
+        if not self.settings.get("updates.check_on_start", True):
+            return
+        if not updates_module.due_today(self.settings):
+            return
+        updates_module.mark_checked(self.settings)
+        self._update_check = updates_module.UpdateCheck(self)
+        self._update_check.found.connect(self._on_update_found)
+        self._update_check.start()
+
+    def _on_update_found(self, description: str) -> None:
+        self.update_label.setText(
+            "Вышла новая версия (%s). Задачи и настройки при обновлении сохранятся."
+            % description
+        )
+        self.update_bar.show()
+
+    def _start_update(self) -> None:
+        """Запускает обновление отдельным окном — оно само закроет программу."""
+        from ..config import app_dir
+
+        command = app_dir() / "Обновить.cmd"
+        if not command.exists():
+            QMessageBox.information(
+                self, "Обновление", "Файл «Обновить.cmd» не найден рядом с программой."
+            )
+            return
+        try:
+            os.startfile(str(command))  # noqa: S606 (штатный запуск в отдельном окне)
+        except OSError as exc:
+            QMessageBox.warning(self, "Обновление", "Не удалось запустить: %s" % exc)
+            return
+        self.update_bar.hide()
+        self.statusBar().showMessage(
+            "Обновление идёт в отдельном окне — программа закроется и запустится заново.",
+            8000,
+        )
 
     def _demo_bar(self) -> QWidget:
         """Полоса-подсказка про задачи-примеры с кнопкой «убрать»."""
