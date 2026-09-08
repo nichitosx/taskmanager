@@ -76,10 +76,15 @@ from . import net
 from datetime import date
 from typing import Any
 
-# Порядок попыток: новый эндпоинт Jira Cloud, прежний, затем Server/Data Center.
-SEARCH_PATHS = ("/rest/api/3/search/jql", "/rest/api/3/search", "/rest/api/2/search")
+# Облачная Jira ищет через /rest/api/3/search/jql, Jira Server и Data Center —
+# через /rest/api/2/search. Начинаем с подходящего адреса, но проверяем все:
+# облачный адрес в своей установке приводит на страницу входа, а не к 404.
+CLOUD_SEARCH_PATHS = ("/rest/api/3/search/jql", "/rest/api/3/search", "/rest/api/2/search")
+SERVER_SEARCH_PATHS = ("/rest/api/2/search", "/rest/api/3/search/jql", "/rest/api/3/search")
+SEARCH_PATHS = CLOUD_SEARCH_PATHS
 
-# Кто я — самый простой способ проверить, что вход вообще принят.
+# Кто я — самый простой способ проверить, что вход вообще принят. Вторая
+# версия отвечает и в облаке, и в своей установке, поэтому спрашиваем ей.
 WHOAMI_PATHS = ("/rest/api/2/myself", "/rest/api/3/myself")
 
 # Способы входа. В облачной Jira (*.atlassian.net) — почта и API-токен, в
@@ -316,6 +321,12 @@ class JiraClient:
             "\n\n".join(unique) or "Jira не приняла ни один способ входа."
         )
 
+    def _search_paths(self) -> tuple[str, ...]:
+        """Какой адрес поиска пробовать первым — облачный или свой."""
+        host = urllib.parse.urlsplit(self.config.base_url).hostname or ""
+        cloud = host.endswith(".atlassian.net") or self.config.auth == AUTH_BASIC
+        return CLOUD_SEARCH_PATHS if cloud else SERVER_SEARCH_PATHS
+
     def search(self, jql: str = "", limit: int = 50) -> list[JiraIssue]:
         """Возвращает задачи по JQL. Бросает JiraError с понятным текстом."""
         if not self.config.is_configured:
@@ -326,9 +337,10 @@ class JiraClient:
         scheme = getattr(self, "_scheme", "")
         if not scheme:
             _, scheme = self.whoami()  # заодно поймём, какой вход работает
+        paths = self._search_paths()
 
         last_error: Exception | None = None
-        for path in SEARCH_PATHS:
+        for path in paths:
             try:
                 payload = self._get(path, params, scheme)
             except urllib.error.HTTPError as exc:
@@ -342,8 +354,14 @@ class JiraClient:
                 ) from exc
             except ssl.SSLError as exc:
                 raise JiraError("Jira: %s" % net.describe(exc)) from exc
+            except JiraError as exc:
+                # Ответ страницей: у этой версии API такого адреса нет.
+                last_error = exc
+                continue
             return [self._issue(item) for item in payload.get("issues", [])]
 
+        if isinstance(last_error, JiraError):
+            raise last_error
         raise JiraError(
             "Jira не отвечает ни на один из известных адресов поиска (%s)." % (last_error or "")
         )
