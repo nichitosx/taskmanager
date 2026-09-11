@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import re
-from datetime import date, timedelta
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -56,6 +57,56 @@ def previous_week_bounds(any_day: Optional[date] = None) -> tuple[date, date]:
     start, _ = week_bounds(any_day)
     prev_start = start - timedelta(days=7)
     return prev_start, prev_start + timedelta(days=6)
+
+
+# --- Где кончается рабочая неделя ---------------------------------------------
+# Отчёт сдаётся в пятницу днём, и всё сделанное после уже относится к следующей
+# неделе — иначе пятничный вечер и выходные попадают в отчёт, который уже сдан.
+
+DEFAULT_CUTOFF_DAY = 4        # пятница
+DEFAULT_CUTOFF_TIME = "12:00"
+
+
+def parse_cutoff_time(value: str, fallback: time = time(12, 0)) -> time:
+    try:
+        hours, minutes = str(value).split(":")
+        return time(int(hours), int(minutes))
+    except (ValueError, AttributeError):
+        return fallback
+
+
+@dataclass
+class WeekRule:
+    """Правило, по которому день и час относят работу к той или иной неделе."""
+
+    day: int = DEFAULT_CUTOFF_DAY
+    at: time = time(12, 0)
+    enabled: bool = True
+
+    @classmethod
+    def from_settings(cls, settings) -> "WeekRule":
+        if settings is None:
+            return cls()
+        return cls(
+            day=max(0, min(6, settings.get_int("week.cutoff_day", DEFAULT_CUTOFF_DAY))),
+            at=parse_cutoff_time(settings.get("week.cutoff_time", DEFAULT_CUTOFF_TIME)),
+            enabled=bool(settings.get("week.cutoff_enabled", True)),
+        )
+
+    def cutoff(self, week_start: date) -> datetime:
+        """Момент, после которого работа идёт уже в следующий отчёт."""
+        return datetime.combine(week_start + timedelta(days=self.day), self.at)
+
+    def covers(self, moment: Optional[datetime], week_start: date) -> bool:
+        """Относится ли момент к неделе, начинающейся с этой даты."""
+        if moment is None:
+            return False
+        if not self.enabled:
+            return week_start <= moment.date() <= week_start + timedelta(days=6)
+        return self.cutoff(week_start - timedelta(days=7)) <= moment < self.cutoff(week_start)
+
+    def describe(self) -> str:
+        return "%s, %s" % (WEEKDAY_NAMES[self.day], self.at.strftime("%H:%M"))
 
 
 # --- Ежедневный отчёт ---------------------------------------------------------
@@ -117,7 +168,9 @@ def render_daily(report: DailyReport, storage: Storage, with_jira: bool = True) 
 # --- Недельный отчёт ----------------------------------------------------------
 
 
-def collect_week(storage: Storage, start: date, end: date) -> dict:
+def collect_week(
+    storage: Storage, start: date, end: date, rule: Optional[WeekRule] = None
+) -> dict:
     """Собирает сырые данные за неделю — из них строится и текст, и списки Jira."""
     logs = storage.logs_in_range(start, end)
 
@@ -142,9 +195,12 @@ def collect_week(storage: Storage, start: date, end: date) -> dict:
             touched.append(task)
 
     all_tasks = storage.list_tasks(include_done=True)
+    rule = rule or WeekRule(enabled=False)
+    # Выполненное относим к неделе по правилу: сделанное после пятничного
+    # рубежа попадает уже в следующий отчёт.
     completed = [
         t for t in all_tasks
-        if t.status == STATUS_DONE and t.done_at and start <= t.done_at.date() <= end
+        if t.status == STATUS_DONE and rule.covers(t.done_at, start)
     ]
 
     # Задачи, по которым была работа, но вопрос с Jira ещё не закрыт.
@@ -164,6 +220,7 @@ def collect_week(storage: Storage, start: date, end: date) -> dict:
 
     return {
         "subtasks": subtasks,
+        "rule": rule,
         "start": start,
         "end": end,
         "per_day": per_day,
@@ -197,7 +254,48 @@ def _empty_workdays(data: dict) -> list[date]:
     return days
 
 
-def task_week_summary(data: dict, task) -> str:
+NOTHING_DONE = "ничего не отмечено"
+
+
+@dataclass
+class JiraFacts:
+    """Что известно про задачи из самой Jira — названия и итоговые комментарии.
+
+    Нужны отчёту: название задачи берётся таким, каким его видят коллеги в
+    Jira, а «что сделано» можно взять из комментария, которым задачу закрыли.
+    """
+
+    titles: dict = None
+    comments: dict = None
+    done: list = None
+
+    def __post_init__(self) -> None:
+        self.titles = self.titles or {}
+        self.comments = self.comments or {}
+        self.done = self.done or []
+
+    @classmethod
+    def from_issues(cls, issues) -> "JiraFacts":
+        titles, comments = {}, {}
+        for issue in issues or []:
+            key = (issue.key or "").upper()
+            if not key:
+                continue
+            if issue.summary:
+                titles[key] = issue.summary
+            if issue.comment:
+                comments[key] = issue.comment
+        return cls(titles=titles, comments=comments, done=list(issues or []))
+
+    def title(self, task) -> str:
+        """Название из Jira, а если его нет — то, что записано у нас."""
+        return self.titles.get((task.jira_key or "").upper(), "") or task.title
+
+    def comment(self, task) -> str:
+        return self.comments.get((task.jira_key or "").upper(), "")
+
+
+def task_week_summary(data: dict, task, facts: Optional[JiraFacts] = None) -> str:
     """Одной строкой: что сделано по задаче за неделю."""
     comments = []
     for log in data["logs"]:
@@ -206,32 +304,67 @@ def task_week_summary(data: dict, task) -> str:
         comment = log.comment.strip()
         if comment and comment not in comments:
             comments.append(comment)
-    return "; ".join(comments) if comments else "работа по задаче"
+    if comments:
+        return "; ".join(comments)
+    from_jira = facts.comment(task) if facts else ""
+    return from_jira or NOTHING_DONE
 
 
-def render_week_table(data: dict, jira_base: str = "", with_jira: bool = True) -> list[str]:
-    """Таблица «задача — что сделано» для вставки в Confluence."""
+def _cell(text: str) -> str:
+    """Вертикальная черта внутри клетки развалила бы таблицу."""
+    return " ".join(str(text or "").split()).replace("|", "/")
+
+
+def _key_cell(key: str, jira_base: str, with_jira: bool) -> str:
+    """Номер задачи ссылкой. Нет номера или Jira выключена — клетка пустая."""
+    key = (key or "").strip()
+    if not key or not with_jira:
+        return ""
+    base = (jira_base or "").strip().rstrip("/")
+    if base:
+        return "[%s](%s/browse/%s)" % (key, base, key)
+    return key
+
+
+def render_week_table(
+    data: dict,
+    jira_base: str = "",
+    with_jira: bool = True,
+    facts: Optional[JiraFacts] = None,
+) -> list[str]:
+    """Таблица «номер — задача — что сделано» для вставки в Confluence."""
     lines = [
-        "| Задача | Что сделано за неделю |",
-        "|---|---|",
+        "| Номер | Задача | Что сделано за неделю |",
+        "|---|---|---|",
     ]
-    if not data["touched"]:
-        lines.append("| — | за неделю отметок не было |")
-        return lines + [""]
+    rows = list(data["touched"])
+    seen = {(t.jira_key or "").upper() for t in rows if t.jira_key}
 
-    for task in data["touched"]:
-        if with_jira and task.jira_key:
-            base = (jira_base or "").strip().rstrip("/")
-            label = (
-                "[%s](%s/browse/%s)" % (task.jira_key, base, task.jira_key)
-                if base
-                else task.jira_key
+    for task in rows:
+        lines.append(
+            "| %s | %s | %s |"
+            % (
+                _cell(_key_cell(task.jira_key, jira_base, with_jira)),
+                _cell(facts.title(task) if facts else task.title),
+                _cell(task_week_summary(data, task, facts)),
             )
-            title = "%s — %s" % (label, task.title)
-        else:
-            title = task.title
-        summary = task_week_summary(data, task).replace("|", "/")
-        lines.append("| %s | %s |" % (title, summary))
+        )
+
+    # То, что закрыто в Jira, но здесь не отмечалось: иначе работа пропадёт.
+    for issue in (facts.done if facts else []):
+        if (issue.key or "").upper() in seen:
+            continue
+        lines.append(
+            "| %s | %s | %s |"
+            % (
+                _cell(_key_cell(issue.key, jira_base, with_jira)),
+                _cell(issue.summary or issue.key),
+                _cell(issue.comment or "закрыта в Jira"),
+            )
+        )
+
+    if len(lines) == 2:
+        lines.append("|  | — | за неделю отметок не было |")
     lines.append("")
     return lines
 
@@ -336,6 +469,8 @@ def render_weekly(
     grouping: str = GROUPING_BY_DAYS,
     with_jira: bool = True,
     jira_base: str = "",
+    rule: Optional[WeekRule] = None,
+    facts: Optional[JiraFacts] = None,
 ) -> str:
     """Markdown-текст отчёта за неделю.
 
@@ -343,7 +478,7 @@ def render_weekly(
     ``tasks`` — сводка по каждой задаче. Итоговые разделы (Jira, просрочки,
     простои) одинаковы в обоих случаях.
     """
-    data = collect_week(storage, start, end)
+    data = collect_week(storage, start, end, rule)
     lines: list[str] = []
     lines.append("# Отчёт за неделю %s — %s" % (fmt_date(start), fmt_date(end)))
     lines.append("")
@@ -357,7 +492,7 @@ def render_weekly(
 
     if grouping == GROUPING_TABLE:
         # Таблицу отдаём одну, без хвостов: её вставляют на страницу как есть.
-        lines.extend(render_week_table(data, jira_base, with_jira))
+        lines.extend(render_week_table(data, jira_base, with_jira, facts))
         return "\n".join(lines).strip() + "\n"
     if grouping == GROUPING_BY_TASKS:
         lines.extend(_render_tasks_body(data, with_jira))
@@ -471,6 +606,8 @@ def render_all_weeks(
     stale_days: int = 5,
     with_jira: bool = True,
     jira_base: str = "",
+    rule: Optional[WeekRule] = None,
+    facts: Optional[JiraFacts] = None,
 ) -> str:
     """Одна выгрузка по всем неделям, за которые что-то заполнено.
 
@@ -491,10 +628,10 @@ def render_all_weeks(
     lines.append("")
     for week_start in weeks:
         week_end = week_start + timedelta(days=6)
-        data = collect_week(storage, week_start, week_end)
+        data = collect_week(storage, week_start, week_end, rule)
         lines.append("### Неделя %s — %s" % (fmt_date(week_start), fmt_date(week_end)))
         if grouping == GROUPING_TABLE:
-            lines.extend(render_week_table(data, jira_base, with_jira))
+            lines.extend(render_week_table(data, jira_base, with_jira, facts))
             continue
         body = (
             _render_tasks_body(data, with_jira)

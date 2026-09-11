@@ -104,8 +104,31 @@ DEFAULT_JQL = 'assignee = currentUser() AND statusCategory = "To Do" ORDER BY du
 DEFAULT_JQL_ACTIVE = (
     'assignee = currentUser() AND statusCategory = "In Progress" ORDER BY updated DESC'
 )
+# «Сделанные» — то, что закрыто за отчётную неделю; сами даты подставляются
+# при запросе, поэтому в фильтре их нет.
+DEFAULT_JQL_DONE = 'assignee = currentUser() AND statusCategory = Done ORDER BY resolved DESC'
+
+ORDER_BY = re.compile(r"\s+order\s+by\s+", re.IGNORECASE)
+
+
+def with_period(jql: str, start: date, end: date) -> str:
+    """Добавляет к фильтру рамки недели, не ломая хвост ORDER BY."""
+    jql = (jql or "").strip()
+    parts = ORDER_BY.split(jql, maxsplit=1)
+    condition = parts[0].strip()
+    tail = (" ORDER BY " + parts[1].strip()) if len(parts) > 1 else ""
+    period = 'resolved >= "%s" AND resolved <= "%s"' % (
+        start.isoformat(), end.isoformat()
+    )
+    if condition:
+        return "(%s) AND %s%s" % (condition, period, tail)
+    return period + tail
+
 
 FIELDS = "summary,status,duedate,priority,assignee"
+# Для закрытых задач дополнительно спрашиваем комментарии и дату решения:
+# из них получается готовая строка «что сделано» для недельного отчёта.
+FIELDS_DONE = FIELDS + ",resolutiondate,comment"
 
 
 class JiraError(Exception):
@@ -154,6 +177,43 @@ def describe_non_json(url: str, final_url: str, content_type: str, body: str) ->
     return "\n".join(lines)
 
 
+def comment_text(raw: Any) -> str:
+    """Достаёт читаемый текст комментария.
+
+    Jira Server отдаёт его строкой, облачная — деревом из абзацев и кусочков
+    текста (формат ADF). Разбираем оба, иначе в отчёт попадёт «{'type': ...}».
+    """
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        return " ".join(raw.split())
+    if isinstance(raw, list):
+        parts = [comment_text(item) for item in raw]
+        return " ".join(part for part in parts if part)
+    if isinstance(raw, dict):
+        if isinstance(raw.get("text"), str):
+            return raw["text"]
+        for key in ("content", "body"):
+            if key in raw:
+                return comment_text(raw[key])
+    return ""
+
+
+def last_comment(field: Any) -> str:
+    """Последний комментарий задачи — им обычно и подводят итог."""
+    if isinstance(field, dict):
+        items = field.get("comments") or []
+    elif isinstance(field, list):
+        items = field
+    else:
+        return ""
+    for item in reversed(items):
+        text = " ".join(comment_text((item or {}).get("body")).split())
+        if text:
+            return text
+    return ""
+
+
 @dataclass
 class JiraIssue:
     key: str = ""
@@ -163,6 +223,8 @@ class JiraIssue:
     priority: str = ""
     assignee: str = ""
     due_date: date | None = None
+    resolved: date | None = None
+    comment: str = ""      # последний комментарий — им обычно и закрывают задачу
     url: str = ""
 
 
@@ -173,6 +235,7 @@ class JiraConfig:
     token: str = ""
     jql: str = DEFAULT_JQL
     jql_active: str = DEFAULT_JQL_ACTIVE
+    jql_done: str = DEFAULT_JQL_DONE
     enabled: bool = True
     ca_file: str = ""
     proxy: str = ""
@@ -209,6 +272,7 @@ class JiraConfig:
             token=str(raw.get("token", "")).strip(),
             jql=str(raw.get("jql", "") or DEFAULT_JQL).strip(),
             jql_active=str(raw.get("jql_active", "") or DEFAULT_JQL_ACTIVE).strip(),
+            jql_done=str(raw.get("jql_done", "") or DEFAULT_JQL_DONE).strip(),
             enabled=bool(raw.get("enabled", True)),
             ca_file=str(raw.get("ca_file", "")).strip(),
             proxy=str(raw.get("proxy", "")).strip(),
@@ -338,12 +402,22 @@ class JiraClient:
         cloud = host.endswith(".atlassian.net") or self.config.auth == AUTH_BASIC
         return CLOUD_SEARCH_PATHS if cloud else SERVER_SEARCH_PATHS
 
-    def search(self, jql: str = "", limit: int = 50) -> list[JiraIssue]:
+    def search_done(self, start: date, end: date, limit: int = 100) -> list[JiraIssue]:
+        """Задачи, закрытые за неделю, вместе с последним комментарием."""
+        return self.search(
+            with_period(self.config.jql_done or DEFAULT_JQL_DONE, start, end),
+            limit=limit,
+            fields=FIELDS_DONE,
+        )
+
+    def search(
+        self, jql: str = "", limit: int = 50, fields: str = FIELDS
+    ) -> list[JiraIssue]:
         """Возвращает задачи по JQL. Бросает JiraError с понятным текстом."""
         if not self.config.is_configured:
             raise JiraError("Заполните адрес, e-mail и API-токен Jira в настройках.")
         query = (jql or self.config.jql or DEFAULT_JQL).strip()
-        params = {"jql": query, "maxResults": str(limit), "fields": FIELDS}
+        params = {"jql": query, "maxResults": str(limit), "fields": fields}
 
         scheme = getattr(self, "_scheme", "")
         if not scheme:
@@ -424,5 +498,7 @@ class JiraClient:
             priority=priority,
             assignee=assignee,
             due_date=_parse_date(fields.get("duedate")),
+            resolved=_parse_date(fields.get("resolutiondate")),
+            comment=last_comment(fields.get("comment")),
             url=issue_url(self.config.base_url, key),
         )

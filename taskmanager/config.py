@@ -39,6 +39,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         # Два списка: что уже в работе и что только предстоит.
         "jql_active": 'assignee = currentUser() AND statusCategory = "In Progress" ORDER BY updated DESC',
         "jql": 'assignee = currentUser() AND statusCategory = "To Do" ORDER BY duedate ASC',
+        # Закрытые за отчётную неделю: рамки недели подставляются при запросе.
+        "jql_done": 'assignee = currentUser() AND statusCategory = Done ORDER BY resolved DESC',
     },
     # Напоминание в конце дня.
     "eod": {
@@ -63,6 +65,15 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "updates": {
         "check_on_start": True,
         "last_check": "",
+    },
+    # Где кончается рабочая неделя: сделанное после этого момента идёт уже
+    # в следующий отчёт. По умолчанию — пятница, полдень.
+    # Спрашивать, что сделано, если по задаче нет ни одной отметки.
+    "ask_result": True,
+    "week": {
+        "cutoff_enabled": True,
+        "cutoff_day": 4,
+        "cutoff_time": "12:00",
     },
     # Сеть: корневой сертификат, если трафик проверяет средство защиты, и
     # адрес прокси, если в рабочую сеть иначе не попасть.

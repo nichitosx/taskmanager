@@ -1396,9 +1396,13 @@ class MainWindow(QMainWindow):
 
     def _toggle_task(self, task_id: int, done: bool) -> None:
         task = self.storage.get_task(task_id)
-        if done and task is not None and not self._confirm_done(task):
-            self._reset_check(task_id)
-            return
+        if done and task is not None:
+            if not self._confirm_done(task):
+                self._reset_check(task_id)
+                return
+            if not self._ask_result(task):
+                self._reset_check(task_id)
+                return
         self.storage.set_status(task_id, STATUS_DONE if done else STATUS_ACTIVE)
         if done and task is not None:
             self._spawn_next_occurrence(task)
@@ -1444,6 +1448,32 @@ class MainWindow(QMainWindow):
             clicked is not None
             and box.buttonRole(clicked) == QMessageBox.ButtonRole.AcceptRole
         )
+
+    def _ask_result(self, task: Task) -> bool:
+        """Просит записать итог, если по задаче нет ни одной отметки о работе.
+
+        Без этой записи задача уйдёт в отчёт строкой «ничего не отмечено» —
+        а вспомнить через неделю, что именно было сделано, уже не выйдет.
+        Возвращает False, если человек передумал отмечать задачу.
+        """
+        if not self.settings.get("ask_result", True):
+            return True
+        if task.id is None or self.storage.logs_for_task(task.id, limit=1):
+            return True
+
+        text, accepted = QInputDialog.getMultiLineText(
+            self,
+            "Что сделано",
+            "Коротко: что сделано по задаче «%s»?\n"
+            "Эта запись попадёт в недельный отчёт." % task.title,
+            "",
+        )
+        if not accepted:
+            return False
+        text = text.strip()
+        if text:
+            self.storage.add_work_log(task.id, text)
+        return True
 
     def _reset_check(self, task_id: int) -> None:
         """Возвращает отметку в списке обратно, если выполнение не подтвердили."""

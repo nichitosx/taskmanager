@@ -42,6 +42,7 @@ from ..integrations.jira import (
     AUTH_LABELS,
     DEFAULT_JQL,
     DEFAULT_JQL_ACTIVE,
+    DEFAULT_JQL_DONE,
     JiraClient,
     JiraConfig,
     JiraError,
@@ -170,6 +171,13 @@ class SettingsDialog(QDialog):
 
         self.confirm_check = QCheckBox("Спрашивать подтверждение при отметке «выполнено»")
         layout.addWidget(self.confirm_check)
+        self.ask_result_check = QCheckBox(
+            "Спрашивать, что сделано, если по задаче нет ни одной отметки"
+        )
+        self.ask_result_check.setToolTip(
+            "Иначе такая задача попадёт в недельный отчёт строкой «ничего не отмечено»"
+        )
+        layout.addWidget(self.ask_result_check)
         self.tray_check = QCheckBox("Сворачивать в трей вместо закрытия")
         layout.addWidget(self.tray_check)
         self.autostart_check = QCheckBox("Запускать при входе в Windows")
@@ -314,6 +322,33 @@ class SettingsDialog(QDialog):
         weekly_row.addStretch(1)
         layout.addLayout(weekly_row)
 
+        self.cutoff_check = QCheckBox("Считать неделю законченной раньше воскресенья")
+        layout.addWidget(self.cutoff_check)
+
+        cutoff_row = QHBoxLayout()
+        cutoff_row.addWidget(QLabel("Рубеж"))
+        self.cutoff_day = QComboBox()
+        for index, name in enumerate(WEEKDAY_NAMES):
+            self.cutoff_day.addItem(name.capitalize(), index)
+        cutoff_row.addWidget(self.cutoff_day)
+        cutoff_row.addSpacing(14)
+        cutoff_row.addWidget(QLabel("в"))
+        self.cutoff_time = QTimeEdit()
+        self.cutoff_time.setDisplayFormat("HH:mm")
+        cutoff_row.addWidget(self.cutoff_time)
+        cutoff_row.addStretch(1)
+        layout.addLayout(cutoff_row)
+
+        cutoff_note = QLabel(
+            "Отчёт сдаётся в пятницу днём, поэтому всё, что вы отметили выполненным "
+            "после этого рубежа, попадает уже в отчёт следующей недели — вместе с "
+            "выходными. Выключите, если неделя для вас заканчивается в воскресенье."
+        )
+        cutoff_note.setWordWrap(True)
+        cutoff_note.setProperty("faint", "true")
+        layout.addWidget(cutoff_note)
+        self.cutoff_check.toggled.connect(self._sync_cutoff)
+
         grouping_row = QHBoxLayout()
         grouping_row.addWidget(QLabel("Разрез отчёта"))
         self.grouping_box = QComboBox()
@@ -420,15 +455,22 @@ class SettingsDialog(QDialog):
             token=self.jira_token.text().strip(),
             jql=self.jira_jql.text().strip() or DEFAULT_JQL,
             jql_active=self.jira_jql_active.text().strip() or DEFAULT_JQL_ACTIVE,
+            jql_done=self.jira_jql_done.text().strip() or DEFAULT_JQL_DONE,
             enabled=self.jira_check.isChecked(),
             ca_file=self.ca_edit.text().strip(),
             proxy=self.proxy_edit.text().strip(),
             auth=self.jira_auth.currentData() or "auto",
         )
 
+    def _sync_cutoff(self) -> None:
+        on = self.cutoff_check.isChecked()
+        self.cutoff_day.setEnabled(on)
+        self.cutoff_time.setEnabled(on)
+
     def _reset_jql(self) -> None:
         self.jira_jql_active.setText(DEFAULT_JQL_ACTIVE)
         self.jira_jql.setText(DEFAULT_JQL)
+        self.jira_jql_done.setText(DEFAULT_JQL_DONE)
 
     def _sync_jira_auth_hint(self) -> None:
         """Подсказка под полями: что именно вводить при выбранном способе."""
@@ -498,6 +540,7 @@ class SettingsDialog(QDialog):
             self.jira_token,
             self.jira_jql,
             self.jira_jql_active,
+            self.jira_jql_done,
             self.jira_check_button,
         ):
             widget.setEnabled(jira_on)
@@ -697,10 +740,13 @@ class SettingsDialog(QDialog):
         self.jira_jql_active.setPlaceholderText(DEFAULT_JQL_ACTIVE)
         self.jira_jql = QLineEdit()
         self.jira_jql.setPlaceholderText(DEFAULT_JQL)
+        self.jira_jql_done = QLineEdit()
+        self.jira_jql_done.setPlaceholderText(DEFAULT_JQL_DONE)
         jira_form.addRow("E-mail или логин", self.jira_email)
         jira_form.addRow("API-токен", self.jira_token)
         jira_form.addRow("Актуальные (JQL)", self.jira_jql_active)
         jira_form.addRow("Плановые (JQL)", self.jira_jql)
+        jira_form.addRow("Сделанные (JQL)", self.jira_jql_done)
         layout.addLayout(jira_form)
 
         jira_check_row = QHBoxLayout()
@@ -720,8 +766,9 @@ class SettingsDialog(QDialog):
 
         jql_note = QLabel(
             "Из Jira собираются два списка: «Из Jira: в работе» и «Из Jira: планы». "
-            "По умолчанию это назначенные на вас задачи в статусах «В работе» и "
-            "«Сделать»; любой фильтр можно заменить своим JQL."
+            "Третий фильтр, «Сделанные», нужен недельному отчёту: по нему в отчёт "
+            "попадает то, что вы закрыли в Jira, но не отметили здесь. Рамки недели "
+            "к нему подставляются сами. Любой фильтр можно заменить своим JQL."
         )
         jql_note.setWordWrap(True)
         jql_note.setProperty("faint", "true")
@@ -835,6 +882,7 @@ class SettingsDialog(QDialog):
         self._fill_fonts()
         self.stale_spin.setValue(s.get_int("stale_days", 5))
         self.confirm_check.setChecked(bool(s.get("confirm_done", True)))
+        self.ask_result_check.setChecked(bool(s.get("ask_result", True)))
         self.tray_check.setChecked(bool(s.get("minimize_to_tray", True)))
         self.autostart_check.setChecked(autostart.is_enabled())
 
@@ -849,6 +897,11 @@ class SettingsDialog(QDialog):
         self.weekly_day.setCurrentIndex(s.get_int("weekly.weekday", 4))
         hours, minutes = self._split_time(s.get("weekly.time", "09:30"), 9, 30)
         self.weekly_time.setTime(QTime(hours, minutes))
+        self.cutoff_check.setChecked(bool(s.get("week.cutoff_enabled", True)))
+        self.cutoff_day.setCurrentIndex(s.get_int("week.cutoff_day", 4))
+        hours, minutes = self._split_time(s.get("week.cutoff_time", "12:00"), 12, 0)
+        self.cutoff_time.setTime(QTime(hours, minutes))
+        self._sync_cutoff()
         index = self.grouping_box.findData(s.get("weekly.grouping", GROUPING_BY_DAYS))
         self.grouping_box.setCurrentIndex(max(index, 0))
 
@@ -870,6 +923,7 @@ class SettingsDialog(QDialog):
         self.jira_token.setText(s.get("jira.token", ""))
         self.jira_jql.setText(s.get("jira.jql", "") or DEFAULT_JQL)
         self.jira_jql_active.setText(s.get("jira.jql_active", "") or DEFAULT_JQL_ACTIVE)
+        self.jira_jql_done.setText(s.get("jira.jql_done", "") or DEFAULT_JQL_DONE)
         self.vault_edit.setText(s.get("obsidian.vault_path", ""))
         self.daily_subdir.setText(s.get("obsidian.daily_subdir", ""))
         self.weekly_subdir.setText(s.get("obsidian.weekly_subdir", ""))
@@ -999,6 +1053,7 @@ class SettingsDialog(QDialog):
         s.set("stale_days", self.stale_spin.value())
         s.set("updates.check_on_start", self.update_check_box.isChecked())
         s.set("confirm_done", self.confirm_check.isChecked())
+        s.set("ask_result", self.ask_result_check.isChecked())
         s.set("minimize_to_tray", self.tray_check.isChecked())
 
         s.set("eod.enabled", self.eod_check.isChecked())
@@ -1009,6 +1064,9 @@ class SettingsDialog(QDialog):
         s.set("weekly.weekday", self.weekly_day.currentData())
         s.set("weekly.time", self.weekly_time.time().toString("HH:mm"))
         s.set("weekly.grouping", self.grouping_box.currentData())
+        s.set("week.cutoff_enabled", self.cutoff_check.isChecked())
+        s.set("week.cutoff_day", self.cutoff_day.currentData())
+        s.set("week.cutoff_time", self.cutoff_time.time().toString("HH:mm"))
         s.set("planning.notify_enabled", self.planning_check.isChecked())
         s.set("planning.notify_days", self.planning_days.value())
         s.set("products_autodetect", self.autodetect_check.isChecked())
@@ -1022,6 +1080,7 @@ class SettingsDialog(QDialog):
         s.set("jira.token", self.jira_token.text().strip())
         s.set("jira.jql", self.jira_jql.text().strip() or DEFAULT_JQL)
         s.set("jira.jql_active", self.jira_jql_active.text().strip() or DEFAULT_JQL_ACTIVE)
+        s.set("jira.jql_done", self.jira_jql_done.text().strip() or DEFAULT_JQL_DONE)
         s.set("jira.base_url", self.jira_url.text().strip().rstrip("/"))
         s.set("obsidian.vault_path", self.vault_edit.text().strip())
         s.set("obsidian.daily_subdir", self.daily_subdir.text().strip())

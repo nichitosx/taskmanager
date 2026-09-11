@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 
 from ..config import Settings
 from ..integrations import jira
+from ..integrations.jira import JiraClient, JiraConfig, JiraError
 from ..integrations.confluence import ConfluenceClient, ConfluenceConfig, ConfluenceError
 from ..models import JIRA_CREATED, JIRA_NOT_NEEDED, PRIORITY_LABELS
 from ..reports import (
@@ -42,6 +43,8 @@ from ..reports import (
     render_daily,
     render_weekly,
     to_plain,
+    JiraFacts,
+    WeekRule,
     week_bounds,
     weekly_filename,
 )
@@ -56,6 +59,27 @@ def _button(text: str, kind: str = "") -> QPushButton:
         button.setProperty(kind, "true")
     button.setCursor(Qt.CursorShape.PointingHandCursor)
     return button
+
+
+class JiraDoneFetch(QThread):
+    """Спрашивает Jira, что было закрыто за неделю. Фоном, чтобы окно не вставало."""
+
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, config: JiraConfig, start, end, parent=None) -> None:
+        super().__init__(parent)
+        self.config = config
+        self.start = start
+        self.end = end
+
+    def run(self) -> None:  # noqa: D102 (Qt naming)
+        try:
+            self.done.emit(JiraClient(self.config).search_done(self.start, self.end))
+        except JiraError as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:  # неожиданная ошибка не должна ронять окно
+            self.failed.emit("Не удалось спросить Jira: %s" % exc)
 
 
 class WeeklyReportDialog(QDialog):
@@ -80,6 +104,10 @@ class WeeklyReportDialog(QDialog):
         self.jira_base = settings.get("jira.base_url", "") if self.jira_enabled else ""
         self.content = ""
         self.editing = False
+        # Что Jira рассказала про эту неделю: названия задач и чем их закрыли.
+        self.facts = JiraFacts()
+        self.jira_note = ""
+        self._jira_thread: JiraDoneFetch | None = None
         self.grouping = settings.get("weekly.grouping", GROUPING_BY_DAYS)
         if self.grouping not in GROUPING_LABELS:
             self.grouping = GROUPING_BY_DAYS
@@ -87,6 +115,7 @@ class WeeklyReportDialog(QDialog):
         self.setWindowTitle("Недельный отчёт")
         self._build()
         self.refresh()
+        self.load_jira_done()
         manage_window(self, settings, "weekly", 1000, 720)
 
     def _build(self) -> None:
@@ -135,6 +164,12 @@ class WeeklyReportDialog(QDialog):
             head_row.addWidget(button)
         left_layout.addLayout(head_row)
 
+        self.jira_status = QLabel(self.jira_note)
+        self.jira_status.setProperty("faint", "true")
+        self.jira_status.setFont(theme.mono_font(8))
+        self.jira_status.setWordWrap(True)
+        left_layout.addWidget(self.jira_status)
+
         self.text_edit = QPlainTextEdit()
         self.text_edit.setFont(theme.mono_font(9))
         left_layout.addWidget(self.text_edit, 1)
@@ -142,7 +177,7 @@ class WeeklyReportDialog(QDialog):
         bottom_row = QHBoxLayout()
         bottom_row.setSpacing(8)
         regenerate = _button("Пересобрать из данных", "flat")
-        regenerate.clicked.connect(lambda: self.refresh(regenerate=True))
+        regenerate.clicked.connect(self._regenerate)
         bottom_row.addWidget(regenerate)
         self.edit_button = _button("Править текст", "flat")
         self.edit_button.setToolTip(
@@ -229,7 +264,10 @@ class WeeklyReportDialog(QDialog):
             return
         self.start = weeks[index]
         self.end = self.start + timedelta(days=6)
+        # Другая неделя — другие закрытые задачи, спрашиваем Jira заново.
+        self.facts = JiraFacts()
         self.refresh()
+        self.load_jira_done()
 
     def _sync_navigation(self) -> None:
         weeks = self._known_weeks()
@@ -267,6 +305,58 @@ class WeeklyReportDialog(QDialog):
             else ""
         )
 
+    def _regenerate(self) -> None:
+        """Пересобрать — значит и переспросить Jira: неделя могла дополниться."""
+        self.refresh(regenerate=True)
+        self.load_jira_done()
+
+    def _jira_config(self) -> JiraConfig:
+        return JiraConfig.from_settings(
+            self.settings.get("jira", {}) or {},
+            self.settings.get("network.ca_file", ""),
+            self.settings.get("network.proxy", ""),
+        )
+
+    def load_jira_done(self) -> None:
+        """Спрашивает Jira, что закрыто за неделю — вдруг здесь это не отмечено."""
+        if not self.jira_enabled:
+            return
+        config = self._jira_config()
+        if not config.is_configured:
+            return
+        if self._jira_thread is not None and self._jira_thread.isRunning():
+            return
+        self.jira_note = "Спрашиваю Jira о закрытых задачах…"
+        self._sync_jira_note()
+        thread = JiraDoneFetch(config, self.start, self.end, self)
+        thread.done.connect(self._on_jira_done)
+        thread.failed.connect(self._on_jira_failed)
+        self._jira_thread = thread
+        thread.start()
+
+    def _on_jira_done(self, issues) -> None:
+        self.facts = JiraFacts.from_issues(issues)
+        self.jira_note = (
+            "Jira: закрытых за неделю задач — %d" % len(self.facts.done)
+            if self.facts.done
+            else "Jira: за неделю ничего не закрыто"
+        )
+        self._sync_jira_note()
+        # Обычный refresh, а не пересборка: сохранённый и правленый вручную
+        # отчёт затирать нельзя. Разрез «таблицей» и так собирается заново.
+        self.refresh()
+
+    def _on_jira_failed(self, message: str) -> None:
+        self.facts = JiraFacts()
+        # Отчёт нужен и без Jira, поэтому сообщаем тихо, одной строкой.
+        self.jira_note = "Jira не ответила: %s" % message.split("\n")[0]
+        self._sync_jira_note()
+
+    def _sync_jira_note(self) -> None:
+        label = getattr(self, "jira_status", None)
+        if label is not None:
+            label.setText(self.jira_note)
+
     def _sync_grouping_buttons(self) -> None:
         for key, button in self.grouping_buttons.items():
             button.setProperty("active", "true" if key == self.grouping else "false")
@@ -292,6 +382,8 @@ class WeeklyReportDialog(QDialog):
             self.grouping,
             with_jira=self.jira_enabled,
             jira_base=self.jira_base,
+            rule=WeekRule.from_settings(self.settings),
+            facts=self.facts,
         )
         self._render_view()
         self._sync_grouping_buttons()
@@ -301,7 +393,9 @@ class WeeklyReportDialog(QDialog):
     def _fill_jira_list(self) -> None:
         if not self.jira_enabled:
             return
-        data = collect_week(self.storage, self.start, self.end)
+        data = collect_week(
+            self.storage, self.start, self.end, WeekRule.from_settings(self.settings)
+        )
         tasks = data["jira_todo"]
         container = QWidget()
         layout = QVBoxLayout(container)
@@ -576,6 +670,7 @@ class HistoryDialog(QDialog):
                     self.settings.get("weekly.grouping", GROUPING_BY_DAYS),
                     with_jira=jira_on,
                     jira_base=self.settings.get("jira.base_url", "") if jira_on else "",
+                    rule=WeekRule.from_settings(self.settings),
                 )
             self._markdown = content
             self.view.setPlainText(to_plain(content))
@@ -686,6 +781,7 @@ class AllWeeksDialog(QDialog):
             self.settings.get_int("stale_days", 5),
             with_jira=jira_on,
             jira_base=self.settings.get("jira.base_url", "") if jira_on else "",
+            rule=WeekRule.from_settings(self.settings),
         )
         self.text_edit.setPlainText(to_plain(self.content))
         self.text_edit.setReadOnly(True)
