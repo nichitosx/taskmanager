@@ -58,7 +58,12 @@ class UpdateCheck(QThread):
                 return
             if updater.fingerprint(Path(app_dir())) == updater.fingerprint(source):
                 return
-            self.found.emit("%s от %s" % (info.get("sha", ""), info.get("date", "")))
+            # Номер версии человеку понятнее отпечатка коммита; если номера в
+            # скачанных файлах нет, называем хотя бы дату.
+            fresh = ""
+            if hasattr(updater, "describe_version"):
+                fresh = updater.describe_version(source)
+            self.found.emit(fresh or "сборка от %s" % info.get("date", ""))
         except Exception:
             return  # проверка обновлений не должна мешать работать
 

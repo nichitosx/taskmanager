@@ -68,6 +68,7 @@ from ..models import (
     Task,
 )
 from ..reports import fmt_date, week_bounds
+from ..version import VERSION
 from ..scheduler import Scheduler
 from ..storage import Storage
 from . import theme
@@ -557,8 +558,8 @@ class MainWindow(QMainWindow):
 
     def _on_update_found(self, description: str) -> None:
         self.update_label.setText(
-            "Вышла новая версия (%s). Задачи и настройки при обновлении сохранятся."
-            % description
+            "Вышла версия %s — у вас %s. Задачи и настройки при обновлении сохранятся."
+            % (description, VERSION)
         )
         self.update_bar.show()
 
@@ -1084,7 +1085,7 @@ class MainWindow(QMainWindow):
         # в трей нельзя — программа просто исчезнет без следа.
         self.tray_available = QSystemTrayIcon.isSystemTrayAvailable()
         self.tray = QSystemTrayIcon(self.windowIcon(), self)
-        self.tray.setToolTip("TaskManager")
+        self.tray.setToolTip("TaskManager %s" % VERSION)
         menu = QMenu()
         show_action = QAction("Открыть", self)
         show_action.triggered.connect(self._restore)
@@ -1387,8 +1388,8 @@ class MainWindow(QMainWindow):
 
     def _update_tray_tooltip(self, counters: dict[str, int]) -> None:
         self.tray.setToolTip(
-            "TaskManager — в работе: %d, просрочено: %d, ждут Jira: %d"
-            % (counters["active"], counters["overdue"], counters["jira"])
+            "TaskManager %s — в работе: %d, просрочено: %d, ждут Jira: %d"
+            % (VERSION, counters["active"], counters["overdue"], counters["jira"])
         )
 
     # --- Действия со списком --------------------------------------------------

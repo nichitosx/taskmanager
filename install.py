@@ -136,7 +136,14 @@ def remember_version() -> None:
         sys.path.insert(0, str(APP_DIR))
         import update
 
-        update.remember({"sha": "", "date": "", "fingerprint": update.fingerprint(APP_DIR)})
+        number, released = update.read_version(APP_DIR)
+        update.remember({
+            "sha": "",
+            "date": "",
+            "version": number,
+            "released": released,
+            "fingerprint": update.fingerprint(APP_DIR),
+        })
     except Exception:
         pass  # не смогли — обновление всё равно сравнит файлы само
 

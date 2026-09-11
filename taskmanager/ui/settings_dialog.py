@@ -627,28 +627,13 @@ class SettingsDialog(QDialog):
 
     def _sync_version(self) -> None:
         """Показывает установленную версию — её пишет «Обновить»."""
-        from ..config import app_dir, data_dir
+        from ..config import app_dir
+        from ..version import describe
 
-        installed = {}
-        try:
-            marker = data_dir() / "installed.json"
-            if marker.exists():
-                import json
-
-                installed = json.loads(marker.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            installed = {}
-
-        if installed.get("sha"):
-            text = "Установлена версия %s от %s. " % (
-                installed["sha"], installed.get("date", "—")
-            )
-        else:
-            text = "Версия пока не отмечена. "
         self.version_note.setText(
-            text + "Обновление скачивает свежие файлы программы с GitHub; задачи, "
-            "настройки и шрифты остаются на месте. Программу после обновления "
-            "нужно перезапустить."
+            "Установлена версия %s. Обновление скачивает свежие файлы программы "
+            "с GitHub; задачи, настройки и шрифты остаются на месте. Программу "
+            "после обновления нужно перезапустить." % describe()
         )
         self.update_button.setEnabled((app_dir() / "update.py").exists())
 

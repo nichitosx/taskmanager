@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import ssl
 import subprocess
@@ -25,6 +26,7 @@ import time
 import urllib.error
 import urllib.request
 import zipfile
+from datetime import date
 from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parent
@@ -93,6 +95,37 @@ def context():
     from taskmanager.integrations import net
 
     return net.ssl_context()
+
+
+VERSION_RE = re.compile(r'^\s*(VERSION|RELEASED)\s*=\s*"([^"]*)"', re.MULTILINE)
+
+
+def read_version(root: Path) -> tuple[str, str]:
+    """Номер и дата версии из taskmanager/version.py.
+
+    Читаем текстом, а не импортом: файлы скачанной версии ещё не программа, и
+    исполнять их до установки незачем.
+    """
+    source = root / PACKAGE / "version.py"
+    try:
+        found = dict(VERSION_RE.findall(source.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        return "", ""
+    return found.get("VERSION", ""), found.get("RELEASED", "")
+
+
+def describe_version(root: Path) -> str:
+    """Человеческая подпись версии: «1.0.0 от 11.09.2026»."""
+    number, released = read_version(root)
+    if not number:
+        return ""
+    if released:
+        try:
+            when = date.fromisoformat(released).strftime("%d.%m.%Y")
+            return "%s от %s" % (number, when)
+        except ValueError:
+            pass
+    return number
 
 
 def fingerprint(root: Path) -> str:
@@ -267,17 +300,15 @@ def main() -> int:
     say("Папка программы: %s" % APP_DIR)
     say()
 
-    current = installed()
-    if current.get("sha"):
-        say("Установлено: %s от %s" % (current["sha"], current.get("date", "—")))
+    here = describe_version(APP_DIR)
+    say("Установлена версия %s" % (here or "— номер не найден"))
 
     fresh = latest()
     if fresh is None:
         return 1
 
-    say("В репозитории: %s от %s" % (fresh["sha"], fresh["date"]))
     if fresh.get("message"):
-        say("Последнее изменение: %s" % fresh["message"])
+        say("Последнее изменение в репозитории: %s" % fresh["message"])
     say()
 
     archive = download()
@@ -289,11 +320,18 @@ def main() -> int:
 
     # Сравниваем то, что лежит на диске, с тем, что пришло: отметка о версии
     # может быть неверной, а файлы — нет.
+    there = describe_version(source)
     if fingerprint(APP_DIR) == fingerprint(source):
         say("У вас уже последняя версия: файлы совпадают.")
         fresh["fingerprint"] = fingerprint(APP_DIR)
+        fresh["version"], fresh["released"] = read_version(APP_DIR)
         remember(fresh)
         return 0
+
+    if there and there != here:
+        say("Доступна версия %s." % there)
+    else:
+        say("Файлы в репозитории отличаются от ваших.")
 
     if "--check" in sys.argv:
         say("Есть обновление. Запустите «Обновить.cmd», чтобы поставить его.")
@@ -304,9 +342,10 @@ def main() -> int:
         return 1
 
     fresh["fingerprint"] = fingerprint(APP_DIR)
+    fresh["version"], fresh["released"] = read_version(APP_DIR)
     remember(fresh)
     say()
-    say("Готово: обновлено до %s от %s." % (fresh["sha"], fresh["date"]))
+    say("Готово: установлена версия %s." % (describe_version(APP_DIR) or "новая"))
     say("Задачи, настройки и свои шрифты остались на месте.")
     if was_running:
         relaunch()
