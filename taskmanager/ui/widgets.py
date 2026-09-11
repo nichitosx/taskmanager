@@ -623,6 +623,7 @@ class TaskRow(Card):
     jira_requested = Signal(int)      # кликнули по метке «jira?»
     product_requested = Signal(int)   # кликнули по метке продукта
     priority_requested = Signal(int, int)  # задача и уровень, выбранный на шкале
+    warning_clicked = Signal(int)     # кликнули по метке-предупреждению
 
     def __init__(
         self,
@@ -632,6 +633,7 @@ class TaskRow(Card):
         product_color: str = "",
         show_jira: bool = True,
         subtasks: tuple[int, int] = (0, 0),
+        warning: str = "",
         parent=None,
     ) -> None:
         super().__init__(colors, parent)
@@ -640,6 +642,9 @@ class TaskRow(Card):
         self.product_color = product_color
         self.show_jira = show_jira
         self.subtasks = subtasks
+        # Короткая тревожная метка вроде «закрой в jira!»: её ставит тот, кто
+        # знает о задаче больше самой строки.
+        self.warning = warning
         self._build()
         self._apply_style()
 
@@ -650,7 +655,9 @@ class TaskRow(Card):
         task = self.task
 
         # Полоска приоритета рисуется самой карточкой, здесь только отступ под неё.
-        if not task.is_done:
+        if self.warning:
+            self.set_bar(c["danger"])
+        elif not task.is_done:
             if task.is_overdue:
                 self.set_bar(c["danger"])
             elif task.priority >= 2:
@@ -756,6 +763,13 @@ class TaskRow(Card):
         c = self.colors
         task = self.task
         pills: list[QWidget] = []
+
+        # Предупреждение — впереди всего: ради него строку и оставили в списке.
+        if self.warning:
+            alarm = Pill(self.warning, c["danger"], strong=True)
+            alarm.make_clickable("Открыть задачу в Jira")
+            alarm.clicked.connect(lambda: self.warning_clicked.emit(task.id))
+            pills.append(alarm)
 
         # Важность идёт первой: по ней глаз выбирает, за что браться.
         if not task.is_done:

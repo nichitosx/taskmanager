@@ -96,13 +96,25 @@ from .widgets import (
 # «состояние» — то, что требует внимания независимо от сроков.
 HORIZON_FILTERS = [(key, HORIZON_LABELS[key]) for key in ("today", "week", "month", "planned")]
 
+# Задачи, закрытые здесь, но всё ещё открытые в Jira: рассинхрон, который
+# видно только когда Jira отвечает, — поэтому пункт появляется не всегда.
+JIRA_SYNC = "jira_sync"
+
 STATE_FILTERS = [
     ("active", "Все активные"),
     ("overdue", "Просрочено"),
     ("stale", "Без движения"),
     ("jira", "Ждут Jira"),
+    (JIRA_SYNC, "Закрыть в Jira"),
     ("done", "Выполненные"),
 ]
+
+# Метка, которой отмечены такие задачи.
+SYNC_WARNING = "закрой в jira!"
+
+STATE_HINTS = {
+    JIRA_SYNC: "Отмечены выполненными здесь, но в Jira всё ещё открыты",
+}
 
 FILTERS = HORIZON_FILTERS + STATE_FILTERS
 
@@ -382,6 +394,10 @@ class MainWindow(QMainWindow):
         self.filter = "active"
         self.selected_id: int | None = None
         self._jira_issues: dict[str, list] = {key: [] for key in JIRA_VIEWS}
+        self._sync_tasks: list | None = None
+        self._sync_keys: set = set()
+        # Ширина, под которую посчитаны высоты строк.
+        self._rows_width = -1
         self._jira_error = ""
         self._jira_loaded_at = None
         self._jira_thread: JiraFetch | None = None
@@ -708,7 +724,9 @@ class MainWindow(QMainWindow):
         layout.addWidget(section_label("состояние"))
         layout.addSpacing(2)
         for key, title in STATE_FILTERS:
-            layout.addWidget(self._nav_item(key, title))
+            layout.addWidget(
+                self._nav_item(key, title, STATE_HINTS.get(key, ""))
+            )
 
         # Продуктов может быть много, поэтому раздел сворачивается и прокручивается.
         layout.addSpacing(theme.section_gap())
@@ -881,6 +899,7 @@ class MainWindow(QMainWindow):
         self._jira_issues = {
             key: list(issues.get(key, [])) for key in JIRA_VIEWS
         }
+        self.forget_sync()
         self._jira_error = ""
         self._jira_loaded_at = datetime.now()
         if self.filter in JIRA_VIEWS:
@@ -942,6 +961,7 @@ class MainWindow(QMainWindow):
             self.list.addItem(item)
             self.list.setItemWidget(item, row)
 
+        self._remember_rows_width()
         self.filter_label.setText(
             "%s: %d%s"
             % (
@@ -961,7 +981,9 @@ class MainWindow(QMainWindow):
             color,
             bool(self.settings.get("jira.enabled", True)),
             progress.get(task.id, (0, 0)),
+            self._warning_for(task),
         )
+        row.warning_clicked.connect(self._open_task_in_jira)
         row.toggled.connect(self._toggle_task)
         row.activated.connect(self.open_task)
         row.clicked.connect(self._select_task)
@@ -1006,6 +1028,52 @@ class MainWindow(QMainWindow):
                 "Задача %s добавлена к вам в список" % issue.key, 3000
             )
         self.refresh(keep_selection=False)
+
+    def _open_issue_keys(self) -> set[str]:
+        """Ключи задач, которые Jira считает незакрытыми."""
+        keys: set[str] = set()
+        for view in (JIRA_ACTIVE, JIRA_PLAN):
+            for issue in self._jira_issues.get(view, []):
+                if issue.key and not self._is_done_issue(issue):
+                    keys.add(issue.key.upper())
+        return keys
+
+    def forget_sync(self) -> None:
+        """Сбрасывает подсчёт рассинхрона — данные изменились."""
+        self._sync_tasks = None
+
+    def out_of_sync(self) -> list[Task]:
+        """Задачи, отмеченные выполненными здесь, но открытые в Jira.
+
+        Без такого списка работа расходится тихо: здесь всё убрано, а коллеги
+        видят задачу висящей. Считаем один раз за обновление: список спрашивают
+        и счётчик, и каждая строка.
+        """
+        if getattr(self, "_sync_tasks", None) is not None:
+            return self._sync_tasks
+
+        open_keys = self._open_issue_keys()
+        self._sync_keys = open_keys
+        self._sync_tasks = [
+            task
+            for task in (self.storage.list_tasks(include_done=True) if open_keys else [])
+            if task.is_done and (task.jira_key or "").upper() in open_keys
+        ]
+        return self._sync_tasks
+
+    def _warning_for(self, task: Task) -> str:
+        """Нужно ли отметить строку задачи тревожной меткой."""
+        if not task.is_done or not task.jira_key:
+            return ""
+        self.out_of_sync()  # заодно наполняет набор ключей
+        return SYNC_WARNING if task.jira_key.upper() in self._sync_keys else ""
+
+    def _open_task_in_jira(self, task_id: int) -> None:
+        task = self.storage.get_task(task_id)
+        if task is None or not task.jira_key:
+            return
+        if not jira.open_issue(self.settings.get("jira.base_url", ""), task.jira_key):
+            self.statusBar().showMessage("Не удалось собрать ссылку на Jira", 3000)
 
     def _issue_by_key(self, key: str):
         """Ищет issue во всех прочитанных списках."""
@@ -1123,6 +1191,9 @@ class MainWindow(QMainWindow):
             return self.storage.search_tasks(query)
 
         stale_days = self.settings.get_int("stale_days", 5)
+        if self.filter == JIRA_SYNC:
+            # Здесь показываем именно выполненные — в том и суть раздела.
+            return sort_tasks(self.out_of_sync())
         if self.filter == "done":
             tasks = [t for t in self.storage.list_tasks(include_done=True) if t.is_done]
             tasks.sort(key=lambda t: t.done_at or t.updated_at, reverse=True)
@@ -1147,6 +1218,7 @@ class MainWindow(QMainWindow):
 
     def refresh(self, keep_selection: bool = True) -> None:
         previous = self.selected_id if keep_selection else None
+        self.forget_sync()
         stale_days = self.settings.get_int("stale_days", 5)
 
         if self.filter in JIRA_VIEWS and not self.search.text().strip():
@@ -1177,6 +1249,7 @@ class MainWindow(QMainWindow):
             if separator_before is not None and task.id == separator_before:
                 self._add_planned_separator(len(upcoming))
 
+        self._remember_rows_width()
         self.empty_box.setVisible(not tasks)
         self.list.setVisible(bool(tasks))
         self.empty_label.setText(self._empty_text())
@@ -1218,6 +1291,12 @@ class MainWindow(QMainWindow):
         for key in JIRA_VIEWS:
             if key in self.nav_items:
                 self.nav_items[key].setVisible(self._jira_ready())
+        if JIRA_SYNC in self.nav_items:
+            # Пустой раздел про рассинхрон только занимал бы место.
+            has_sync = bool(self.out_of_sync())
+            self.nav_items[JIRA_SYNC].setVisible(has_sync)
+            if not has_sync and self.filter == JIRA_SYNC:
+                self.filter = "active"
         for key, item in self.nav_items.items():
             item.set_active(key == self.filter and not searching)
             item.set_count(self._nav_count(key, active_tasks, stale_days, counters))
@@ -1240,6 +1319,8 @@ class MainWindow(QMainWindow):
             return sum(1 for t in tasks if t.product.lower() == name)
         if key in JIRA_VIEWS:
             return len(self._jira_issues.get(key, []))
+        if key == JIRA_SYNC:
+            return len(self.out_of_sync())
         if key == "done":
             return 0  # выполненных много, число тут только мешает
         return counters.get(key, 0)
@@ -1294,6 +1375,10 @@ class MainWindow(QMainWindow):
             height = row.sizeHint().height()
         return height + 4
 
+    def _remember_rows_width(self) -> None:
+        """Запоминает ширину, под которую посчитаны нынешние высоты строк."""
+        self._rows_width = self._row_width()
+
     def _resize_rows(self) -> None:
         """Пересчитывает высоты строк под нынешнюю ширину списка.
 
@@ -1302,6 +1387,14 @@ class MainWindow(QMainWindow):
         высоты остались от прежней ширины, длинное название переносится на
         вторую строку, а места под неё уже нет — текст обрезается.
         """
+        # Пересчёт меняет высоты, от этого список меняет размер, а это снова
+        # просит пересчёт. Если ширина та же — считать нечего, иначе окно
+        # ушло бы в вечную перерисовку.
+        width = self._row_width()
+        if width == getattr(self, "_rows_width", -1):
+            return
+        self._rows_width = width
+
         for index in range(self.list.count()):
             item = self.list.item(index)
             row = self.list.itemWidget(item)
@@ -1366,6 +1459,7 @@ class MainWindow(QMainWindow):
             "overdue": "Просроченных задач нет.",
             "stale": "Все задачи в движении.",
             "jira": "По всем задачам вопрос с Jira закрыт.",
+            JIRA_SYNC: "Всё сходится: закрытое здесь закрыто и в Jira.",
             "done": "Выполненных задач пока нет.",
         }.get(self.filter, "Пусто")
 
@@ -1450,8 +1544,14 @@ class MainWindow(QMainWindow):
                 self._reset_check(task_id)
                 return
         self.storage.set_status(task_id, STATUS_DONE if done else STATUS_ACTIVE)
+        self.forget_sync()
         if done and task is not None:
             self._spawn_next_occurrence(task)
+            if task.jira_key and task.jira_key.upper() in self._open_issue_keys():
+                self.statusBar().showMessage(
+                    "В Jira задача %s ещё открыта — не забудьте закрыть" % task.jira_key,
+                    6000,
+                )
         QTimer.singleShot(120, lambda: self.refresh(keep_selection=True))
 
     def done_dialog(self, task: Task) -> QMessageBox:
