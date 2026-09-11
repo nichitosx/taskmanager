@@ -67,15 +67,16 @@ class JiraDoneFetch(QThread):
     done = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, config: JiraConfig, start, end, parent=None) -> None:
+    def __init__(self, config: JiraConfig, since, until, parent=None) -> None:
         super().__init__(parent)
         self.config = config
-        self.start = start
-        self.end = end
+        # Не start/end: у QThread уже есть метод start, и поле бы его перекрыло.
+        self.since = since
+        self.until = until
 
     def run(self) -> None:  # noqa: D102 (Qt naming)
         try:
-            self.done.emit(JiraClient(self.config).search_done(self.start, self.end))
+            self.done.emit(JiraClient(self.config).search_done(self.since, self.until))
         except JiraError as exc:
             self.failed.emit(str(exc))
         except Exception as exc:  # неожиданная ошибка не должна ронять окно
