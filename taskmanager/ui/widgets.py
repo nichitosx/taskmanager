@@ -757,6 +757,14 @@ class TaskRow(Card):
         task = self.task
         pills: list[QWidget] = []
 
+        # Важность идёт первой: по ней глаз выбирает, за что браться.
+        if not task.is_done:
+            bars = self.priority_bars = PriorityBars(task.priority, c)
+            bars.picked.connect(
+                lambda level, task_id=task.id: self.priority_requested.emit(task_id, level)
+            )
+            pills.append(bars)
+
         if task.product:
             product = ProductPill(task.product, self.product_color or c["info"])
             product.make_clickable("Сменить продукт")
@@ -781,13 +789,6 @@ class TaskRow(Card):
         repeat = describe_repeat(task.repeat)
         if repeat and not task.is_done:
             pills.append(Pill("↻ " + repeat, c["text_dim"]))
-
-        if not task.is_done:
-            bars = self.priority_bars = PriorityBars(task.priority, c)
-            bars.picked.connect(
-                lambda level, task_id=task.id: self.priority_requested.emit(task_id, level)
-            )
-            pills.append(bars)
 
         due = _due_text(task)
         if due and not task.is_done:
@@ -1426,9 +1427,16 @@ class PriorityBars(QWidget):
 
     picked = Signal(int)   # выбранный уровень, 0..PRIORITY_LEVELS - 1
 
-    BLOCK = 5
-    GAP = 2
-    HEIGHT = 12
+    BLOCK = 4
+    GAP = 3
+    # Высота у шкалы та же, что у меток рядом, иначе она висела бы выше их
+    # строки. Сами полоски ниже и стоят на общей с ними нижней линии.
+    HEIGHT = PILL_HEIGHT
+    TALLEST = 13
+    BOTTOM = 4
+    # Самая низкая полоска — чуть выше трети шкалы: лесенка читается как
+    # нарастание, но крайние полоски не выглядят обрубками.
+    LOWEST = 0.38
 
     def __init__(self, level: int, colors: dict[str, str], editable: bool = True,
                  parent=None) -> None:
@@ -1440,13 +1448,16 @@ class PriorityBars(QWidget):
         self.setFixedSize(
             PRIORITY_LEVELS * self.BLOCK + (PRIORITY_LEVELS - 1) * self.GAP, self.HEIGHT
         )
+        marks = "%d из %d" % (self.level + 1, PRIORITY_LEVELS)
+        name = PRIORITY_LABELS.get(self.level, "")
         if editable:
             self.setCursor(Qt.CursorShape.PointingHandCursor)
             self.setMouseTracking(True)
-            self.setToolTip("Важность: %s. Кликните, чтобы изменить"
-                            % PRIORITY_LABELS.get(self.level, ""))
+            self.setToolTip(
+                "Важность: %s (%s). Кликните по полоске, чтобы изменить" % (name, marks)
+            )
         else:
-            self.setToolTip("Важность: %s" % PRIORITY_LABELS.get(self.level, ""))
+            self.setToolTip("Важность: %s (%s)" % (name, marks))
 
     def set_level(self, level: int) -> None:
         self.level = max(0, min(PRIORITY_LEVELS - 1, int(level)))
@@ -1456,20 +1467,40 @@ class PriorityBars(QWidget):
         step = self.BLOCK + self.GAP
         return max(0, min(PRIORITY_LEVELS - 1, int(x) // step if step else 0))
 
+    def _bar_height(self, index: int) -> int:
+        """Высота полоски: лесенка слева направо."""
+        if PRIORITY_LEVELS < 2:
+            return self.TALLEST
+        share = self.LOWEST + (1.0 - self.LOWEST) * index / (PRIORITY_LEVELS - 1)
+        return max(2, round(self.TALLEST * share))
+
     def paintEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         c = self.colors
         painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, not theme.is_pixel())
         painter.setPen(Qt.PenStyle.NoPen)
-        filled = QColor(c[theme.PRIORITY_COLOR_KEYS.get(self.level, "info")])
-        empty = QColor(c["border"])
+
         # Под курсором показываем будущий выбор, а не текущий уровень.
         shown = self._hover if self._hover >= 0 else self.level
-        if self._hover >= 0:
-            filled = QColor(c[theme.PRIORITY_COLOR_KEYS.get(self._hover, "info")])
+        filled = QColor(c[theme.PRIORITY_COLOR_KEYS.get(shown, "info")])
+        # Непройденные ступени только намечены: так видно, докуда можно дотянуть.
+        empty = QColor(c["border"])
+        empty.setAlpha(120)
+        # В пиксельном стиле углы прямые — скругление там смотрится чужеродно.
+        radius = 0 if theme.is_pixel() else 1.5
+
         for index in range(PRIORITY_LEVELS):
             x = index * (self.BLOCK + self.GAP)
-            painter.setBrush(filled if index <= shown else empty)
-            painter.drawRect(x, 1, self.BLOCK, self.HEIGHT - 2)
+            height = self._bar_height(index)
+            top = self.HEIGHT - self.BOTTOM - height
+            if index <= shown:
+                painter.setBrush(filled)
+            else:
+                painter.setBrush(empty)
+            if radius:
+                painter.drawRoundedRect(x, top, self.BLOCK, height, radius, radius)
+            else:
+                painter.drawRect(x, top, self.BLOCK, height)
         painter.end()
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
