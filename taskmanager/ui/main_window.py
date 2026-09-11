@@ -67,7 +67,7 @@ from ..models import (
     STATUS_DONE,
     Task,
 )
-from ..reports import fmt_date
+from ..reports import fmt_date, week_bounds
 from ..scheduler import Scheduler
 from ..storage import Storage
 from . import theme
@@ -110,10 +110,12 @@ PRODUCT_PREFIX = "product:"
 # Списки задач, прочитанных прямо из Jira: живут отдельно от локальных задач.
 JIRA_PLAN = "jira_plan"        # то, что ещё предстоит
 JIRA_ACTIVE = "jira_active"    # то, что уже в работе
+JIRA_DONE = "jira_done"        # то, что закрыто за эту неделю
 
 JIRA_VIEWS = {
     JIRA_ACTIVE: "Из Jira: в работе",
     JIRA_PLAN: "Из Jira: планы",
+    JIRA_DONE: "Из Jira: сделано",
 }
 
 # Сколько держим ответ Jira, прежде чем спрашивать снова.
@@ -133,10 +135,12 @@ class JiraFetch(QThread):
     def run(self) -> None:  # noqa: D102 (Qt naming)
         try:
             client = JiraClient(self.config)
-            # Один вход, два запроса: списки собираются разными фильтрами.
+            # Один вход, три запроса: у каждого списка свой фильтр.
+            start, end = week_bounds()
             self.done.emit({
                 JIRA_ACTIVE: client.search(self.config.jql_active),
                 JIRA_PLAN: client.search(self.config.jql),
+                JIRA_DONE: client.search_done(start, end),
             })
         except JiraError as exc:
             self.failed.emit(str(exc))
@@ -376,7 +380,7 @@ class MainWindow(QMainWindow):
         self.settings = settings
         self.filter = "active"
         self.selected_id: int | None = None
-        self._jira_issues: dict[str, list] = {JIRA_ACTIVE: [], JIRA_PLAN: []}
+        self._jira_issues: dict[str, list] = {key: [] for key in JIRA_VIEWS}
         self._jira_error = ""
         self._jira_loaded_at = None
         self._jira_thread: JiraFetch | None = None
@@ -690,6 +694,13 @@ class MainWindow(QMainWindow):
                 "Задачи из Jira, которые ещё предстоят (фильтр в настройках)",
             )
         )
+        layout.addWidget(
+            self._nav_item(
+                JIRA_DONE,
+                JIRA_VIEWS[JIRA_DONE],
+                "Задачи, закрытые в Jira на этой неделе — вдруг здесь они ещё висят",
+            )
+        )
 
         layout.addSpacing(theme.section_gap())
         layout.addWidget(section_label("состояние"))
@@ -866,8 +877,7 @@ class MainWindow(QMainWindow):
 
     def _on_jira_done(self, issues: dict) -> None:
         self._jira_issues = {
-            JIRA_ACTIVE: list(issues.get(JIRA_ACTIVE, [])),
-            JIRA_PLAN: list(issues.get(JIRA_PLAN, [])),
+            key: list(issues.get(key, [])) for key in JIRA_VIEWS
         }
         self._jira_error = ""
         self._jira_loaded_at = datetime.now()
@@ -966,8 +976,7 @@ class MainWindow(QMainWindow):
 
     def _take_jira_issue(self, key: str) -> None:
         """Заводит локальную задачу по issue из Jira."""
-        every = self._jira_issues.get(JIRA_ACTIVE, []) + self._jira_issues.get(JIRA_PLAN, [])
-        issue = next((i for i in every if i.key == key), None)
+        issue = self._issue_by_key(key)
         if issue is None:
             return
         mine = self.storage.find_by_jira_key(issue.key)
@@ -984,8 +993,43 @@ class MainWindow(QMainWindow):
         products_module.apply_to_task(task, self.settings)
         created = self.storage.add_task(task)
         self.selected_id = created.id
-        self.statusBar().showMessage("Задача %s добавлена к вам в список" % issue.key, 3000)
+        if self._is_done_issue(issue):
+            # Задача в Jira уже закрыта — заводить её открытой незачем.
+            self._close_by_issue(created, issue)
+            self.statusBar().showMessage(
+                "Задача %s добавлена и сразу отмечена выполненной" % issue.key, 4000
+            )
+        else:
+            self.statusBar().showMessage(
+                "Задача %s добавлена к вам в список" % issue.key, 3000
+            )
         self.refresh(keep_selection=False)
+
+    def _issue_by_key(self, key: str):
+        """Ищет issue во всех прочитанных списках."""
+        key = (key or "").upper()
+        for view in JIRA_VIEWS:
+            for issue in self._jira_issues.get(view, []):
+                if (issue.key or "").upper() == key:
+                    return issue
+        return None
+
+    @staticmethod
+    def _is_done_issue(issue) -> bool:
+        return bool(issue.resolved) or (issue.status_category or "").lower() == "done"
+
+    def _close_by_issue(self, task: Task, issue) -> None:
+        """Отмечает задачу выполненной по данным из Jira.
+
+        Комментарий, которым задачу закрыли, сохраняем отметкой о работе —
+        иначе в недельном отчёте останется пустая строка «ничего не отмечено».
+        """
+        if task.id is None:
+            return
+        comment = (issue.comment or "").strip()
+        if comment and not self.storage.logs_for_task(task.id, limit=1):
+            self.storage.add_work_log(task.id, comment, issue.resolved)
+        self.storage.set_status(task.id, STATUS_DONE)
 
     def _sync_products_nav(self, tasks: list[Task]) -> None:
         """Пересобирает список продуктов: сначала те, где есть активные задачи."""
@@ -1576,11 +1620,66 @@ class MainWindow(QMainWindow):
             return
         menu = QMenu(self)
         menu.addAction("Указать ключ…", lambda: self._enter_jira_key(task))
+        if self._jira_ready():
+            menu.addAction(
+                "Выбрать из закрытых в Jira…", lambda: self._pick_done_issue(task)
+            )
         menu.addAction("Jira не нужна", lambda: self._set_no_jira(task))
         base = self.settings.get("jira.base_url", "")
         if base:
             menu.addAction("Создать задачу в Jira", self._open_jira_form)
         menu.exec(QCursor.pos())
+
+    def _pick_done_issue(self, task: Task) -> None:
+        """Привязывает задачу к тому, что уже закрыто в Jira, и закрывает её.
+
+        Так неактуальные задачи не висят в списке: работу сделали, просто
+        отметили её в Jira, а не здесь.
+        """
+        issues = self._jira_issues.get(JIRA_DONE, [])
+        if not issues:
+            self.load_jira(force=True)
+            QMessageBox.information(
+                self,
+                "Jira",
+                "Список закрытых задач ещё не прочитан. Я спрошу Jira прямо "
+                "сейчас — откройте меню снова через несколько секунд.",
+            )
+            return
+
+        taken = {
+            (t.jira_key or "").upper()
+            for t in self.storage.list_tasks(include_done=True)
+            if t.jira_key and t.id != task.id
+        }
+        free = [i for i in issues if (i.key or "").upper() not in taken]
+        if not free:
+            QMessageBox.information(
+                self, "Jira", "Все закрытые за неделю задачи уже привязаны."
+            )
+            return
+
+        labels = ["%s — %s" % (i.key, i.summary or "без названия") for i in free]
+        choice, accepted = QInputDialog.getItem(
+            self,
+            "Закрытые в Jira",
+            "Какая из закрытых задач — это «%s»?" % task.title,
+            labels,
+            0,
+            False,
+        )
+        if not accepted or choice not in labels:
+            return
+
+        issue = free[labels.index(choice)]
+        task.jira_key = issue.key
+        task.jira_state = JIRA_CREATED
+        self.storage.update_task(task, touch_activity=False)
+        self._close_by_issue(task, issue)
+        self.statusBar().showMessage(
+            "Задача связана с %s и отмечена выполненной" % issue.key, 4000
+        )
+        self.refresh(keep_selection=False)
 
     def _enter_jira_key(self, task: Task) -> None:
         key, accepted = QInputDialog.getText(

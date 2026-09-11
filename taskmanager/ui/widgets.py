@@ -46,6 +46,35 @@ from ..models import (
 from . import theme
 
 
+def wrapped_height(label: QLabel, width: int) -> int:
+    """Высота надписи с переносом при такой ширине — по метрикам шрифта.
+
+    Саму надпись не спрашиваем: её heightForWidth не опускается ниже уже
+    назначенной минимальной высоты, и после первого расчёта строка перестала
+    бы уменьшаться при расширении окна. Метрики шрифта дают тот же результат,
+    но без памяти о прошлом размере.
+    """
+    if width <= 0:
+        return label.sizeHint().height()
+    metrics = QFontMetrics(label.font())
+    return metrics.boundingRect(
+        0, 0, width, 100000, Qt.TextFlag.TextWordWrap, label.text()
+    ).height()
+
+
+def fit_title(label: QLabel, width: int) -> None:
+    """Выдаёт надписи ровно ту высоту, которая нужна её тексту.
+
+    Вложенные раскладки Qt считают ширину неточно и отмеряют меньше строк,
+    чем нужно, — последняя строка длинного названия оказывалась срезанной.
+    """
+    if width <= 0:
+        return
+    needed = wrapped_height(label, width)
+    if label.height() != needed:
+        label.setFixedHeight(needed)
+
+
 class FlowLayout(QLayout):
     """Ряд, который переносит не поместившиеся элементы на следующую строку.
 
@@ -693,16 +722,7 @@ class TaskRow(Card):
         )
 
     def _title_height(self, text_width: int) -> int:
-        """Высота названия при такой ширине, по метрикам шрифта.
-
-        Не спрашиваем саму надпись: её heightForWidth не опускается ниже уже
-        назначенной минимальной высоты, и после первого расчёта строка
-        перестала бы уменьшаться при расширении окна.
-        """
-        metrics = QFontMetrics(self.title.font())
-        return metrics.boundingRect(
-            0, 0, text_width, 100000, Qt.TextFlag.TextWordWrap, self.title.text()
-        ).height()
+        return wrapped_height(self.title, text_width)
 
     def heightForWidth(self, width: int) -> int:  # noqa: N802 (Qt naming)
         """Высота строки при заданной ширине.
@@ -724,13 +744,7 @@ class TaskRow(Card):
 
     def resizeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         super().resizeEvent(event)
-        # Готовую высоту названию выдаём сами: вложенная раскладка отмерила бы
-        # меньше строк, чем нужно, и последняя строка обрезалась бы.
-        text_width = self._text_width(self.width())
-        if text_width > 0:
-            needed = self._title_height(text_width)
-            if self.title.height() != needed:
-                self.title.setFixedHeight(needed)
+        fit_title(self.title, self._text_width(self.width()))
 
     def reset_priority(self) -> None:
         """Возвращает шкалу к уровню задачи: выбор не подтвердили."""
@@ -1327,21 +1341,25 @@ class JiraIssueRow(Card):
         layout.setContentsMargins(14, 11, 14, 11)
         layout.setSpacing(7)
 
-        title = QLabel(issue.summary or issue.key)
-        title.setWordWrap(True)
-        title.setFont(theme.ui_font(11))
-        title.setStyleSheet("color: %s; background: transparent;" % colors["text"])
-        layout.addWidget(title)
+        self.title = QLabel(issue.summary or issue.key)
+        self.title.setWordWrap(True)
+        self.title.setFont(theme.title_font())
+        # Шрифт прописан и в стилях метки: иначе общая таблица стилей нарисует
+        # текст шире, чем посчитана высота строки, и вторая строка обрежется.
+        self.title.setStyleSheet(
+            "color: %s; background: transparent; %s" % (colors["text"], theme.title_css())
+        )
+        layout.addWidget(self.title)
 
-        meta = QHBoxLayout()
-        meta.setContentsMargins(0, 0, 0, 0)
-        meta.setSpacing(6)
-        meta.addWidget(Pill(issue.key, colors["info"]))
+        # Переносимый ряд, а не жёсткая строка: в узком окне метки уходили за
+        # край вместе с кнопкой.
+        self.meta = FlowLayout(spacing=6)
+        self.meta.addWidget(Pill(issue.key, colors["info"]))
         if issue.status:
-            meta.addWidget(Pill(issue.status.lower(), colors["text_dim"]))
+            self.meta.addWidget(Pill(issue.status.lower(), colors["text_dim"]))
         if issue.due_date:
             overdue = issue.due_date < date.today()
-            meta.addWidget(
+            self.meta.addWidget(
                 Pill(
                     "срок %s" % issue.due_date.strftime("%d.%m"),
                     colors["danger"] if overdue else colors["text_dim"],
@@ -1349,21 +1367,49 @@ class JiraIssueRow(Card):
                 )
             )
         if issue.priority:
-            meta.addWidget(Pill(issue.priority.lower(), colors["text_faint"]))
-        meta.addStretch(1)
+            self.meta.addWidget(Pill(issue.priority.lower(), colors["text_faint"]))
+        if issue.resolved:
+            self.meta.addWidget(
+                Pill("закрыта %s" % issue.resolved.strftime("%d.%m"), colors["success"])
+            )
 
-        if already:
-            mark = QLabel("уже в списке")
-            mark.setFont(theme.mono_font(8))
-            mark.setStyleSheet("color: %s; background: transparent;" % colors["success"])
-            meta.addWidget(mark)
-        else:
-            button = QPushButton("Взять в работу")
-            button.setProperty("flat", "true")
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.clicked.connect(lambda: self.take.emit(issue.key))
-            meta.addWidget(button)
-        layout.addLayout(meta)
+        closed = bool(issue.resolved) or (issue.status_category or "").lower() == "done"
+        button = QPushButton("Отметить у себя" if closed else "Взять в работу")
+        button.setToolTip(
+            "Завести задачу сразу выполненной" if closed
+            else "Завести такую же задачу в своём списке"
+        )
+        button.setProperty("flat", "true")
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.clicked.connect(lambda: self.take.emit(issue.key))
+        self.meta.addWidget(button)
+        layout.addLayout(self.meta)
+
+    # --- Размеры --------------------------------------------------------------
+
+    def _text_width(self, width: int) -> int:
+        margins = self.layout().contentsMargins()
+        return width - margins.left() - margins.right()
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 (Qt naming)
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 (Qt naming)
+        text_width = self._text_width(width)
+        if text_width <= 0:
+            return super().heightForWidth(width)
+        layout = self.layout()
+        margins = layout.contentsMargins()
+        body = (
+            wrapped_height(self.title, text_width)
+            + layout.spacing()
+            + self.meta.heightForWidth(text_width)
+        )
+        return margins.top() + body + margins.bottom()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        super().resizeEvent(event)
+        fit_title(self.title, self._text_width(self.width()))
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         self.activated.emit(self.issue.key)
