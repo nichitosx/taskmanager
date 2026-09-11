@@ -331,12 +331,18 @@ def render_week_table(
     jira_base: str = "",
     with_jira: bool = True,
     facts: Optional[JiraFacts] = None,
+    header: bool = True,
 ) -> list[str]:
-    """Таблица «номер — задача — что сделано» для вставки в Confluence."""
-    lines = [
-        "| Номер | Задача | Что сделано за неделю |",
-        "|---|---|---|",
-    ]
+    """Таблица «номер — задача — что сделано» для вставки в Confluence.
+
+    ``header`` выключается, когда таблицу вставляют в уже готовую страницу:
+    там своя шапка, и вторая только мешает.
+    """
+    lines = (
+        ["| Номер | Задача | Что сделано за неделю |", "|---|---|---|"]
+        if header
+        else []
+    )
     rows = list(data["touched"])
     seen = {(t.jira_key or "").upper() for t in rows if t.jira_key}
 
@@ -363,7 +369,7 @@ def render_week_table(
             )
         )
 
-    if len(lines) == 2:
+    if len(lines) == (2 if header else 0):
         lines.append("|  | — | за неделю отметок не было |")
     lines.append("")
     return lines
@@ -479,6 +485,13 @@ def render_weekly(
     простои) одинаковы в обоих случаях.
     """
     data = collect_week(storage, start, end, rule)
+
+    if grouping == GROUPING_TABLE:
+        # Только строки таблицы: ни заголовка недели, ни счётчиков, ни шапки.
+        # Такую таблицу вставляют в готовую страницу, где всё это уже есть.
+        rows = render_week_table(data, jira_base, with_jira, facts, header=False)
+        return "\n".join(rows).strip() + "\n"
+
     lines: list[str] = []
     lines.append("# Отчёт за неделю %s — %s" % (fmt_date(start), fmt_date(end)))
     lines.append("")
@@ -489,11 +502,6 @@ def render_weekly(
         % (len(logs), len(data["touched"]), len(data["completed"]))
     )
     lines.append("")
-
-    if grouping == GROUPING_TABLE:
-        # Таблицу отдаём одну, без хвостов: её вставляют на страницу как есть.
-        lines.extend(render_week_table(data, jira_base, with_jira, facts))
-        return "\n".join(lines).strip() + "\n"
     if grouping == GROUPING_BY_TASKS:
         lines.extend(_render_tasks_body(data, with_jira))
     else:

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import QMimeData, Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -28,7 +28,12 @@ from PySide6.QtWidgets import (
 from ..config import Settings
 from ..integrations import jira
 from ..integrations.jira import JiraClient, JiraConfig, JiraError
-from ..integrations.confluence import ConfluenceClient, ConfluenceConfig, ConfluenceError
+from ..integrations.confluence import (
+    ConfluenceClient,
+    ConfluenceConfig,
+    ConfluenceError,
+    markdown_to_storage,
+)
 from ..models import JIRA_CREATED, JIRA_NOT_NEEDED, PRIORITY_LABELS
 from ..reports import (
     GROUPING_BY_DAYS,
@@ -59,6 +64,19 @@ def _button(text: str, kind: str = "") -> QPushButton:
         button.setProperty(kind, "true")
     button.setCursor(Qt.CursorShape.PointingHandCursor)
     return button
+
+
+def copy_report(markdown: str) -> None:
+    """Кладёт отчёт в буфер дважды: разметкой и готовым HTML.
+
+    Confluence, Word и почта берут из буфера HTML, если он там есть, — тогда
+    таблица вставляется таблицей, а не строчками с чёрточками. Редакторы
+    простого текста возьмут разметку.
+    """
+    mime = QMimeData()
+    mime.setText(markdown)
+    mime.setHtml("<html><body>%s</body></html>" % markdown_to_storage(markdown))
+    QApplication.clipboard().setMimeData(mime)
 
 
 class JiraDoneFetch(QThread):
@@ -182,7 +200,8 @@ class WeeklyReportDialog(QDialog):
         bottom_row.addWidget(regenerate)
         self.edit_button = _button("Править текст", "flat")
         self.edit_button.setToolTip(
-            "Показать разметку и разрешить правку. Копируется отчёт всегда с разметкой."
+            "Показать разметку и разрешить правку. Копируется отчёт и разметкой, "
+            "и готовой таблицей — Confluence вставит таблицу."
         )
         self.edit_button.clicked.connect(self._toggle_edit)
         bottom_row.addWidget(self.edit_button)
@@ -514,8 +533,12 @@ class WeeklyReportDialog(QDialog):
         self.accept()
 
     def _copy(self) -> None:
-        QApplication.clipboard().setText(self._content())
-        self.status.setText("Отчёт скопирован в буфер обмена")
+        copy_report(self._content())
+        self.status.setText(
+            "Скопировано таблицей — вставляйте в Confluence как есть"
+            if self.grouping == GROUPING_TABLE
+            else "Отчёт скопирован в буфер обмена"
+        )
 
     def _export_obsidian(self) -> None:
         vault = self.settings.get("obsidian.vault_path", "")
