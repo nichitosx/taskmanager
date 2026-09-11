@@ -674,6 +674,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 4, 0, 0)
         layout.setSpacing(theme.nav_spacing())
+        self.sidebar_layout = layout
         self.nav_items: dict[str, NavItem] = {}
 
         layout.addWidget(section_label("когда"))
@@ -740,7 +741,7 @@ class MainWindow(QMainWindow):
         self.products_box.setObjectName("productsBox")
         self.products_layout = QVBoxLayout(self.products_box)
         self.products_layout.setContentsMargins(0, 2, 0, 0)
-        self.products_layout.setSpacing(3)
+        self.products_layout.setSpacing(theme.nav_spacing())
         self.products_scroll.setWidget(self.products_box)
         self.products_scroll.hide()
         layout.addWidget(self.products_scroll)
@@ -1832,6 +1833,13 @@ class MainWindow(QMainWindow):
         icon = self._icon()
         self.setWindowIcon(icon)
         self.tray.setIcon(icon)
+        # Шаг между пунктами меню зависит от стиля — обновляем, не пересобирая
+        # панель: иначе новый интервал появился бы только после перезапуска.
+        for sidebar_layout in (
+            getattr(self, "sidebar_layout", None), getattr(self, "products_layout", None)
+        ):
+            if sidebar_layout is not None:
+                sidebar_layout.setSpacing(theme.nav_spacing())
         # Виджеты, которые красятся кодом, а не таблицей стилей.
         for widget in self.nav_items.values():
             widget.colors = self.colors
