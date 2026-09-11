@@ -8,6 +8,7 @@ from datetime import date, datetime
 from PySide6.QtCore import (
     QAbstractAnimation,
     QEasingCurve,
+    QEvent,
     QPropertyAnimation,
     QSize,
     Qt,
@@ -34,6 +35,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSplitter,
+    QStyle,
     QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
@@ -471,6 +473,8 @@ class MainWindow(QMainWindow):
         self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.list.customContextMenuRequested.connect(self._context_menu)
         self.list.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
+        # Ширина списка меняется не только вместе с окном — следим за ней самой.
+        self.list.viewport().installEventFilter(self)
         center_layout.addWidget(self.list, 1)
 
         self.empty_box = QWidget()
@@ -951,6 +955,7 @@ class MainWindow(QMainWindow):
         row.clicked.connect(self._select_task)
         row.jira_requested.connect(self._ask_jira_key)
         row.product_requested.connect(self._ask_product)
+        row.priority_requested.connect(self._ask_priority)
         self.rows[task.id] = row
         return row
 
@@ -1216,24 +1221,68 @@ class MainWindow(QMainWindow):
         animation.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
         self._list_animation = animation
 
+    def _row_width(self) -> int:
+        """Ширина, по которой строка переносит текст.
+
+        Берётся настоящая ширина списка, а не «хотя бы 320»: на узком окне
+        текст переносился чаще, чем предполагал расчёт, и вторая строка
+        названия обрезалась. Полоса прокрутки, которой ещё нет, но которая
+        вот-вот появится, тоже отнимается заранее.
+        """
+        viewport = self.list.viewport().width()
+        if viewport <= 0:
+            return 320
+        bar = self.list.verticalScrollBar()
+        reserve = 0
+        if not bar.isVisible():
+            reserve = self.list.style().pixelMetric(
+                QStyle.PixelMetric.PM_ScrollBarExtent, None, bar
+            )
+        return max(120, viewport - 4 - reserve)
+
     def _row_height(self, row) -> int:
         """Высота строки с учётом переноса меток на вторую строку."""
-        width = max(320, self.list.viewport().width() - 4)
+        width = self._row_width()
         height = row.heightForWidth(width) if row.hasHeightForWidth() else -1
         if height <= 0:
             height = row.sizeHint().height()
         return height + 4
 
-    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
-        """При изменении ширины пересчитываем высоты строк — но не на каждый пиксель."""
-        super().resizeEvent(event)
+    def _resize_rows(self) -> None:
+        """Пересчитывает высоты строк под нынешнюю ширину списка.
+
+        Ширина меняется не только вместе с окном: её меняют перетаскивание
+        разделителя, показ боковой панели и появившаяся полоса прокрутки. Если
+        высоты остались от прежней ширины, длинное название переносится на
+        вторую строку, а места под неё уже нет — текст обрезается.
+        """
+        for index in range(self.list.count()):
+            item = self.list.item(index)
+            row = self.list.itemWidget(item)
+            if row is None or not row.hasHeightForWidth():
+                continue
+            height = self._row_height(row)
+            if item.sizeHint().height() != height:
+                item.setSizeHint(QSize(0, height))
+
+    def _queue_row_resize(self) -> None:
+        """Пересчёт откладываем: при перетаскивании ширина меняется непрерывно."""
         timer = getattr(self, "_resize_timer", None)
         if timer is None:
             timer = QTimer(self)
             timer.setSingleShot(True)
-            timer.timeout.connect(lambda: self.refresh(keep_selection=True))
+            timer.timeout.connect(self._resize_rows)
             self._resize_timer = timer
-        timer.start(180)
+        timer.start(120)
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt naming)
+        if watched is self.list.viewport() and event.type() == QEvent.Type.Resize:
+            self._queue_row_resize()
+        return super().eventFilter(watched, event)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        super().resizeEvent(event)
+        self._queue_row_resize()
 
     def _add_planned_separator(self, count: int) -> None:
         """Черта «плановые» между актуальными и будущими задачами."""
@@ -1462,6 +1511,33 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction("Удалить", lambda: self._delete_task(task))
         menu.exec(self.list.viewport().mapToGlobal(position))
+
+    def _ask_priority(self, task_id: int, level: int) -> None:
+        """Клик по шкале важности: меняем уровень, но только с подтверждения."""
+        task = self.storage.get_task(task_id)
+        if task is None or level == task.priority:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Важность",
+            "Изменить важность «%s»?\n\n%s → %s"
+            % (
+                task.title,
+                PRIORITY_LABELS.get(task.priority, "").capitalize(),
+                PRIORITY_LABELS.get(level, "").capitalize(),
+            ),
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            row = self.rows.get(task_id)
+            if row is not None:
+                row.reset_priority()
+            return
+        task.priority = level
+        self.storage.update_task(task, touch_activity=False)
+        self.refresh(keep_selection=True)
+        self.statusBar().showMessage(
+            "Важность: %s" % PRIORITY_LABELS.get(level, ""), 3000
+        )
 
     def _ask_jira_key(self, task_id: int) -> None:
         """Клик по метке «jira?»: вписать ключ, не открывая карточку."""

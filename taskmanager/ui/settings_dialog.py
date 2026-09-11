@@ -911,11 +911,20 @@ class SettingsDialog(QDialog):
         index = self.pixel_font_box.findData(current)
         self.pixel_font_box.setCurrentIndex(max(index, 0))
 
+        if own:
+            head = "Найдены свои шрифты: %s." % ", ".join(own)
+        else:
+            head = (
+                "Своего пиксельного шрифта пока нет, поэтому пиксельный стиль "
+                "выглядит обычным моноширинным."
+            )
         self.font_note.setText(
-            "Вместе с программой идут свободные пиксельные шрифты (Tiny5, Handjet) — "
-            "они работают сразу и на любом компьютере. Свой файл можно добавить "
-            "кнопкой рядом: он ляжет в папку %s, подключится без установки в Windows "
-            "и переживёт обновление." % fonts_module.fonts_dir()
+            "%s Шрифт в поставку не входит — скачайте любой пиксельный с "
+            "кириллицей и добавьте кнопкой рядом. Подойдут бесплатные Tiny5, "
+            "Handjet или Pixeloid (ищутся по названию на fonts.google.com и "
+            "dafont.com), либо свой файл Minecraft из папки шрифтов Windows. Файл "
+            "ляжет в папку %s, подключится без установки в Windows и переживёт "
+            "обновление." % (head, fonts_module.fonts_dir())
         )
 
     def _add_font(self) -> None:

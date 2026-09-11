@@ -45,6 +45,7 @@ from ..storage import Storage
 from . import theme
 from .widgets import (
     CheckCircle,
+    PriorityBars,
     ProductPill,
     SubtaskList,
     manage_window,
@@ -118,6 +119,7 @@ class TaskDialog(QDialog):
         self.storage = storage
         self.settings = settings
         self.task = task or Task()
+        self.colors = theme.palette(settings.get("theme", "dark"))
         self.is_new = task is None
         self.setWindowTitle("Новая задача" if self.is_new else "Задача")
         self._build()
@@ -155,11 +157,17 @@ class TaskDialog(QDialog):
 
         priority_col = QVBoxLayout()
         priority_col.setSpacing(6)
-        priority_col.addWidget(section_label("приоритет"))
-        self.priority_box = QComboBox()
-        for value in (0, 1, 2, 3):
-            self.priority_box.addItem(PRIORITY_LABELS[value].capitalize(), value)
-        priority_col.addWidget(self.priority_box)
+        priority_col.addWidget(section_label("важность"))
+        # Та же шкала, что и в списке: кликаем по полоске, а не выбираем из меню.
+        bars_row = QHBoxLayout()
+        bars_row.setSpacing(8)
+        self.priority_bars = PriorityBars(self.task.priority, self.colors)
+        self.priority_bars.picked.connect(self._pick_priority)
+        bars_row.addWidget(self.priority_bars)
+        self.priority_label = QLabel()
+        self.priority_label.setProperty("faint", "true")
+        bars_row.addWidget(self.priority_label, 1)
+        priority_col.addLayout(bars_row)
         row.addLayout(priority_col, 1)
 
         due_col, self.due_check, self.due_edit = self._date_field("срок", "Задача со сроком")
@@ -398,10 +406,15 @@ class TaskDialog(QDialog):
             else "Дата начала уже наступила — задача в общем списке."
         )
 
+    def _pick_priority(self, level: int) -> None:
+        """Выбор на шкале: в карточке подтверждение не нужно — есть «Сохранить»."""
+        self.priority_bars.set_level(level)
+        self.priority_label.setText(PRIORITY_LABELS.get(self.priority_bars.level, ""))
+
     def _load(self) -> None:
         task = self.task
         self.title_edit.setText(task.title)
-        self.priority_box.setCurrentIndex(self.priority_box.findData(task.priority))
+        self._pick_priority(task.priority)
         self.due_check.setChecked(task.due_date is not None)
         self.due_edit.setEnabled(task.due_date is not None)
         if task.due_date:
@@ -486,7 +499,7 @@ class TaskDialog(QDialog):
             return None
         task = self.task
         task.title = title
-        task.priority = self.priority_box.currentData()
+        task.priority = self.priority_bars.level
         task.due_date = self.due_edit.date().toPython() if self.due_check.isChecked() else None
         task.start_date = (
             self.start_edit.date().toPython() if self.start_check.isChecked() else None

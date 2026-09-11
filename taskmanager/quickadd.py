@@ -17,6 +17,7 @@ from .models import (
     PRIORITY_HIGH,
     PRIORITY_LOW,
     PRIORITY_NORMAL,
+    PRIORITY_NOTABLE,
     Task,
 )
 
@@ -27,6 +28,8 @@ _PRIORITY_WORDS = {
     "low": PRIORITY_LOW,
     "обычный": PRIORITY_NORMAL,
     "normal": PRIORITY_NORMAL,
+    "заметный": PRIORITY_NOTABLE,
+    "notable": PRIORITY_NOTABLE,
     "высокий": PRIORITY_HIGH,
     "high": PRIORITY_HIGH,
     "критично": PRIORITY_CRITICAL,
@@ -118,8 +121,15 @@ def parse(text: str, today: date | None = None) -> Task:
     for token in text.split():
         low = token.lower()
 
-        if re.fullmatch(r"!{1,3}", token):
-            task.priority = {1: PRIORITY_LOW, 2: PRIORITY_HIGH, 3: PRIORITY_CRITICAL}[len(token)]
+        if re.fullmatch(r"!{1,4}", token):
+            # Восклицательных знаков — на одну ступень меньше, чем полосок:
+            # «!» это самая спокойная задача, «!!!!» — то, что горит.
+            task.priority = {
+                1: PRIORITY_LOW,
+                2: PRIORITY_NOTABLE,
+                3: PRIORITY_HIGH,
+                4: PRIORITY_CRITICAL,
+            }[len(token)]
             continue
         if low.startswith("!") and low[1:] in _PRIORITY_WORDS:
             task.priority = _PRIORITY_WORDS[low[1:]]

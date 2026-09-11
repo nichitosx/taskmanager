@@ -37,8 +37,9 @@ ARCHIVE = "https://github.com/%s/archive/refs/heads/%s.zip" % (REPO, BRANCH)
 
 # Что переносим из новой версии. Всё остальное в папке программы не трогаем.
 PACKAGE = "taskmanager"
-# Шрифты поставки обновляются вместе с программой; свои файлы рядом не трогаются.
-BUNDLED_FONTS = Path("fonts") / "bundled"
+# Шрифты в поставку больше не входят; у кого осталась папка от прежних версий,
+# у того она убирается при обновлении, чтобы не спорила с личным файлом.
+OLD_BUNDLED_FONTS = Path("fonts") / "bundled"
 ROOT_FILES = [
     "run.py",
     "install.py",
@@ -193,11 +194,7 @@ def apply(source: Path) -> bool:
             shutil.move(str(package), str(backup))
         shutil.copytree(source / PACKAGE, package)
 
-        shipped = source / BUNDLED_FONTS
-        if shipped.is_dir():
-            target = APP_DIR / BUNDLED_FONTS
-            shutil.rmtree(target, ignore_errors=True)
-            shutil.copytree(shipped, target)
+        shutil.rmtree(APP_DIR / OLD_BUNDLED_FONTS, ignore_errors=True)
 
         for name in ROOT_FILES:
             new_file = source / name

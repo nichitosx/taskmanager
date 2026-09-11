@@ -8,17 +8,27 @@ from typing import Optional
 
 # --- Приоритеты ---------------------------------------------------------------
 
+# Пять ступеней: ровно столько полосок показывает строка задачи, и одна
+# полоска — самая спокойная задача, пять — то, что горит.
 PRIORITY_LOW = 0
 PRIORITY_NORMAL = 1
-PRIORITY_HIGH = 2
-PRIORITY_CRITICAL = 3
+PRIORITY_NOTABLE = 2
+PRIORITY_HIGH = 3
+PRIORITY_CRITICAL = 4
+
+# Прежнее название: до появления пятой ступени «высоким» считался уровень 2.
+PRIORITY_HIGH_OLD = PRIORITY_NOTABLE
 
 PRIORITY_LABELS = {
-    PRIORITY_LOW: "низкий",
-    PRIORITY_NORMAL: "обычный",
-    PRIORITY_HIGH: "высокий",
+    PRIORITY_LOW: "не особо важная",
+    PRIORITY_NORMAL: "обычная",
+    PRIORITY_NOTABLE: "заметная",
+    PRIORITY_HIGH: "высокая",
     PRIORITY_CRITICAL: "критично",
 }
+
+# Сколько полосок закрашено: уровень 0 — одна, уровень 4 — все пять.
+PRIORITY_LEVELS = len(PRIORITY_LABELS)
 
 # --- Статусы ------------------------------------------------------------------
 

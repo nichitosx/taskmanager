@@ -57,6 +57,7 @@ PRIORITY_COLOR_KEYS = {
     1: "info",
     2: "warning",
     3: "danger",
+    4: "danger",
 }
 
 # --- Стили оформления ---------------------------------------------------------
@@ -228,6 +229,42 @@ def ui_font(size: int = 10, bold: bool = False) -> QFont:
     return font
 
 
+def title_px() -> int:
+    """Размер названия задачи в пикселях.
+
+    В пикселях, а не в пунктах, ровно по той же причине, что и у мелких меток:
+    таблица стилей задаёт размер в пикселях и перебивает setFont. Пока размеры
+    не совпадали, высота строки считалась по одному шрифту, а текст рисовался
+    другим — и вторая строка названия не влезала.
+    """
+    return 16 if is_pixel() else 17
+
+
+def title_font(bold: bool = False) -> QFont:
+    font = QFont(pixel_family() if is_pixel() else ui_family())
+    font.setPixelSize(title_px())
+    # В мягком стиле буквы чуть плотнее по начертанию: так текст читается
+    # увереннее и ближе по весу к пиксельному шрифту.
+    font.setWeight(
+        QFont.Weight.DemiBold if bold
+        else (QFont.Weight.Normal if is_pixel() else QFont.Weight.Medium)
+    )
+    return font
+
+
+def title_css(bold: bool = False) -> str:
+    """Тот же шрифт для таблицы стилей самой метки.
+
+    Межбуквенный интервал обнуляем: общий стиль добавляет его в пиксельном
+    режиме, а расчёт высоты строки про него не знает.
+    """
+    return 'font-family: "%s"; font-size: %dpx; font-weight: %d; letter-spacing: 0;' % (
+        pixel_family() if is_pixel() else ui_family(),
+        title_px(),
+        700 if bold else (400 if is_pixel() else 500),
+    )
+
+
 def small_font_px() -> int:
     """Размер шрифта мелких меток в пикселях (не в пунктах — не зависит от DPI)."""
     return 13 if is_pixel() else 12
@@ -382,7 +419,9 @@ def stylesheet(theme: str, style: str | None = None) -> str:
     c["r_button"] = radius("button")
     c["r_small"] = radius("small")
     c["r_nav"] = radius("nav")
-    c["font_size"] = 14
+    # В мягком стиле шрифт крупнее: системный шрифт мельче пиксельного при
+    # одинаковом размере, и без прибавки интерфейс выглядел жиденьким.
+    c["font_size"] = 14 if is_pixel() else 15
     c["item_gap"] = 7 + line_extra()
     pattern = pattern_image(theme) if is_pixel() else ""
     # Только сокращённая запись background замащивает картинку: с отдельным

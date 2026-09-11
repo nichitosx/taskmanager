@@ -40,6 +40,7 @@ from ..recurrence import describe as describe_repeat
 from ..models import (
     JIRA_NOT_NEEDED,
     PRIORITY_LABELS,
+    PRIORITY_LEVELS,
     Task,
 )
 from . import theme
@@ -592,6 +593,7 @@ class TaskRow(Card):
     log_requested = Signal(int)
     jira_requested = Signal(int)      # кликнули по метке «jira?»
     product_requested = Signal(int)   # кликнули по метке продукта
+    priority_requested = Signal(int, int)  # задача и уровень, выбранный на шкале
 
     def __init__(
         self,
@@ -641,7 +643,8 @@ class TaskRow(Card):
 
         self.title = QLabel(task.title)
         self.title.setWordWrap(True)
-        title_font = theme.ui_font(11, bold=task.priority >= 2 and not task.is_done)
+        strong = task.priority >= 2 and not task.is_done
+        title_font = theme.title_font(bold=strong)
         title_font.setStrikeOut(task.is_done)
         self.title.setFont(title_font)
         if task.is_done:
@@ -650,15 +653,90 @@ class TaskRow(Card):
             color = c["text_dim"]  # работа ещё не началась — строка тише остальных
         else:
             color = c["text"]
-        self.title.setStyleSheet("color: %s; background: transparent;" % color)
+        # Шрифт прописан и в стилях метки: иначе общая таблица стилей нарисует
+        # текст шире, чем посчитала высоту строки, и вторая строка обрежется.
+        self.title.setStyleSheet(
+            "color: %s; background: transparent; %s%s"
+            % (
+                color,
+                theme.title_css(bold=strong),
+                " text-decoration: line-through;" if task.is_done else "",
+            )
+        )
         text_col.addWidget(self.title)
 
+        self.meta = None
         pills = self._meta_pills()
         if pills:
-            meta = FlowLayout(spacing=6)
-            text_col.addLayout(meta)
+            self.meta = FlowLayout(spacing=6)
+            text_col.addLayout(self.meta)
             for pill in pills:
-                meta.addWidget(pill)
+                self.meta.addWidget(pill)
+
+    # --- Размеры --------------------------------------------------------------
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 (Qt naming)
+        return True
+
+    def _text_width(self, width: int) -> int:
+        """Сколько места остаётся тексту: без полей, отметки и отступа."""
+        layout = self.layout()
+        if layout is None:
+            return 0
+        margins = layout.contentsMargins()
+        return (
+            width
+            - margins.left()
+            - margins.right()
+            - self.check.width()
+            - layout.spacing()
+        )
+
+    def _title_height(self, text_width: int) -> int:
+        """Высота названия при такой ширине, по метрикам шрифта.
+
+        Не спрашиваем саму надпись: её heightForWidth не опускается ниже уже
+        назначенной минимальной высоты, и после первого расчёта строка
+        перестала бы уменьшаться при расширении окна.
+        """
+        metrics = QFontMetrics(self.title.font())
+        return metrics.boundingRect(
+            0, 0, text_width, 100000, Qt.TextFlag.TextWordWrap, self.title.text()
+        ).height()
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 (Qt naming)
+        """Высота строки при заданной ширине.
+
+        Считаем сами, а не полагаемся на вложенные раскладки: горизонтальная
+        раскладка Qt отдаёт вложенной всю ширину, не вычитая отметку, и высота
+        длинного названия выходила заниженной.
+        """
+        text_width = self._text_width(width)
+        if text_width <= 0:
+            return super().heightForWidth(width)
+
+        column = self._title_height(text_width)
+        if self.meta is not None:
+            column += self.meta.spacing() + self.meta.heightForWidth(text_width)
+        margins = self.layout().contentsMargins()
+        body = max(column, self.check.height())
+        return margins.top() + body + margins.bottom()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        super().resizeEvent(event)
+        # Готовую высоту названию выдаём сами: вложенная раскладка отмерила бы
+        # меньше строк, чем нужно, и последняя строка обрезалась бы.
+        text_width = self._text_width(self.width())
+        if text_width > 0:
+            needed = self._title_height(text_width)
+            if self.title.height() != needed:
+                self.title.setFixedHeight(needed)
+
+    def reset_priority(self) -> None:
+        """Возвращает шкалу к уровню задачи: выбор не подтвердили."""
+        bars = getattr(self, "priority_bars", None)
+        if bars is not None:
+            bars.set_level(self.task.priority)
 
     def _meta_pills(self) -> list[QWidget]:
         c = self.colors
@@ -690,9 +768,12 @@ class TaskRow(Card):
         if repeat and not task.is_done:
             pills.append(Pill("↻ " + repeat, c["text_dim"]))
 
-        if task.priority >= 2 and not task.is_done:
-            key = theme.PRIORITY_COLOR_KEYS[task.priority]
-            pills.append(Pill(PRIORITY_LABELS[task.priority].upper(), c[key], strong=True))
+        if not task.is_done:
+            bars = self.priority_bars = PriorityBars(task.priority, c)
+            bars.picked.connect(
+                lambda level, task_id=task.id: self.priority_requested.emit(task_id, level)
+            )
+            pills.append(bars)
 
         due = _due_text(task)
         if due and not task.is_done:
@@ -1287,6 +1368,84 @@ class JiraIssueRow(Card):
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         self.activated.emit(self.issue.key)
         super().mouseDoubleClickEvent(event)
+
+
+class PriorityBars(QWidget):
+    """Важность задачи пятью полосками — как шкала выполненного за день.
+
+    Читается без подписи: одна полоска — можно не спешить, пять — горит.
+    Клик по полоске задаёт уровень, но саму задачу не меняет: строка лишь
+    сообщает о желании, а спрашивает и сохраняет уже окно.
+    """
+
+    picked = Signal(int)   # выбранный уровень, 0..PRIORITY_LEVELS - 1
+
+    BLOCK = 5
+    GAP = 2
+    HEIGHT = 12
+
+    def __init__(self, level: int, colors: dict[str, str], editable: bool = True,
+                 parent=None) -> None:
+        super().__init__(parent)
+        self.colors = colors
+        self.level = max(0, min(PRIORITY_LEVELS - 1, int(level)))
+        self.editable = editable
+        self._hover = -1
+        self.setFixedSize(
+            PRIORITY_LEVELS * self.BLOCK + (PRIORITY_LEVELS - 1) * self.GAP, self.HEIGHT
+        )
+        if editable:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.setMouseTracking(True)
+            self.setToolTip("Важность: %s. Кликните, чтобы изменить"
+                            % PRIORITY_LABELS.get(self.level, ""))
+        else:
+            self.setToolTip("Важность: %s" % PRIORITY_LABELS.get(self.level, ""))
+
+    def set_level(self, level: int) -> None:
+        self.level = max(0, min(PRIORITY_LEVELS - 1, int(level)))
+        self.update()
+
+    def _index_at(self, x: int) -> int:
+        step = self.BLOCK + self.GAP
+        return max(0, min(PRIORITY_LEVELS - 1, int(x) // step if step else 0))
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        c = self.colors
+        painter = QPainter(self)
+        painter.setPen(Qt.PenStyle.NoPen)
+        filled = QColor(c[theme.PRIORITY_COLOR_KEYS.get(self.level, "info")])
+        empty = QColor(c["border"])
+        # Под курсором показываем будущий выбор, а не текущий уровень.
+        shown = self._hover if self._hover >= 0 else self.level
+        if self._hover >= 0:
+            filled = QColor(c[theme.PRIORITY_COLOR_KEYS.get(self._hover, "info")])
+        for index in range(PRIORITY_LEVELS):
+            x = index * (self.BLOCK + self.GAP)
+            painter.setBrush(filled if index <= shown else empty)
+            painter.drawRect(x, 1, self.BLOCK, self.HEIGHT - 2)
+        painter.end()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        if self.editable and event.button() == Qt.MouseButton.LeftButton:
+            self.picked.emit(self._index_at(event.position().x()))
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        if self.editable:
+            index = self._index_at(event.position().x())
+            if index != self._hover:
+                self._hover = index
+                self.update()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        if self._hover >= 0:
+            self._hover = -1
+            self.update()
+        super().leaveEvent(event)
 
 
 class DayProgress(QWidget):

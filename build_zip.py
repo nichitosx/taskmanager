@@ -45,8 +45,7 @@ SKIP_NAMES = {"settings.json", "portable.flag"}
 def keep(path: Path) -> bool:
     if any(part in SKIP_DIRS for part in path.parts):
         return False
-    # Шрифты из поставки — исключение: их лицензия разрешает распространение.
-    if path.suffix.lower() in SKIP_SUFFIXES and "bundled" not in path.parts:
+    if path.suffix.lower() in SKIP_SUFFIXES:
         return False
     return path.name not in SKIP_NAMES
 
@@ -87,12 +86,11 @@ def verify(archive: Path) -> bool:
         names = zip_file.namelist()
 
     problems = [
-        name for name in names
-        if Path(name).suffix.lower() in SKIP_SUFFIXES and "bundled" not in Path(name).parts
+        name for name in names if Path(name).suffix.lower() in SKIP_SUFFIXES
     ]
     problems += [name for name in names if Path(name).name in SKIP_NAMES]
     required = [
-        "TaskManager/fonts/bundled/Tiny5-Regular.ttf",
+        "TaskManager/fonts/README.md",
         "TaskManager/run.py",
         "TaskManager/install.py",
         "TaskManager/update.py",
