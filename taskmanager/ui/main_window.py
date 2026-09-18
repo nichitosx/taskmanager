@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import demo
+from .. import goals as goals_module
 from .. import updates as updates_module
 from .. import products as products_module
 from .. import quickadd
@@ -73,7 +74,14 @@ from ..scheduler import Scheduler
 from ..storage import Storage
 from . import theme
 from .calendar_view import CalendarDialog
-from .dialogs import DailyReportDialog, LogWorkDialog, TaskDialog, UpcomingTasksDialog
+from .dialogs import (
+    DailyReportDialog,
+    DoneDetailsDialog,
+    GoalDialog,
+    LogWorkDialog,
+    TaskDialog,
+    UpcomingTasksDialog,
+)
 from .reports_ui import HistoryDialog, WeeklyReportDialog
 from .settings_dialog import SettingsDialog
 from .widgets import (
@@ -85,6 +93,7 @@ from .widgets import (
     SubtaskList,
     elide_text,
     headline,
+    GoalCard,
     JiraIssueRow,
     NavItem,
     TaskRow,
@@ -95,6 +104,9 @@ from .widgets import (
 # Боковое меню делится на две части: «когда» — горизонты планирования,
 # «состояние» — то, что требует внимания независимо от сроков.
 HORIZON_FILTERS = [(key, HORIZON_LABELS[key]) for key in ("today", "week", "month", "planned")]
+
+# Цели квартала: отдельный раздел и отдельная строка над списком задач.
+GOALS = "goals"
 
 # Задачи, закрытые здесь, но всё ещё открытые в Jira: рассинхрон, который
 # видно только когда Jira отвечает, — поэтому пункт появляется не всегда.
@@ -114,6 +126,7 @@ SYNC_WARNING = "закрой в jira!"
 
 STATE_HINTS = {
     JIRA_SYNC: "Отмечены выполненными здесь, но в Jira всё ещё открыты",
+    GOALS: "Две-три цели на квартал и контрольные результаты по ним",
 }
 
 FILTERS = HORIZON_FILTERS + STATE_FILTERS
@@ -483,6 +496,14 @@ class MainWindow(QMainWindow):
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(lambda: self.refresh())
         search_row.addWidget(self.search, 1)
+        self.new_goal_button = QPushButton("Новая цель")
+        self.new_goal_button.setProperty("flat", "true")
+        self.new_goal_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.new_goal_button.setToolTip("Поставить цель на квартал")
+        self.new_goal_button.clicked.connect(lambda: self.open_goal())
+        self.new_goal_button.hide()
+        search_row.addWidget(self.new_goal_button)
+
         self.filter_label = QLabel()
         self.filter_label.setFont(theme.mono_font(8))
         self.filter_label.setProperty("faint", "true")
@@ -694,6 +715,13 @@ class MainWindow(QMainWindow):
         self.sidebar_layout = layout
         self.nav_items: dict[str, NavItem] = {}
 
+        # Цели — выше всего: они про квартал, а не про сегодня.
+        self.goals_item = self._nav_item(
+            GOALS, "Цели квартала", STATE_HINTS[GOALS], self.colors["warning"]
+        )
+        layout.addWidget(self.goals_item)
+        layout.addSpacing(theme.section_gap())
+
         layout.addWidget(section_label("когда"))
         layout.addSpacing(2)
         for key, title in HORIZON_FILTERS:
@@ -854,8 +882,9 @@ class MainWindow(QMainWindow):
         self.settings.save()
         self.refresh(keep_selection=True)
 
-    def _nav_item(self, key: str, title: str, tooltip: str = "") -> NavItem:
-        item = NavItem(title, self.colors, self.colors["accent"])
+    def _nav_item(self, key: str, title: str, tooltip: str = "",
+                  tint: str = "") -> NavItem:
+        item = NavItem(title, self.colors, self.colors["accent"], tint)
         if tooltip:
             item.setToolTip(tooltip)
         item.clicked.connect(lambda k=key: self.set_filter(k))
@@ -1185,6 +1214,67 @@ class MainWindow(QMainWindow):
 
     # --- Данные ---------------------------------------------------------------
 
+    # --- Цели квартала --------------------------------------------------------
+
+    def current_quarter(self) -> str:
+        return getattr(self, "_quarter", "") or goals_module.quarter_of()
+
+    def goals_now(self) -> list:
+        """Цели текущего квартала."""
+        return self.storage.list_goals(self.current_quarter())
+
+    def open_goal(self, goal_id: int | None = None) -> None:
+        goal = self.storage.get_goal(goal_id) if goal_id else None
+        dialog = GoalDialog(self.storage, self.settings, goal, self.current_quarter(), self)
+        if dialog.exec() == dialog.DialogCode.Accepted:
+            self.refresh(keep_selection=True)
+
+    def _toggle_goal(self, goal_id: int, done: bool) -> None:
+        self.storage.set_goal_status(
+            goal_id, goals_module.STATUS_DONE if done else goals_module.STATUS_ACTIVE
+        )
+        self.refresh(keep_selection=True)
+
+    def _goal_card(self, goal) -> GoalCard:
+        card = GoalCard(goal, self.colors, self.storage.goal_progress(goal.id))
+        card.activated.connect(self.open_goal)
+        card.toggled.connect(self._toggle_goal)
+        return card
+
+    def _fill_goals(self) -> None:
+        """Раздел «Цели квартала»: только цели, крупно и по порядку."""
+        self.rows = {}
+        self.list.clear()
+        goals = self.goals_now()
+        if not goals:
+            self._show_empty(
+                "Целей на %s пока нет. Нажмите «Новая цель», чтобы поставить первую."
+                % goals_module.quarter_title(self.current_quarter()).lower()
+            )
+            self.filter_label.setText("цели квартала: 0")
+            return
+
+        self.empty_box.hide()
+        self.list.show()
+        for goal in goals:
+            card = self._goal_card(goal)
+            item = QListWidgetItem()
+            item.setSizeHint(QSize(0, self._row_height(card)))
+            self.list.addItem(item)
+            self.list.setItemWidget(item, card)
+        self._remember_rows_width()
+        self.filter_label.setText("цели квартала: %d" % len(goals))
+
+    def _add_goal_rows(self) -> None:
+        """Ставит цели над списком задач — чтобы они были перед глазами."""
+        goals = [goal for goal in self.goals_now() if not goal.is_done]
+        for goal in goals:
+            card = self._goal_card(goal)
+            item = QListWidgetItem()
+            item.setSizeHint(QSize(0, self._row_height(card)))
+            self.list.addItem(item)
+            self.list.setItemWidget(item, card)
+
     def visible_tasks(self) -> list[Task]:
         query = self.search.text().strip()
         if query:
@@ -1227,6 +1317,12 @@ class MainWindow(QMainWindow):
             self.detail.show_task(None)
             return
 
+        if self.filter == GOALS and not self.search.text().strip():
+            self._refresh_chrome(stale_days)
+            self._fill_goals()
+            self.detail.show_task(None)
+            return
+
         self.list.clear()
         self.rows: dict[int, TaskRow] = {}
         tasks = self.visible_tasks()
@@ -1238,6 +1334,10 @@ class MainWindow(QMainWindow):
         upcoming = [t for t in tasks if t.is_planned]
         ordered = current + upcoming
         separator_before = current[-1].id if current and upcoming else None
+
+        # Цели идут первой строкой общего списка: с них начинается неделя.
+        if self.filter == "active" and not self.search.text().strip():
+            self._add_goal_rows()
 
         for task in ordered:
             row = self._task_row(task, stale_days, catalog, progress)
@@ -1291,6 +1391,9 @@ class MainWindow(QMainWindow):
         for key in JIRA_VIEWS:
             if key in self.nav_items:
                 self.nav_items[key].setVisible(self._jira_ready())
+        # Кнопка нужна только там, где цели и заводят.
+        if hasattr(self, "new_goal_button"):
+            self.new_goal_button.setVisible(self.filter == GOALS)
         if JIRA_SYNC in self.nav_items:
             # Пустой раздел про рассинхрон только занимал бы место.
             has_sync = bool(self.out_of_sync())
@@ -1308,6 +1411,8 @@ class MainWindow(QMainWindow):
             return self.filter[len(PRODUCT_PREFIX):]
         if self.filter in JIRA_VIEWS:
             return JIRA_VIEWS[self.filter]
+        if self.filter == GOALS:
+            return "Цели квартала"
         return dict(FILTERS).get(self.filter, "")
 
     def _nav_count(
@@ -1319,6 +1424,8 @@ class MainWindow(QMainWindow):
             return sum(1 for t in tasks if t.product.lower() == name)
         if key in JIRA_VIEWS:
             return len(self._jira_issues.get(key, []))
+        if key == GOALS:
+            return sum(1 for goal in self.goals_now() if not goal.is_done)
         if key == JIRA_SYNC:
             return len(self.out_of_sync())
         if key == "done":
@@ -1460,6 +1567,7 @@ class MainWindow(QMainWindow):
             "stale": "Все задачи в движении.",
             "jira": "По всем задачам вопрос с Jira закрыт.",
             JIRA_SYNC: "Всё сходится: закрытое здесь закрыто и в Jira.",
+            GOALS: "Целей на этот квартал пока нет.",
             "done": "Выполненных задач пока нет.",
         }.get(self.filter, "Пусто")
 
@@ -1596,29 +1704,38 @@ class MainWindow(QMainWindow):
         )
 
     def _ask_result(self, task: Task) -> bool:
-        """Просит записать итог, если по задаче нет ни одной отметки о работе.
+        """Спрашивает итог, продукт и ключ Jira при отметке «выполнено».
 
-        Без этой записи задача уйдёт в отчёт строкой «ничего не отмечено» —
-        а вспомнить через неделю, что именно было сделано, уже не выйдет.
-        Возвращает False, если человек передумал отмечать задачу.
+        Без записи задача уйдёт в отчёт строкой «ничего не отмечено», без
+        продукта — не встанет рядом со своими, без ключа — попадёт в раздел
+        «без Jira». Всё необязательно; False означает «передумал отмечать».
         """
-        if not self.settings.get("ask_result", True):
+        if not self.settings.get("ask_result", True) or task.id is None:
             return True
-        if task.id is None or self.storage.logs_for_task(task.id, limit=1):
+        # Спрашивать нечего, если и запись есть, и продукт с ключом на месте.
+        needs_key = not task.jira_key and bool(self.settings.get("jira.enabled", True))
+        if self.storage.logs_for_task(task.id, limit=1) and task.product and not needs_key:
             return True
 
-        text, accepted = QInputDialog.getMultiLineText(
-            self,
-            "Что сделано",
-            "Коротко: что сделано по задаче «%s»?\n"
-            "Эта запись попадёт в недельный отчёт." % task.title,
-            "",
-        )
-        if not accepted:
+        dialog = DoneDetailsDialog(task, self.settings, self.storage, self)
+        if dialog.exec() != dialog.DialogCode.Accepted:
             return False
-        text = text.strip()
+
+        text = dialog.result_text()
         if text:
             self.storage.add_work_log(task.id, text)
+
+        # Продукт и ключ дописываем в задачу: без них строка отчёта окажется
+        # в разделе «без Jira» и вне своей группы продуктов.
+        product = dialog.product()
+        key = jira.normalize_key(dialog.jira_key())
+        if product or key:
+            if product:
+                task.product = product
+            if key:
+                task.jira_key = key
+                task.jira_state = JIRA_CREATED
+            self.storage.update_task(task, touch_activity=False)
         return True
 
     def _reset_check(self, task_id: int) -> None:

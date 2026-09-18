@@ -17,6 +17,8 @@ from .models import (
     Task,
     WorkLog,
 )
+from .goals import STATUS_DONE as GOAL_DONE
+from .goals import Goal, GoalResult, quarter_of
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
@@ -41,6 +43,28 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE TABLE IF NOT EXISTS subtasks (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id    INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    title      TEXT NOT NULL,
+    done       INTEGER DEFAULT 0,
+    position   INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL,
+    done_at    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS goals (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    title      TEXT NOT NULL,
+    comment    TEXT DEFAULT '',
+    quarter    TEXT NOT NULL,
+    status     TEXT DEFAULT 'active',
+    position   INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    done_at    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS goal_results (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    goal_id    INTEGER NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
     title      TEXT NOT NULL,
     done       INTEGER DEFAULT 0,
     position   INTEGER DEFAULT 0,
@@ -82,6 +106,8 @@ INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_start ON tasks(start_date);
 CREATE INDEX IF NOT EXISTS idx_subtasks_task ON subtasks(task_id);
+CREATE INDEX IF NOT EXISTS idx_goals_quarter ON goals(quarter);
+CREATE INDEX IF NOT EXISTS idx_goal_results_goal ON goal_results(goal_id);
 CREATE INDEX IF NOT EXISTS idx_logs_date ON work_logs(log_date);
 CREATE INDEX IF NOT EXISTS idx_logs_task ON work_logs(task_id);
 """
@@ -377,6 +403,139 @@ class Storage:
             (task_id, limit),
         ).fetchall()
         return [WorkLog.from_row(r) for r in rows]
+
+    # --- Цели на квартал ------------------------------------------------------
+
+    def list_goals(self, quarter: str = "", include_done: bool = True) -> list[Goal]:
+        """Цели квартала по порядку. Пустой квартал — текущий."""
+        quarter = quarter or quarter_of()
+        query = "SELECT * FROM goals WHERE quarter=?"
+        if not include_done:
+            query += " AND status != 'done'"
+        rows = self.conn.execute(
+            query + " ORDER BY position, id", (quarter,)
+        ).fetchall()
+        return [Goal.from_row(row) for row in rows]
+
+    def get_goal(self, goal_id: int) -> Optional[Goal]:
+        row = self.conn.execute("SELECT * FROM goals WHERE id=?", (goal_id,)).fetchone()
+        return Goal.from_row(row) if row else None
+
+    def add_goal(self, goal: Goal) -> Goal:
+        now = _now()
+        quarter = goal.quarter or quarter_of()
+        position = self.conn.execute(
+            "SELECT COALESCE(MAX(position), -1) + 1 AS next FROM goals WHERE quarter=?",
+            (quarter,),
+        ).fetchone()["next"]
+        cur = self.conn.execute(
+            """INSERT INTO goals (title, comment, quarter, status, position,
+                                  created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?)""",
+            (goal.title.strip(), goal.comment, quarter, goal.status, position, now, now),
+        )
+        self.conn.commit()
+        return self.get_goal(cur.lastrowid)
+
+    def update_goal(self, goal: Goal) -> None:
+        self.conn.execute(
+            """UPDATE goals SET title=?, comment=?, quarter=?, status=?, updated_at=?
+               WHERE id=?""",
+            (
+                goal.title.strip(),
+                goal.comment,
+                goal.quarter or quarter_of(),
+                goal.status,
+                _now(),
+                goal.id,
+            ),
+        )
+        self.conn.commit()
+
+    def set_goal_status(self, goal_id: int, status: str) -> None:
+        done_at = _now() if status == GOAL_DONE else None
+        self.conn.execute(
+            "UPDATE goals SET status=?, done_at=?, updated_at=? WHERE id=?",
+            (status, done_at, _now(), goal_id),
+        )
+        self.conn.commit()
+
+    def delete_goal(self, goal_id: int) -> None:
+        self.conn.execute("DELETE FROM goals WHERE id=?", (goal_id,))
+        self.conn.commit()
+
+    def quarters_with_goals(self) -> list[str]:
+        """Кварталы, на которые цели уже ставили — от свежих к старым."""
+        rows = self.conn.execute(
+            "SELECT DISTINCT quarter FROM goals ORDER BY quarter DESC"
+        ).fetchall()
+        return [row["quarter"] for row in rows if row["quarter"]]
+
+    # --- Контрольные результаты цели ------------------------------------------
+
+    def list_goal_results(self, goal_id: int) -> list[GoalResult]:
+        rows = self.conn.execute(
+            "SELECT * FROM goal_results WHERE goal_id=? ORDER BY position, id", (goal_id,)
+        ).fetchall()
+        return [GoalResult.from_row(row) for row in rows]
+
+    def add_goal_result(self, goal_id: int, title: str) -> int:
+        title = title.strip()
+        if not title:
+            return 0
+        position = self.conn.execute(
+            "SELECT COALESCE(MAX(position), -1) + 1 AS next FROM goal_results "
+            "WHERE goal_id=?",
+            (goal_id,),
+        ).fetchone()["next"]
+        cur = self.conn.execute(
+            "INSERT INTO goal_results (goal_id, title, position, created_at) "
+            "VALUES (?,?,?,?)",
+            (goal_id, title, position, _now()),
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def rename_goal_result(self, result_id: int, title: str) -> None:
+        title = title.strip()
+        if not title:
+            return
+        self.conn.execute(
+            "UPDATE goal_results SET title=? WHERE id=?", (title, result_id)
+        )
+        self.conn.commit()
+
+    def set_goal_result_done(self, result_id: int, done: bool) -> None:
+        self.conn.execute(
+            "UPDATE goal_results SET done=?, done_at=? WHERE id=?",
+            (1 if done else 0, _now() if done else None, result_id),
+        )
+        self.conn.commit()
+
+    def delete_goal_result(self, result_id: int) -> None:
+        self.conn.execute("DELETE FROM goal_results WHERE id=?", (result_id,))
+        self.conn.commit()
+
+    def goal_progress(self, goal_id: int) -> tuple[int, int]:
+        """Сколько контрольных результатов уже достигнуто из скольких."""
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS total, COALESCE(SUM(done), 0) AS done "
+            "FROM goal_results WHERE goal_id=?",
+            (goal_id,),
+        ).fetchone()
+        return int(row["done"] or 0), int(row["total"] or 0)
+
+    def goal_results_done_between(self, start: date, end: date) -> dict:
+        """Результаты, отмеченные за период: по ним видно движение цели."""
+        rows = self.conn.execute(
+            "SELECT * FROM goal_results WHERE done=1 AND done_at IS NOT NULL "
+            "AND date(done_at) BETWEEN ? AND ? ORDER BY goal_id, position",
+            (start.isoformat(), end.isoformat()),
+        ).fetchall()
+        found: dict = {}
+        for row in rows:
+            found.setdefault(row["goal_id"], []).append(GoalResult.from_row(row))
+        return found
 
     # --- Ежедневный отчёт -----------------------------------------------------
 

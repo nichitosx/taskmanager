@@ -94,7 +94,13 @@ class JiraDoneFetch(QThread):
 
     def run(self) -> None:  # noqa: D102 (Qt naming)
         try:
-            self.done.emit(JiraClient(self.config).search_done(self.since, self.until))
+            client = JiraClient(self.config)
+            # Спрашиваем и закрытое за неделю, и то, что в Jira ещё в работе:
+            # в отчёт идёт и первое, и второе, просто разными разделами.
+            self.done.emit({
+                "done": client.search_done(self.since, self.until),
+                "active": client.search(self.config.jql_active),
+            })
         except JiraError as exc:
             self.failed.emit(str(exc))
         except Exception as exc:  # неожиданная ошибка не должна ронять окно
@@ -355,11 +361,12 @@ class WeeklyReportDialog(QDialog):
         thread.start()
 
     def _on_jira_done(self, issues) -> None:
-        self.facts = JiraFacts.from_issues(issues)
-        self.jira_note = (
-            "Jira: закрытых за неделю задач — %d" % len(self.facts.done)
-            if self.facts.done
-            else "Jira: за неделю ничего не закрыто"
+        if isinstance(issues, dict):
+            self.facts = JiraFacts.from_issues(issues.get("done"), issues.get("active"))
+        else:
+            self.facts = JiraFacts.from_issues(issues)
+        self.jira_note = "Jira: закрыто за неделю — %d, в работе — %d" % (
+            len(self.facts.done), len(self.facts.active)
         )
         self._sync_jira_note()
         # Обычный refresh, а не пересборка: сохранённый и правленый вручную

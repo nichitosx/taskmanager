@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import goals as goals_module
 from .. import products as products_module
 from ..config import Settings
 from .. import recurrence
@@ -45,6 +46,7 @@ from ..storage import Storage
 from . import theme
 from .widgets import (
     CheckCircle,
+    GoalResultList,
     PriorityBars,
     ProductPill,
     SubtaskList,
@@ -103,6 +105,195 @@ class LogWorkDialog(QDialog):
 
     def text(self) -> str:
         return self.comment.toPlainText().strip()
+
+
+class GoalDialog(QDialog):
+    """Цель квартала: название, как идут дела и контрольные результаты."""
+
+    def __init__(
+        self,
+        storage: Storage,
+        settings: Settings,
+        goal=None,
+        quarter: str = "",
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.storage = storage
+        self.settings = settings
+        self.colors = theme.palette(settings.get("theme", "dark"))
+        self.is_new = goal is None
+        self.goal = goal or goals_module.Goal(quarter=quarter or goals_module.quarter_of())
+        self.setWindowTitle("Новая цель" if self.is_new else "Цель квартала")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(12)
+
+        layout.addWidget(section_label("квартал"))
+        self.quarter_box = QComboBox()
+        current = self.goal.quarter or goals_module.quarter_of()
+        # Соседние кварталы под рукой: цель нередко ставят заранее.
+        known = [goals_module.shift_quarter(goals_module.quarter_of(), step)
+                 for step in (-1, 0, 1)]
+        if current not in known:
+            known.append(current)
+        for quarter_key in known:
+            self.quarter_box.addItem(goals_module.quarter_title(quarter_key), quarter_key)
+        self.quarter_box.setCurrentIndex(max(self.quarter_box.findData(current), 0))
+        layout.addWidget(self.quarter_box)
+
+        layout.addWidget(section_label("цель"))
+        self.title_edit = QLineEdit(self.goal.title)
+        self.title_edit.setPlaceholderText("Например: сократить время выгрузки вдвое")
+        layout.addWidget(self.title_edit)
+
+        layout.addWidget(section_label("как идут дела"))
+        self.comment_edit = QPlainTextEdit(self.goal.comment)
+        self.comment_edit.setPlaceholderText(
+            "Короткий комментарий: где сейчас, что мешает, что дальше"
+        )
+        self.comment_edit.setMinimumHeight(70)
+        self.comment_edit.setMaximumHeight(140)
+        layout.addWidget(self.comment_edit)
+
+        self.results = GoalResultList(storage, self.colors, self.goal.id)
+        layout.addWidget(self.results)
+
+        buttons = QHBoxLayout()
+        if not self.is_new:
+            remove = _button("Удалить", "flat")
+            remove.clicked.connect(self._delete)
+            buttons.addWidget(remove)
+        buttons.addStretch(1)
+        cancel = _button("Отмена", "flat")
+        cancel.clicked.connect(self.reject)
+        save = _button("Сохранить", "accent")
+        save.clicked.connect(self._save)
+        save.setDefault(True)
+        buttons.addWidget(cancel)
+        buttons.addWidget(save)
+        layout.addLayout(buttons)
+
+        manage_window(self, settings, "goal", 520, 560)
+        self.title_edit.setFocus()
+
+    def _save(self) -> None:
+        title = self.title_edit.text().strip()
+        if not title:
+            self.title_edit.setFocus()
+            return
+        self.goal.title = title
+        self.goal.comment = self.comment_edit.toPlainText().strip()
+        self.goal.quarter = self.quarter_box.currentData() or goals_module.quarter_of()
+        if self.is_new:
+            saved = self.storage.add_goal(self.goal)
+            self.goal = saved
+            # Результаты, набранные до сохранения, переносим в базу.
+            self.results.flush(saved.id)
+        else:
+            self.storage.update_goal(self.goal)
+        self.accept()
+
+    def _delete(self) -> None:
+        answer = QMessageBox.question(
+            self, "Цель", "Удалить цель «%s» вместе с результатами?" % self.goal.title
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.storage.delete_goal(self.goal.id)
+        self.deleted = True
+        self.accept()
+
+
+class DoneDetailsDialog(QDialog):
+    """Что спросить, когда задачу отмечают выполненной.
+
+    Одним окном добираем то, чего у задачи не хватает для отчёта: итог работы,
+    продукт и ключ Jira. Ничего не обязательно — пустые поля просто не
+    сохраняются, а окно не мешает закрыть задачу одним нажатием.
+    """
+
+    def __init__(
+        self,
+        task: Task,
+        settings: Settings,
+        storage: Storage | None = None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.task = task
+        self.setWindowTitle("Задача выполнена")
+        self.setMinimumWidth(420)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(12)
+
+        layout.addWidget(section_label("задача"))
+        title = QLabel(task.title)
+        title.setWordWrap(True)
+        title.setFont(theme.ui_font(11, bold=True))
+        layout.addWidget(title)
+
+        layout.addWidget(section_label("что сделано"))
+        self.comment = QPlainTextEdit()
+        self.comment.setPlaceholderText("Например: собрал выгрузку, отдал на проверку")
+        self.comment.setMinimumHeight(64)
+        self.comment.setMaximumHeight(120)
+        layout.addWidget(self.comment)
+
+        # Продукт и ключ спрашиваем, только если их ещё нет: лишние поля в
+        # окне, которое открывается на каждую отметку, быстро надоедают.
+        self.product_box = None
+        if not task.product:
+            names = products_module.names(products_module.load(settings))
+            if storage is not None:
+                for name in storage.products_in_use():
+                    if name not in names:
+                        names.append(name)
+            if names:
+                layout.addWidget(section_label("продукт"))
+                self.product_box = QComboBox()
+                self.product_box.addItem("Не выбран", "")
+                for name in names:
+                    self.product_box.addItem(name, name)
+                layout.addWidget(self.product_box)
+
+        self.key_edit = None
+        if not task.jira_key and settings.get("jira.enabled", True):
+            layout.addWidget(section_label("ключ jira"))
+            self.key_edit = QLineEdit()
+            self.key_edit.setPlaceholderText("PROJ-142, если задача заводилась")
+            layout.addWidget(self.key_edit)
+
+        hint = QLabel("Всё необязательно: пустые поля останутся как есть.")
+        hint.setWordWrap(True)
+        hint.setProperty("faint", "true")
+        layout.addWidget(hint)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = _button("Отмена", "flat")
+        cancel.clicked.connect(self.reject)
+        save = _button("Выполнена", "accent")
+        save.clicked.connect(self.accept)
+        save.setDefault(True)
+        buttons.addWidget(cancel)
+        buttons.addWidget(save)
+        layout.addLayout(buttons)
+
+        manage_window(self, settings, "done_details", 460, 420)
+        self.comment.setFocus()
+
+    def result_text(self) -> str:
+        return self.comment.toPlainText().strip()
+
+    def product(self) -> str:
+        return (self.product_box.currentData() or "") if self.product_box else ""
+
+    def jira_key(self) -> str:
+        return self.key_edit.text().strip() if self.key_edit else ""
 
 
 class TaskDialog(QDialog):

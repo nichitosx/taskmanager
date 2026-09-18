@@ -1238,10 +1238,13 @@ class NavItem(QFrame):
 
     clicked = Signal()
 
-    def __init__(self, title: str, colors: dict[str, str], accent: str = "", parent=None) -> None:
+    def __init__(self, title: str, colors: dict[str, str], accent: str = "",
+                 tint: str = "", parent=None) -> None:
         super().__init__(parent)
         self.colors = colors
         self.accent = accent
+        # Свой цвет названия: им выделены разделы, которые важнее прочих.
+        self.tint = tint
         self.setObjectName("navItem")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
@@ -1267,7 +1270,7 @@ class NavItem(QFrame):
     def set_active(self, active: bool) -> None:
         c = self.colors
         background = c["surface_alt"] if active else "transparent"
-        text = c["text"] if active else c["text_dim"]
+        text = self.tint or (c["text"] if active else c["text_dim"])
         self.setStyleSheet(
             "#navItem { background: %s; border-radius: %dpx; }"
             "#navItem:hover { background: %s; }"
@@ -1278,7 +1281,7 @@ class NavItem(QFrame):
         self.title.setStyleSheet("color: %s; background: transparent;" % text)
         self.count.setStyleSheet(
             "color: %s; background: transparent;"
-            % ((self.accent or c["text_dim"]) if active else c["text_faint"])
+            % (self.tint or ((self.accent or c["text_dim"]) if active else c["text_faint"]))
         )
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
@@ -1335,6 +1338,251 @@ class StatChip(QWidget):
     def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         self.clicked.emit()
         super().mousePressEvent(event)
+
+
+class GoalCard(Card):
+    """Цель квартала над списком задач.
+
+    Жёлтая — чтобы её нельзя было спутать с задачей и чтобы взгляд цеплялся:
+    задача про сегодня, цель про весь квартал.
+    """
+
+    activated = Signal(int)   # открыть цель
+    toggled = Signal(int, bool)
+
+    def __init__(self, goal, colors: dict[str, str], progress: tuple[int, int] = (0, 0),
+                 parent=None) -> None:
+        super().__init__(colors, parent)
+        self.goal = goal
+        self.progress = progress
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.set_bar(colors["warning"])
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(6)
+
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        head.setSpacing(10)
+
+        self.check = CheckCircle(goal.is_done, colors)
+        self.check.toggled.connect(lambda state: self.toggled.emit(goal.id, state))
+        head.addWidget(self.check, 0, Qt.AlignmentFlag.AlignTop)
+
+        self.title = QLabel(goal.title)
+        self.title.setWordWrap(True)
+        font = theme.title_font(bold=True)
+        font.setStrikeOut(goal.is_done)
+        self.title.setFont(font)
+        self.title.setStyleSheet(
+            "color: %s; background: transparent; %s"
+            % (colors["text_faint"] if goal.is_done else colors["warning"],
+               theme.title_css(bold=True))
+        )
+        head.addWidget(self.title, 1)
+        layout.addLayout(head)
+
+        done, total = progress
+        meta = FlowLayout(spacing=6)
+        meta.addWidget(Pill("цель квартала", colors["warning"], strong=True))
+        if total:
+            meta.addWidget(
+                Pill(
+                    "%d/%d" % (done, total),
+                    colors["success"] if done >= total else colors["text_dim"],
+                    strong=done >= total,
+                )
+            )
+        layout.addLayout(meta)
+
+        if goal.comment.strip():
+            # Комментарий к цели бывает длинным, а карточка — вывеска: первые
+            # полторы строки и есть то, что нужно увидеть сразу.
+            text = " ".join(goal.comment.split())
+            if len(text) > 140:
+                text = text[:139].rstrip() + "…"
+            note = QLabel(text)
+            note.setWordWrap(True)
+            note.setFont(theme.mono_font(8))
+            note.setStyleSheet(
+                "color: %s; background: transparent;" % colors["text_dim"]
+            )
+            layout.addWidget(note)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        self.activated.emit(self.goal.id)
+        super().mouseDoubleClickEvent(event)
+
+
+class GoalResultList(QWidget):
+    """Контрольные результаты цели — тот же чек-лист, что у подпунктов задачи."""
+
+    changed = Signal()
+
+    def __init__(self, storage, colors: dict[str, str], goal_id=None, parent=None) -> None:
+        super().__init__(parent)
+        self.storage = storage
+        self.colors = colors
+        self.goal_id = goal_id
+        self._pending: list[str] = []
+        self.setStyleSheet("background: transparent;")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        head = QHBoxLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        head.setSpacing(8)
+        head.addWidget(section_label("контрольные результаты"))
+        head.addStretch(1)
+        self.progress = QLabel("")
+        self.progress.setFont(theme.accent_font(8))
+        self.progress.setStyleSheet(
+            "color: %s; background: transparent;" % colors["text_faint"]
+        )
+        head.addWidget(self.progress)
+        layout.addLayout(head)
+
+        rows_host = QWidget()
+        rows_host.setStyleSheet("background: transparent;")
+        self.rows_box = QVBoxLayout(rows_host)
+        self.rows_box.setContentsMargins(0, 0, 0, 0)
+        self.rows_box.setSpacing(theme.line_extra() + 3)
+        layout.addWidget(rows_host)
+
+        add_row = QHBoxLayout()
+        add_row.setContentsMargins(0, 0, 0, 0)
+        add_row.setSpacing(8)
+        self.input = QLineEdit()
+        self.input.setPlaceholderText("Что должно получиться — и Enter")
+        self.input.returnPressed.connect(self._add)
+        add_row.addWidget(self.input, 1)
+        layout.addLayout(add_row)
+
+        self.reload()
+
+    # --- Данные ---------------------------------------------------------------
+
+    def items(self) -> list:
+        if self.goal_id is None:
+            return []
+        return self.storage.list_goal_results(self.goal_id)
+
+    def flush(self, goal_id: int) -> None:
+        """Переносит в базу то, что набрали до сохранения новой цели."""
+        self.goal_id = goal_id
+        for title in self._pending:
+            self.storage.add_goal_result(goal_id, title)
+        self._pending.clear()
+        self.reload()
+
+    def reload(self) -> None:
+        while self.rows_box.count():
+            item = self.rows_box.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        rows = self.items()
+        if self.goal_id is None:
+            for position, title in enumerate(self._pending):
+                self.rows_box.addWidget(self._pending_row(position, title))
+            done, total = 0, len(self._pending)
+        else:
+            for result in rows:
+                self.rows_box.addWidget(self._row(result))
+            done = sum(1 for r in rows if r.done)
+            total = len(rows)
+
+        self.progress.setText("%d/%d" % (done, total) if total else "")
+
+    # --- Строки ---------------------------------------------------------------
+
+    def _row(self, result) -> QWidget:
+        holder = QWidget()
+        holder.setStyleSheet("background: transparent;")
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(10)
+
+        mark = CheckCircle(result.done, self.colors)
+        mark.toggled.connect(
+            lambda state, rid=result.id: self._set_done(rid, state)
+        )
+        row.addWidget(mark, 0, Qt.AlignmentFlag.AlignTop)
+
+        label = QLabel(result.title)
+        label.setWordWrap(True)
+        font = theme.ui_font(10)
+        font.setStrikeOut(result.done)
+        label.setFont(font)
+        label.setStyleSheet(
+            "color: %s; background: transparent;"
+            % (self.colors["text_faint"] if result.done else self.colors["text"])
+        )
+        row.addWidget(label, 1)
+
+        remove = QPushButton("×")
+        remove.setProperty("flat", "true")
+        remove.setFixedWidth(26)
+        remove.setToolTip("Убрать результат")
+        remove.clicked.connect(lambda _=False, rid=result.id: self._delete(rid))
+        row.addWidget(remove, 0, Qt.AlignmentFlag.AlignTop)
+        return holder
+
+    def _pending_row(self, position: int, title: str) -> QWidget:
+        holder = QWidget()
+        holder.setStyleSheet("background: transparent;")
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(10)
+
+        label = QLabel("• " + title)
+        label.setWordWrap(True)
+        label.setFont(theme.ui_font(10))
+        label.setStyleSheet(
+            "color: %s; background: transparent;" % self.colors["text_dim"]
+        )
+        row.addWidget(label, 1)
+
+        remove = QPushButton("×")
+        remove.setProperty("flat", "true")
+        remove.setFixedWidth(26)
+        remove.clicked.connect(lambda _=False, index=position: self._forget(index))
+        row.addWidget(remove, 0, Qt.AlignmentFlag.AlignTop)
+        return holder
+
+    # --- Действия -------------------------------------------------------------
+
+    def _add(self) -> None:
+        title = self.input.text().strip()
+        if not title:
+            return
+        if self.goal_id is None:
+            self._pending.append(title)
+        else:
+            self.storage.add_goal_result(self.goal_id, title)
+        self.input.clear()
+        self.reload()
+        self.changed.emit()
+
+    def _set_done(self, result_id: int, done: bool) -> None:
+        self.storage.set_goal_result_done(result_id, done)
+        self.reload()
+        self.changed.emit()
+
+    def _delete(self, result_id: int) -> None:
+        self.storage.delete_goal_result(result_id)
+        self.reload()
+        self.changed.emit()
+
+    def _forget(self, index: int) -> None:
+        if 0 <= index < len(self._pending):
+            self._pending.pop(index)
+            self.reload()
+            self.changed.emit()
 
 
 class JiraIssueRow(Card):

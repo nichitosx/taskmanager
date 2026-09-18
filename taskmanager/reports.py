@@ -15,6 +15,7 @@ from .models import (
     Task,
     WorkLog,
 )
+from .goals import quarter_of, quarter_title
 from .storage import Storage
 
 WEEKDAY_NAMES = [
@@ -218,8 +219,24 @@ def collect_week(
     # Прогресс по подпунктам — чтобы в отчёте было видно, насколько задача разобрана.
     subtasks = {task.id: storage.subtask_progress(task.id) for task in touched}
 
+    # Цели квартала попадают в отчёт, только если по ним было движение: взяли
+    # контрольный результат или дописали комментарий. Иначе они бы повторялись
+    # из недели в неделю и перестали что-либо значить.
+    moved = storage.goal_results_done_between(start, end)
+    goals = []
+    for goal in storage.list_goals(quarter_of(start)):
+        results = moved.get(goal.id, [])
+        fresh_comment = bool(
+            goal.comment.strip()
+            and goal.updated_at
+            and start <= goal.updated_at.date() <= end
+        )
+        if results or fresh_comment:
+            goals.append((goal, results))
+
     return {
         "subtasks": subtasks,
+        "goals": goals,
         "rule": rule,
         "start": start,
         "end": end,
@@ -267,17 +284,19 @@ class JiraFacts:
 
     titles: dict = None
     comments: dict = None
-    done: list = None
+    done: list = None      # закрытые за неделю
+    active: list = None    # те, что в Jira ещё в работе
 
     def __post_init__(self) -> None:
         self.titles = self.titles or {}
         self.comments = self.comments or {}
         self.done = self.done or []
+        self.active = self.active or []
 
     @classmethod
-    def from_issues(cls, issues) -> "JiraFacts":
+    def from_issues(cls, issues, active=None) -> "JiraFacts":
         titles, comments = {}, {}
-        for issue in issues or []:
+        for issue in list(issues or []) + list(active or []):
             key = (issue.key or "").upper()
             if not key:
                 continue
@@ -285,7 +304,12 @@ class JiraFacts:
                 titles[key] = issue.summary
             if issue.comment:
                 comments[key] = issue.comment
-        return cls(titles=titles, comments=comments, done=list(issues or []))
+        return cls(
+            titles=titles,
+            comments=comments,
+            done=list(issues or []),
+            active=list(active or []),
+        )
 
     def title(self, task) -> str:
         """Название из Jira, а если его нет — то, что записано у нас."""
@@ -308,6 +332,23 @@ def task_week_summary(data: dict, task, facts: Optional[JiraFacts] = None) -> st
         return "; ".join(comments)
     from_jira = facts.comment(task) if facts else ""
     return from_jira or NOTHING_DONE
+
+
+# Порядок разделов отчёта: сначала то, что доведено до конца, потом то, что
+# в работе. Внутри каждого раздела задачи одного продукта идут подряд.
+ROW_DONE_WITH_KEY = 0     # выполнено, есть задача в Jira
+ROW_DONE_NO_KEY = 1       # выполнено, задачи в Jira нет
+ROW_ACTIVE_NOTED = 2      # в работе, но что-то по ней отмечено
+ROW_ACTIVE_JIRA = 3       # просто висит в работе в Jira
+
+NO_PRODUCT = "\uffff"    # задачи без продукта уходят в конец раздела
+
+
+def _row_kind(task, done_ids: set, has_notes: bool, with_jira: bool) -> int:
+    """К какому разделу отчёта относится задача."""
+    if task.id in done_ids:
+        return ROW_DONE_WITH_KEY if (task.jira_key and with_jira) else ROW_DONE_NO_KEY
+    return ROW_ACTIVE_NOTED if has_notes else ROW_ACTIVE_JIRA
 
 
 def _cell(text: str) -> str:
@@ -343,35 +384,78 @@ def render_week_table(
         if header
         else []
     )
-    rows = list(data["touched"])
-    seen = {(t.jira_key or "").upper() for t in rows if t.jira_key}
 
-    for task in rows:
-        lines.append(
-            "| %s | %s | %s |"
-            % (
-                _cell(_key_cell(task.jira_key, jira_base, with_jira)),
-                _cell(facts.title(task) if facts else task.title),
-                _cell(task_week_summary(data, task, facts)),
-            )
-        )
+    # Задача попадает в отчёт и тогда, когда по ней не было ни одной отметки:
+    # выполнили на этой неделе — значит работа была.
+    tasks: list = list(data["touched"])
+    known = {t.id for t in tasks}
+    for task in data["completed"]:
+        if task.id not in known:
+            tasks.append(task)
+            known.add(task.id)
 
-    # То, что закрыто в Jira, но здесь не отмечалось: иначе работа пропадёт.
-    for issue in (facts.done if facts else []):
-        if (issue.key or "").upper() in seen:
+    done_ids = {t.id for t in data["completed"]}
+    noted_ids = {log.task_id for log in data["logs"] if (log.comment or "").strip()}
+
+    rows: list[tuple[tuple, str, str, str]] = []
+    seen_keys = {(t.jira_key or "").upper() for t in tasks if t.jira_key}
+
+    for task in tasks:
+        kind = _row_kind(task, done_ids, task.id in noted_ids, with_jira)
+        rows.append((
+            (kind, (task.product or NO_PRODUCT).lower(), (task.title or "").lower()),
+            _key_cell(task.jira_key, jira_base, with_jira),
+            facts.title(task) if facts else task.title,
+            task_week_summary(data, task, facts),
+        ))
+
+    # Задачи из Jira, которых у нас нет: закрытые — как выполненные, открытые —
+    # как оставшиеся в работе. Иначе половина недели в отчёт не попадёт.
+    from_jira = (
+        [(issue, True) for issue in facts.done] + [(issue, False) for issue in facts.active]
+        if facts
+        else []
+    )
+    for issue, closed in from_jira:
+        key = (issue.key or "").upper()
+        if not key or key in seen_keys:
             continue
-        lines.append(
-            "| %s | %s | %s |"
-            % (
-                _cell(_key_cell(issue.key, jira_base, with_jira)),
-                _cell(issue.summary or issue.key),
-                _cell(issue.comment or "закрыта в Jira"),
-            )
-        )
+        seen_keys.add(key)
+        rows.append((
+            (
+                ROW_DONE_WITH_KEY if closed else ROW_ACTIVE_JIRA,
+                NO_PRODUCT,
+                (issue.summary or "").lower(),
+            ),
+            _key_cell(issue.key, jira_base, with_jira),
+            issue.summary or issue.key,
+            issue.comment or ("закрыта в Jira" if closed else "в работе в Jira"),
+        ))
+
+    rows.sort(key=lambda row: row[0])
+    for _, key_cell, title, summary in rows:
+        lines.append("| %s | %s | %s |" % (_cell(key_cell), _cell(title), _cell(summary)))
 
     if len(lines) == (2 if header else 0):
         lines.append("|  | — | за неделю отметок не было |")
     lines.append("")
+    return lines
+
+
+def render_goals(data: dict) -> list[str]:
+    """Что за неделю сдвинулось по целям квартала."""
+    goals = data.get("goals") or []
+    if not goals:
+        return []
+
+    lines = ["## Цели на %s" % quarter_title(quarter_of(data["start"])).lower(), ""]
+    for goal, results in goals:
+        lines.append("**%s**" % goal.title)
+        if goal.comment.strip():
+            lines.append(" ".join(goal.comment.split()))
+        for result in results:
+            lines.append("- [x] %s" % result.title)
+        lines.append("")
     return lines
 
 
@@ -506,6 +590,8 @@ def render_weekly(
         lines.extend(_render_tasks_body(data, with_jira))
     else:
         lines.extend(_render_days_body(data, with_jira))
+
+    lines.extend(render_goals(data))
 
     if data["completed"]:
         lines.append("## Завершено за неделю")
