@@ -34,6 +34,13 @@ from .widgets import Card, elide_text, hline, manage_window, section_label
 
 WEEKDAY_SHORT = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
 
+# MONTH_NAMES из отчётов стоят в родительном падеже («12 сентября»), а над
+# сеткой месяца нужен именительный: «Сентябрь 2026».
+MONTH_NOMINATIVE = [
+    "январь", "февраль", "март", "апрель", "май", "июнь",
+    "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь",
+]
+
 
 def _button(text: str, kind: str = "") -> QPushButton:
     button = QPushButton(text)
@@ -47,6 +54,7 @@ class DayCell(Card):
     """Клетка календаря: число, счётчик задач и первые названия."""
 
     picked = Signal(object)
+    add_here = Signal(object)   # двойной клик по дню — завести дело на него
 
     def __init__(
         self,
@@ -54,13 +62,17 @@ class DayCell(Card):
         tasks: list[Task],
         colors: dict[str, str],
         current_month: bool,
+        reminders: list | None = None,
+        tall: bool = False,
         parent=None,
     ) -> None:
         super().__init__(colors, parent)
         self.day = day
         self.tasks = tasks
+        self.reminders = reminders or []
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setMinimumHeight(74)
+        # В недельном виде клеток всего семь — им можно отдать всю высоту.
+        self.setMinimumHeight(240 if tall else 74)
         # Клетки одинаковой ширины: иначе длинное название задачи растягивает
         # свой столбец, а пустые дни ужимаются в полоску.
         self.setMinimumWidth(70)
@@ -92,8 +104,9 @@ class DayCell(Card):
         head.addWidget(number)
         head.addStretch(1)
 
-        if tasks:
-            count = QLabel(str(len(tasks)))
+        total = len(tasks) + len(self.reminders)
+        if total:
+            count = QLabel(str(total))
             count.setFont(theme.accent_font(8))
             colour = colors["danger"] if overdue else colors["accent"]
             count.setStyleSheet("color: %s; background: transparent;" % colour)
@@ -102,25 +115,36 @@ class DayCell(Card):
 
         # Названия подрезаем под ширину клетки — она меняется вместе с окном.
         self._lines: list[tuple[QLabel, str]] = []
-        for task in tasks[:2]:
+        shown = 8 if tall else 2
+        # Напоминания идут первыми: у них есть время, они привязаны к минуте.
+        entries = [
+            (("%s %s" % (r.at.strftime("%H:%M") if r.at else "", r.title)).strip(),
+             colors["info"])
+            for r in self.reminders
+        ]
+        entries += [(t.title, colors["text_dim"] if current_month else colors["text_faint"])
+                    for t in tasks]
+
+        for text, colour in entries[:shown]:
             line = QLabel()
             line.setFont(theme.mono_font(7))
-            line.setStyleSheet(
-                "color: %s; background: transparent;"
-                % (colors["text_dim"] if current_month else colors["text_faint"])
-            )
-            line.setToolTip(task.title)
+            line.setStyleSheet("color: %s; background: transparent;" % colour)
+            line.setToolTip(text)
             line.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             line.setMinimumWidth(1)
             layout.addWidget(line)
-            self._lines.append((line, task.title))
+            self._lines.append((line, text))
 
-        if len(tasks) > 2:
-            more = QLabel("+%d" % (len(tasks) - 2))
+        if len(entries) > shown:
+            more = QLabel("+%d" % (len(entries) - shown))
             more.setFont(theme.mono_font(7))
             more.setStyleSheet("color: %s; background: transparent;" % colors["text_faint"])
             layout.addWidget(more)
         layout.addStretch(1)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        self.add_here.emit(self.day)
+        super().mouseDoubleClickEvent(event)
 
     def resizeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         available = max(30, self.width() - 18)
@@ -133,10 +157,21 @@ class DayCell(Card):
         super().mousePressEvent(event)
 
 
+VIEW_WEEK = "week"
+VIEW_MONTH = "month"
+
+
 class CalendarDialog(QDialog):
-    """Месяц целиком: сроки задач по дням."""
+    """Календарь дел: неделя крупно или месяц целиком.
+
+    По умолчанию неделя — так же, как в привычных календарях: видно не общую
+    россыпь сроков, а то, чем занят ближайший рабочий отрезок. Месяц остаётся
+    под рукой для взгляда сверху.
+    """
 
     open_task = Signal(int)
+    add_task = Signal(object)        # завести задачу на этот день
+    add_reminder = Signal(object)    # завести напоминание на этот день
 
     def __init__(self, storage: Storage, settings: Settings, parent=None) -> None:
         super().__init__(parent)
@@ -145,6 +180,9 @@ class CalendarDialog(QDialog):
         self.colors = theme.palette(settings.get("theme", "dark"))
         self.month = date.today().replace(day=1)
         self.selected = date.today()
+        self.view = settings.get("calendar_view", VIEW_WEEK)
+        if self.view not in (VIEW_WEEK, VIEW_MONTH):
+            self.view = VIEW_WEEK
         self.setWindowTitle("Календарь")
         self._build()
         self.refresh()
@@ -160,15 +198,22 @@ class CalendarDialog(QDialog):
         self.title.setFont(theme.ui_font(13, bold=True))
         head.addWidget(self.title)
         head.addStretch(1)
+        self.week_button = _button("Неделя", "flat")
+        self.week_button.clicked.connect(lambda: self._set_view(VIEW_WEEK))
+        head.addWidget(self.week_button)
+        self.month_button = _button("Месяц", "flat")
+        self.month_button.clicked.connect(lambda: self._set_view(VIEW_MONTH))
+        head.addWidget(self.month_button)
+
         today_button = _button("Сегодня", "flat")
         today_button.clicked.connect(self._go_today)
         head.addWidget(today_button)
-        previous = _button("← месяц", "flat")
-        previous.clicked.connect(lambda: self._shift(-1))
-        head.addWidget(previous)
-        following = _button("месяц →", "flat")
-        following.clicked.connect(lambda: self._shift(1))
-        head.addWidget(following)
+        self.prev_button = _button("←", "flat")
+        self.prev_button.clicked.connect(lambda: self._shift(-1))
+        head.addWidget(self.prev_button)
+        self.next_button = _button("→", "flat")
+        self.next_button.clicked.connect(lambda: self._shift(1))
+        head.addWidget(self.next_button)
         layout.addLayout(head)
         layout.addWidget(hline())
 
@@ -214,7 +259,21 @@ class CalendarDialog(QDialog):
         self.day_list.itemDoubleClicked.connect(self._open_selected)
         right.addWidget(self.day_list, 1)
 
-        hint = QLabel("Двойной клик по задаче открывает её карточку.")
+        add_row = QHBoxLayout()
+        add_row.setSpacing(6)
+        add_task_button = _button("+ Задача", "flat")
+        add_task_button.clicked.connect(lambda: self.add_task.emit(self.selected))
+        add_row.addWidget(add_task_button)
+        add_reminder_button = _button("+ Напоминание", "flat")
+        add_reminder_button.clicked.connect(lambda: self.add_reminder.emit(self.selected))
+        add_row.addWidget(add_reminder_button)
+        add_row.addStretch(1)
+        right.addLayout(add_row)
+
+        hint = QLabel(
+            "Двойной клик по задаче открывает её карточку, двойной клик по дню "
+            "заводит на него дело."
+        )
         hint.setProperty("faint", "true")
         hint.setWordWrap(True)
         right.addWidget(hint)
@@ -239,7 +298,35 @@ class CalendarDialog(QDialog):
             items.sort(key=lambda t: (-t.priority, t.title.lower()))
         return by_day
 
-    def _shift(self, months: int) -> None:
+    def _reminders_by_day(self) -> dict:
+        by_day: dict = {}
+        for reminder in self.storage.list_reminders(include_done=True, limit=500):
+            if reminder.when is None or reminder.done:
+                continue
+            by_day.setdefault(reminder.when, []).append(reminder)
+        for items in by_day.values():
+            items.sort(key=lambda r: r.at or r.created_at)
+        return by_day
+
+    def _week_start(self) -> date:
+        return self.selected - timedelta(days=self.selected.weekday())
+
+    def _set_view(self, view: str) -> None:
+        self.view = view
+        self.settings.set("calendar_view", view)
+        self.settings.save()
+        self.refresh()
+
+    def _shift(self, step: int) -> None:
+        """Шаг вперёд или назад: неделя в недельном виде, месяц в месячном."""
+        if self.view == VIEW_WEEK:
+            self.selected = self.selected + timedelta(days=7 * step)
+            self.month = self.selected.replace(day=1)
+            self.refresh()
+            return
+        self._shift_month(step)
+
+    def _shift_month(self, months: int) -> None:
         year, month = self.month.year, self.month.month + months
         while month > 12:
             month -= 12
@@ -255,33 +342,78 @@ class CalendarDialog(QDialog):
         self.selected = date.today()
         self.refresh()
 
-    def refresh(self) -> None:
-        self.title.setText(
-            "%s %d" % (MONTH_NAMES[self.month.month - 1].capitalize(), self.month.year)
+    def _sync_view_buttons(self) -> None:
+        for button, view in ((self.week_button, VIEW_WEEK),
+                             (self.month_button, VIEW_MONTH)):
+            button.setProperty("accent", "true" if self.view == view else "false")
+            button.style().unpolish(button)
+            button.style().polish(button)
+        self.prev_button.setToolTip(
+            "Прошлая неделя" if self.view == VIEW_WEEK else "Прошлый месяц"
         )
+        self.next_button.setToolTip(
+            "Следующая неделя" if self.view == VIEW_WEEK else "Следующий месяц"
+        )
+
+    def refresh(self) -> None:
         for cell in self.grid_host.findChildren(DayCell):
             self.grid.removeWidget(cell)
+            # Родителя снимаем сразу: deleteLater отложит удаление до следующего
+            # круга событий, и при переключении вида клетки на миг удвоились бы.
+            cell.setParent(None)
             cell.deleteLater()
+        for row in range(1, 8):
+            self.grid.setRowStretch(row, 0)
 
         by_day = self._tasks_by_day()
-        first = self.month - timedelta(days=self.month.weekday())
-        weeks = 6 if calendar.monthrange(self.month.year, self.month.month)[1] > 28 else 5
+        reminders = self._reminders_by_day()
+        week_view = self.view == VIEW_WEEK
+
+        if week_view:
+            first = self._week_start()
+            weeks = 1
+            last = first + timedelta(days=6)
+            self.title.setText(
+                "%d—%d %s %d"
+                % (first.day, last.day,
+                   MONTH_NAMES[last.month - 1], last.year)
+                if first.month == last.month
+                else "%d %s — %d %s %d"
+                % (first.day, MONTH_NAMES[first.month - 1],
+                   last.day, MONTH_NAMES[last.month - 1], last.year)
+            )
+        else:
+            first = self.month - timedelta(days=self.month.weekday())
+            weeks = 6 if calendar.monthrange(
+                self.month.year, self.month.month
+            )[1] > 28 else 5
+            self.title.setText(
+                "%s %d"
+                % (MONTH_NOMINATIVE[self.month.month - 1].capitalize(), self.month.year)
+            )
 
         for week in range(weeks):
             for weekday in range(7):
                 day = first + timedelta(days=week * 7 + weekday)
                 cell = DayCell(
-                    day, by_day.get(day, []), self.colors, day.month == self.month.month
+                    day,
+                    by_day.get(day, []),
+                    self.colors,
+                    week_view or day.month == self.month.month,
+                    reminders.get(day, []),
+                    tall=week_view,
                 )
                 cell.picked.connect(self._pick_day)
+                cell.add_here.connect(self.add_task.emit)
                 self.grid.addWidget(cell, week + 1, weekday)
             self.grid.setRowStretch(week + 1, 1)
 
+        self._sync_view_buttons()
         self._show_day(self.selected)
 
     def _pick_day(self, day: date) -> None:
         self.selected = day
-        if day.month != self.month.month:
+        if self.view == VIEW_MONTH and day.month != self.month.month:
             self.month = day.replace(day=1)
             self.refresh()
         else:
@@ -291,11 +423,19 @@ class CalendarDialog(QDialog):
         self.day_title.setText(fmt_date_long(day).capitalize())
         self.day_list.clear()
         tasks = self._tasks_by_day().get(day, [])
-        if not tasks:
-            item = QListWidgetItem("На этот день задач нет")
+        reminders = self._reminders_by_day().get(day, [])
+        if not tasks and not reminders:
+            item = QListWidgetItem("На этот день ничего не назначено")
             item.setFlags(Qt.ItemFlag.NoItemFlags)
             self.day_list.addItem(item)
             return
+
+        for reminder in reminders:
+            clock = reminder.at.strftime("%H:%M") if reminder.at else "--:--"
+            item = QListWidgetItem("%s  %s" % (clock, reminder.title))
+            item.setToolTip("Напоминание")
+            self.day_list.addItem(item)
+
         for task in tasks:
             mark = "!" * max(0, task.priority - 1)
             title = "%s %s" % (mark.ljust(2), task.title) if mark else "   " + task.title

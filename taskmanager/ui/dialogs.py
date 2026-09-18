@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
-from PySide6.QtCore import QDate, Qt
+from PySide6.QtCore import QDate, Qt, QTime
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDateEdit,
+    QTimeEdit,
     QDialog,
     QFrame,
     QHBoxLayout,
@@ -26,6 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import goals as goals_module
+from .. import reminders as reminders_module
 from .. import products as products_module
 from ..config import Settings
 from .. import recurrence
@@ -105,6 +107,130 @@ class LogWorkDialog(QDialog):
 
     def text(self) -> str:
         return self.comment.toPlainText().strip()
+
+
+class ReminderDialog(QDialog):
+    """Напоминание: о чём и когда.
+
+    Отдельно от задачи: у напоминания нет ни важности, ни продукта — только
+    текст и момент, когда оно должно всплыть.
+    """
+
+    def __init__(
+        self,
+        storage: Storage,
+        settings: Settings,
+        reminder=None,
+        when=None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.storage = storage
+        self.settings = settings
+        self.is_new = reminder is None
+        self.reminder = reminder or reminders_module.Reminder(
+            at=reminders_module.next_slot()
+        )
+        if self.is_new and when is not None:
+            # Пришли из календаря: день уже выбран, время оставляем разумное.
+            slot = reminders_module.next_slot()
+            self.reminder.at = datetime.combine(when, slot.time())
+        self.deleted = False
+        self.setWindowTitle("Новое напоминание" if self.is_new else "Напоминание")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(12)
+
+        layout.addWidget(section_label("о чём"))
+        self.title_edit = QLineEdit(self.reminder.title)
+        self.title_edit.setPlaceholderText("Например: написать Ивану про доступы")
+        layout.addWidget(self.title_edit)
+
+        layout.addWidget(section_label("когда"))
+        when_row = QHBoxLayout()
+        when_row.setSpacing(8)
+        moment = self.reminder.at or reminders_module.next_slot()
+        self.date_edit = QDateEdit()
+        self.date_edit.setCalendarPopup(True)
+        self.date_edit.setDisplayFormat("dd.MM.yyyy")
+        self.date_edit.setDate(QDate(moment.year, moment.month, moment.day))
+        when_row.addWidget(self.date_edit)
+        self.time_edit = QTimeEdit()
+        self.time_edit.setDisplayFormat("HH:mm")
+        self.time_edit.setTime(QTime(moment.hour, moment.minute))
+        when_row.addWidget(self.time_edit)
+        when_row.addStretch(1)
+        layout.addLayout(when_row)
+
+        layout.addWidget(section_label("заметка"))
+        self.notes_edit = QPlainTextEdit(self.reminder.notes)
+        self.notes_edit.setPlaceholderText("Подробности, если нужны")
+        self.notes_edit.setMinimumHeight(60)
+        self.notes_edit.setMaximumHeight(120)
+        layout.addWidget(self.notes_edit)
+
+        self.to_calendar = QCheckBox("Поставить и в Google-календарь")
+        self.to_calendar.setChecked(bool(self.reminder.event_id) or self.is_new)
+        layout.addWidget(self.to_calendar)
+
+        hint = QLabel(
+            "Напоминание — не задача: в недельный отчёт оно не попадает и "
+            "работой не считается."
+        )
+        hint.setWordWrap(True)
+        hint.setProperty("faint", "true")
+        layout.addWidget(hint)
+
+        buttons = QHBoxLayout()
+        if not self.is_new:
+            remove = _button("Удалить", "flat")
+            remove.clicked.connect(self._delete)
+            buttons.addWidget(remove)
+        buttons.addStretch(1)
+        cancel = _button("Отмена", "flat")
+        cancel.clicked.connect(self.reject)
+        save = _button("Сохранить", "accent")
+        save.clicked.connect(self._save)
+        save.setDefault(True)
+        buttons.addWidget(cancel)
+        buttons.addWidget(save)
+        layout.addLayout(buttons)
+
+        manage_window(self, settings, "reminder", 460, 440)
+        self.title_edit.setFocus()
+
+    def moment(self) -> datetime:
+        day = self.date_edit.date().toPython()
+        clock = self.time_edit.time().toPython()
+        return datetime.combine(day, clock)
+
+    def wants_calendar(self) -> bool:
+        return self.to_calendar.isChecked()
+
+    def _save(self) -> None:
+        title = self.title_edit.text().strip()
+        if not title:
+            self.title_edit.setFocus()
+            return
+        self.reminder.title = title
+        self.reminder.notes = self.notes_edit.toPlainText().strip()
+        self.reminder.at = self.moment()
+        if self.is_new:
+            self.reminder = self.storage.add_reminder(self.reminder)
+        else:
+            self.storage.update_reminder(self.reminder)
+        self.accept()
+
+    def _delete(self) -> None:
+        answer = QMessageBox.question(
+            self, "Напоминание", "Удалить напоминание «%s»?" % self.reminder.title
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.storage.delete_reminder(self.reminder.id)
+        self.deleted = True
+        self.accept()
 
 
 class GoalDialog(QDialog):
@@ -311,7 +437,9 @@ class TaskDialog(QDialog):
         self.settings = settings
         self.task = task or Task()
         self.colors = theme.palette(settings.get("theme", "dark"))
-        self.is_new = task is None
+        # Переданная, но ещё не сохранённая задача — тоже новая: так календарь
+        # открывает карточку с уже проставленным сроком.
+        self.is_new = task is None or task.id is None
         self.setWindowTitle("Новая задача" if self.is_new else "Задача")
         self._build()
         self._load()

@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 
 from ..horizons import start_text
 from ..recurrence import describe as describe_repeat
+from ..reminders import describe_when
 from ..models import (
     JIRA_NOT_NEEDED,
     PRIORITY_LABELS,
@@ -1338,6 +1339,95 @@ class StatChip(QWidget):
     def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         self.clicked.emit()
         super().mousePressEvent(event)
+
+
+class ReminderRow(Card):
+    """Напоминание в списке: отметка, текст и время.
+
+    Отдельно от задач: напоминание не работа, отчитываться по нему не нужно,
+    поэтому ни важности, ни продукта, ни Jira у него нет.
+    """
+
+    toggled = Signal(int, bool)
+    activated = Signal(int)
+
+    def __init__(self, reminder, colors: dict[str, str], parent=None) -> None:
+        super().__init__(colors, parent)
+        self.reminder = reminder
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        if reminder.is_past and not reminder.done:
+            self.set_bar(colors["accent"])
+
+        inner = QHBoxLayout(self)
+        gap = theme.line_extra()
+        inner.setContentsMargins(16, 11 + gap // 2, 14, 11 + gap // 2)
+        inner.setSpacing(12)
+
+        self.check = CheckCircle(reminder.done, colors)
+        self.check.toggled.connect(lambda state: self.toggled.emit(reminder.id, state))
+        inner.addWidget(self.check, 0, Qt.AlignmentFlag.AlignTop)
+
+        column = QVBoxLayout()
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(7 + theme.line_extra())
+        inner.addLayout(column, 1)
+
+        self.title = QLabel(reminder.title)
+        self.title.setWordWrap(True)
+        font = theme.title_font()
+        font.setStrikeOut(reminder.done)
+        self.title.setFont(font)
+        self.title.setStyleSheet(
+            "color: %s; background: transparent; %s"
+            % (colors["text_faint"] if reminder.done else colors["text"],
+               theme.title_css())
+        )
+        column.addWidget(self.title)
+
+        self.meta = FlowLayout(spacing=6)
+        when = describe_when(reminder.at)
+        overdue = reminder.is_past and not reminder.done
+        self.meta.addWidget(
+            Pill(when, colors["accent"] if overdue else colors["text_dim"], strong=overdue)
+        )
+        if reminder.event_id:
+            self.meta.addWidget(Pill("в календаре", colors["info"]))
+        if reminder.notes.strip():
+            note = " ".join(reminder.notes.split())
+            self.meta.addWidget(
+                Pill(note[:40] + ("…" if len(note) > 40 else ""), colors["text_faint"])
+            )
+        column.addLayout(self.meta)
+
+    # --- Размеры --------------------------------------------------------------
+
+    def _text_width(self, width: int) -> int:
+        layout = self.layout()
+        margins = layout.contentsMargins()
+        return (
+            width - margins.left() - margins.right()
+            - self.check.width() - layout.spacing()
+        )
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 (Qt naming)
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 (Qt naming)
+        text_width = self._text_width(width)
+        if text_width <= 0:
+            return super().heightForWidth(width)
+        column = wrapped_height(self.title, text_width)
+        column += self.layout().spacing() + self.meta.heightForWidth(text_width)
+        margins = self.layout().contentsMargins()
+        return margins.top() + max(column, self.check.height()) + margins.bottom()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        super().resizeEvent(event)
+        fit_title(self.title, self._text_width(self.width()))
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        self.activated.emit(self.reminder.id)
+        super().mouseDoubleClickEvent(event)
 
 
 class GoalCard(Card):

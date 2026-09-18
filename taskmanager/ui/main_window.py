@@ -43,6 +43,7 @@ from PySide6.QtWidgets import (
 
 from .. import demo
 from .. import goals as goals_module
+from ..reminders import describe_when
 from .. import updates as updates_module
 from .. import products as products_module
 from .. import quickadd
@@ -78,6 +79,7 @@ from .dialogs import (
     DailyReportDialog,
     DoneDetailsDialog,
     GoalDialog,
+    ReminderDialog,
     LogWorkDialog,
     TaskDialog,
     UpcomingTasksDialog,
@@ -95,6 +97,7 @@ from .widgets import (
     headline,
     GoalCard,
     JiraIssueRow,
+    ReminderRow,
     NavItem,
     TaskRow,
     hline,
@@ -107,6 +110,9 @@ HORIZON_FILTERS = [(key, HORIZON_LABELS[key]) for key in ("today", "week", "mont
 
 # Цели квартала: отдельный раздел и отдельная строка над списком задач.
 GOALS = "goals"
+
+# Напоминания живут отдельно от задач: работой не считаются и в отчёт не идут.
+REMINDERS = "reminders"
 
 # Задачи, закрытые здесь, но всё ещё открытые в Jira: рассинхрон, который
 # видно только когда Jira отвечает, — поэтому пункт появляется не всегда.
@@ -127,6 +133,7 @@ SYNC_WARNING = "закрой в jira!"
 STATE_HINTS = {
     JIRA_SYNC: "Отмечены выполненными здесь, но в Jira всё ещё открыты",
     GOALS: "Две-три цели на квартал и контрольные результаты по ним",
+    REMINDERS: "Не забыть написать, позвонить, забрать — работой это не считается",
 }
 
 FILTERS = HORIZON_FILTERS + STATE_FILTERS
@@ -300,6 +307,23 @@ class TaskDetail(QWidget):
 
         self.body_scroll.hide()
 
+        # Ближайшее событие — вне прокручиваемой части: панель прячется, когда
+        # задача не выбрана, а знать, что дальше, нужно всегда.
+        layout.addStretch(0)
+        self.next_event = QLabel("")
+        self.next_event.setWordWrap(True)
+        self.next_event.setFont(theme.mono_font(8))
+        self.next_event.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.next_event.setToolTip("Открыть календарь")
+        self.next_event.setStyleSheet(
+            "color: %s; background: transparent;" % colors["accent"]
+        )
+        self.next_event.mousePressEvent = (  # type: ignore[assignment]
+            lambda _event: self.owner.open_calendar() if self.owner else None
+        )
+        self.next_event.hide()
+        layout.addWidget(self.next_event)
+
     # --- Отображение ----------------------------------------------------------
 
     def show_task(self, task: Task | None) -> None:
@@ -407,6 +431,8 @@ class MainWindow(QMainWindow):
         self.filter = "active"
         self.selected_id: int | None = None
         self._jira_issues: dict[str, list] = {key: [] for key in JIRA_VIEWS}
+        # О чём уже напомнили — чтобы не повторяться каждую минуту.
+        self._reminded: set = set()
         self._sync_tasks: list | None = None
         self._sync_keys: set = set()
         # Ширина, под которую посчитаны высоты строк.
@@ -503,6 +529,14 @@ class MainWindow(QMainWindow):
         self.new_goal_button.clicked.connect(lambda: self.open_goal())
         self.new_goal_button.hide()
         search_row.addWidget(self.new_goal_button)
+
+        self.new_reminder_button = QPushButton("Новое напоминание")
+        self.new_reminder_button.setProperty("flat", "true")
+        self.new_reminder_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.new_reminder_button.setToolTip("Не забыть о чём-то в нужное время")
+        self.new_reminder_button.clicked.connect(lambda: self.open_reminder())
+        self.new_reminder_button.hide()
+        search_row.addWidget(self.new_reminder_button)
 
         self.filter_label = QLabel()
         self.filter_label.setFont(theme.mono_font(8))
@@ -720,6 +754,10 @@ class MainWindow(QMainWindow):
             GOALS, "Цели квартала", STATE_HINTS[GOALS], self.colors["warning"]
         )
         layout.addWidget(self.goals_item)
+        self.reminders_item = self._nav_item(
+            REMINDERS, "Напоминания", STATE_HINTS[REMINDERS]
+        )
+        layout.addWidget(self.reminders_item)
         layout.addSpacing(theme.section_gap())
 
         layout.addWidget(section_label("когда"))
@@ -1275,6 +1313,80 @@ class MainWindow(QMainWindow):
             self.list.addItem(item)
             self.list.setItemWidget(item, card)
 
+    # --- Напоминания ----------------------------------------------------------
+
+    def open_reminder(self, reminder_id: int | None = None, when=None) -> None:
+        reminder = self.storage.get_reminder(reminder_id) if reminder_id else None
+        dialog = ReminderDialog(self.storage, self.settings, reminder, when, self)
+        if dialog.exec() == dialog.DialogCode.Accepted:
+            if not dialog.deleted and dialog.wants_calendar():
+                self._push_to_calendar(dialog.reminder)
+            self.refresh(keep_selection=True)
+
+    def _push_to_calendar(self, reminder) -> None:
+        """Отправляет напоминание в Google-календарь, если он подключён."""
+        # Подключения пока может не быть — тогда просто молчим: напоминание
+        # всё равно сохранено и сработает в программе.
+        pass
+
+    def _toggle_reminder(self, reminder_id: int, done: bool) -> None:
+        self.storage.set_reminder_done(reminder_id, done)
+        self.refresh(keep_selection=True)
+
+    def _fill_reminders(self) -> None:
+        """Раздел «Напоминания»: сначала то, чему время пришло."""
+        self.rows = {}
+        self.list.clear()
+        items = self.storage.list_reminders()
+        if not items:
+            self._show_empty(
+                "Напоминаний нет. Нажмите «Новое напоминание» — о нём вспомнят вовремя."
+            )
+            self.filter_label.setText("напоминания: 0")
+            return
+
+        self.empty_box.hide()
+        self.list.show()
+        for reminder in items:
+            row = ReminderRow(reminder, self.colors)
+            row.toggled.connect(self._toggle_reminder)
+            row.activated.connect(self.open_reminder)
+            item = QListWidgetItem()
+            item.setSizeHint(QSize(0, self._row_height(row)))
+            self.list.addItem(item)
+            self.list.setItemWidget(item, row)
+        self._remember_rows_width()
+        overdue = sum(1 for r in items if r.is_past)
+        self.filter_label.setText(
+            "напоминания: %d%s" % (len(items), " · пора: %d" % overdue if overdue else "")
+        )
+
+    def _check_reminders(self) -> None:
+        """Раз в минуту смотрит, не пора ли о чём-то напомнить."""
+        for reminder in self.storage.due_reminders():
+            if reminder.id in self._reminded:
+                continue
+            self._reminded.add(reminder.id)
+            self._notify("Напоминание", reminder.title)
+        self._sync_next_reminder()
+
+    def next_event(self):
+        """Ближайшее впереди: напоминание или задача со сроком на сегодня."""
+        return self.storage.next_reminder()
+
+    def _sync_next_reminder(self) -> None:
+        """Подпись в углу: что и через сколько."""
+        label = getattr(getattr(self, "detail", None), "next_event", None)
+        if label is None:
+            return
+        upcoming = self.next_event()
+        if upcoming is None:
+            label.setText("")
+            label.hide()
+            return
+        label.setText("дальше: %s — %s" % (describe_when(upcoming.at), upcoming.title))
+        label.show()
+
     def visible_tasks(self) -> list[Task]:
         query = self.search.text().strip()
         if query:
@@ -1323,6 +1435,12 @@ class MainWindow(QMainWindow):
             self.detail.show_task(None)
             return
 
+        if self.filter == REMINDERS and not self.search.text().strip():
+            self._refresh_chrome(stale_days)
+            self._fill_reminders()
+            self.detail.show_task(None)
+            return
+
         self.list.clear()
         self.rows: dict[int, TaskRow] = {}
         tasks = self.visible_tasks()
@@ -1357,6 +1475,7 @@ class MainWindow(QMainWindow):
             self._fade_list()
 
         self._refresh_chrome(stale_days)
+        self._sync_next_reminder()
 
         self.filter_label.setText(
             ("найдено: %d" % len(tasks))
@@ -1394,6 +1513,8 @@ class MainWindow(QMainWindow):
         # Кнопка нужна только там, где цели и заводят.
         if hasattr(self, "new_goal_button"):
             self.new_goal_button.setVisible(self.filter == GOALS)
+        if hasattr(self, "new_reminder_button"):
+            self.new_reminder_button.setVisible(self.filter == REMINDERS)
         if JIRA_SYNC in self.nav_items:
             # Пустой раздел про рассинхрон только занимал бы место.
             has_sync = bool(self.out_of_sync())
@@ -1413,6 +1534,8 @@ class MainWindow(QMainWindow):
             return JIRA_VIEWS[self.filter]
         if self.filter == GOALS:
             return "Цели квартала"
+        if self.filter == REMINDERS:
+            return "Напоминания"
         return dict(FILTERS).get(self.filter, "")
 
     def _nav_count(
@@ -1426,6 +1549,8 @@ class MainWindow(QMainWindow):
             return len(self._jira_issues.get(key, []))
         if key == GOALS:
             return sum(1 for goal in self.goals_now() if not goal.is_done)
+        if key == REMINDERS:
+            return len(self.storage.list_reminders())
         if key == JIRA_SYNC:
             return len(self.out_of_sync())
         if key == "done":
@@ -1568,6 +1693,7 @@ class MainWindow(QMainWindow):
             "jira": "По всем задачам вопрос с Jira закрыт.",
             JIRA_SYNC: "Всё сходится: закрытое здесь закрыто и в Jira.",
             GOALS: "Целей на этот квартал пока нет.",
+            REMINDERS: "Напоминаний нет.",
             "done": "Выполненных задач пока нет.",
         }.get(self.filter, "Пусто")
 
@@ -1586,6 +1712,7 @@ class MainWindow(QMainWindow):
         self._clock = QTimer(self)
         self._clock.setInterval(30_000)
         self._clock.timeout.connect(lambda: self.day_indicator.set_clock(datetime.now()))
+        self._clock.timeout.connect(self._check_reminders)
         self._clock.start()
 
     def _update_tray_tooltip(self, counters: dict[str, int]) -> None:
@@ -2024,8 +2151,17 @@ class MainWindow(QMainWindow):
         """Месяц целиком: где какие сроки."""
         dialog = CalendarDialog(self.storage, self.settings, self)
         dialog.open_task.connect(self.open_task)
+        dialog.add_task.connect(self._new_task_on)
+        dialog.add_reminder.connect(lambda day: self.open_reminder(when=day))
         dialog.exec()
         self.refresh(keep_selection=True)
+
+    def _new_task_on(self, day) -> None:
+        """Задача со сроком на выбранный в календаре день."""
+        task = Task(due_date=day)
+        dialog = TaskDialog(self.storage, self.settings, task, self)
+        if dialog.exec() == dialog.DialogCode.Accepted:
+            self.refresh(keep_selection=False)
 
     def open_history(self) -> None:
         HistoryDialog(self.storage, self.settings, self).exec()

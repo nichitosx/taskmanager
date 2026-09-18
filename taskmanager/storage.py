@@ -19,6 +19,7 @@ from .models import (
 )
 from .goals import STATUS_DONE as GOAL_DONE
 from .goals import Goal, GoalResult, quarter_of
+from .reminders import Reminder
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
@@ -72,6 +73,17 @@ CREATE TABLE IF NOT EXISTS goal_results (
     done_at    TEXT
 );
 
+CREATE TABLE IF NOT EXISTS reminders (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    title      TEXT NOT NULL,
+    notes      TEXT DEFAULT '',
+    at_time    TEXT,
+    done       INTEGER DEFAULT 0,
+    event_id   TEXT DEFAULT '',
+    created_at TEXT NOT NULL,
+    done_at    TEXT
+);
+
 CREATE TABLE IF NOT EXISTS work_logs (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id    INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
@@ -107,6 +119,7 @@ CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_start ON tasks(start_date);
 CREATE INDEX IF NOT EXISTS idx_subtasks_task ON subtasks(task_id);
 CREATE INDEX IF NOT EXISTS idx_goals_quarter ON goals(quarter);
+CREATE INDEX IF NOT EXISTS idx_reminders_at ON reminders(at_time);
 CREATE INDEX IF NOT EXISTS idx_goal_results_goal ON goal_results(goal_id);
 CREATE INDEX IF NOT EXISTS idx_logs_date ON work_logs(log_date);
 CREATE INDEX IF NOT EXISTS idx_logs_task ON work_logs(task_id);
@@ -403,6 +416,97 @@ class Storage:
             (task_id, limit),
         ).fetchall()
         return [WorkLog.from_row(r) for r in rows]
+
+    # --- Напоминания ----------------------------------------------------------
+
+    def list_reminders(
+        self,
+        include_done: bool = False,
+        start: Optional[date] = None,
+        end: Optional[date] = None,
+        limit: int = 200,
+    ) -> list[Reminder]:
+        """Напоминания по времени. Без дат — все предстоящие и просроченные."""
+        query = "SELECT * FROM reminders WHERE 1=1"
+        params: list = []
+        if not include_done:
+            query += " AND done=0"
+        if start is not None:
+            query += " AND date(at_time) >= ?"
+            params.append(start.isoformat())
+        if end is not None:
+            query += " AND date(at_time) <= ?"
+            params.append(end.isoformat())
+        query += " ORDER BY at_time IS NULL, at_time LIMIT ?"
+        params.append(limit)
+        rows = self.conn.execute(query, params).fetchall()
+        return [Reminder.from_row(row) for row in rows]
+
+    def get_reminder(self, reminder_id: int) -> Optional[Reminder]:
+        row = self.conn.execute(
+            "SELECT * FROM reminders WHERE id=?", (reminder_id,)
+        ).fetchone()
+        return Reminder.from_row(row) if row else None
+
+    def add_reminder(self, reminder: Reminder) -> Reminder:
+        cur = self.conn.execute(
+            """INSERT INTO reminders (title, notes, at_time, done, event_id, created_at)
+               VALUES (?,?,?,?,?,?)""",
+            (
+                reminder.title.strip(),
+                reminder.notes,
+                reminder.at.isoformat(timespec="minutes") if reminder.at else None,
+                1 if reminder.done else 0,
+                reminder.event_id,
+                _now(),
+            ),
+        )
+        self.conn.commit()
+        return self.get_reminder(cur.lastrowid)
+
+    def update_reminder(self, reminder: Reminder) -> None:
+        self.conn.execute(
+            """UPDATE reminders SET title=?, notes=?, at_time=?, event_id=? WHERE id=?""",
+            (
+                reminder.title.strip(),
+                reminder.notes,
+                reminder.at.isoformat(timespec="minutes") if reminder.at else None,
+                reminder.event_id,
+                reminder.id,
+            ),
+        )
+        self.conn.commit()
+
+    def set_reminder_done(self, reminder_id: int, done: bool) -> None:
+        self.conn.execute(
+            "UPDATE reminders SET done=?, done_at=? WHERE id=?",
+            (1 if done else 0, _now() if done else None, reminder_id),
+        )
+        self.conn.commit()
+
+    def delete_reminder(self, reminder_id: int) -> None:
+        self.conn.execute("DELETE FROM reminders WHERE id=?", (reminder_id,))
+        self.conn.commit()
+
+    def due_reminders(self, moment: Optional[datetime] = None) -> list[Reminder]:
+        """Напоминания, время которых уже пришло, а отметки ещё нет."""
+        moment = moment or datetime.now()
+        rows = self.conn.execute(
+            "SELECT * FROM reminders WHERE done=0 AND at_time IS NOT NULL "
+            "AND at_time <= ? ORDER BY at_time",
+            (moment.isoformat(timespec="minutes"),),
+        ).fetchall()
+        return [Reminder.from_row(row) for row in rows]
+
+    def next_reminder(self, moment: Optional[datetime] = None) -> Optional[Reminder]:
+        """Ближайшее напоминание впереди — то, что показывается в углу окна."""
+        moment = moment or datetime.now()
+        row = self.conn.execute(
+            "SELECT * FROM reminders WHERE done=0 AND at_time IS NOT NULL "
+            "AND at_time >= ? ORDER BY at_time LIMIT 1",
+            (moment.isoformat(timespec="minutes"),),
+        ).fetchone()
+        return Reminder.from_row(row) if row else None
 
     # --- Цели на квартал ------------------------------------------------------
 
