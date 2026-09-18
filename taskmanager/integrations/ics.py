@@ -46,11 +46,13 @@ WHERE_TO_GET = (
 )
 
 WORKSPACE_HINT = (
-    "В корпоративном Google (Workspace) администратор может запрещать внешний "
-    "доступ к календарям — тогда секретный адрес не работает ни в одной "
-    "программе. Проверить просто: откройте этот адрес в окне браузера без входа "
-    "в аккаунт. Если и там просят войти — доступ закрыт, и обойти это нельзя. "
-    "Тогда остаётся выгрузить календарь файлом .ics и указать путь к нему."
+    "В корпоративном Google (Workspace) администратор может закрывать внешний "
+    "доступ к календарям. Тогда в «Интеграции календаря» вовсе нет строки "
+    "«Секретный адрес в формате iCal» — только общедоступный, а он работает, "
+    "лишь если календарь сделать общедоступным.\n\n"
+    "Обойти запрет нельзя, но можно не открывать календарь всему свету: "
+    "выгрузите его в «Настройки календаря → Экспорт» и укажите здесь путь к "
+    "скачанному архиву — программа прочитает его сама."
 )
 
 
@@ -178,20 +180,61 @@ def parse(text: str, final_url: str = "") -> list[Event]:
     return events
 
 
+def read_archive(path) -> list[Event]:
+    """Читает календари из архива, который отдаёт «Экспорт» Google.
+
+    В архиве лежит по файлу на каждый календарь — берём все и складываем
+    события вместе: человеку важно увидеть свой день целиком.
+    """
+    import zipfile
+
+    events: list[Event] = []
+    problems: list[str] = []
+    try:
+        with zipfile.ZipFile(path) as archive:
+            names = [n for n in archive.namelist() if n.lower().endswith(".ics")]
+            if not names:
+                raise CalendarError(
+                    "В архиве нет файлов календаря. Это точно выгрузка из "
+                    "«Настройки календаря → Экспорт»?"
+                )
+            for name in names:
+                text = archive.read(name).decode("utf-8", "replace")
+                try:
+                    events.extend(parse(text))
+                except CalendarError as exc:
+                    problems.append("%s: %s" % (name, exc))
+    except zipfile.BadZipFile as exc:
+        raise CalendarError("Архив календаря повреждён: %s" % exc) from exc
+    except OSError as exc:
+        raise CalendarError("Не удалось прочитать архив календаря: %s" % exc) from exc
+
+    if not events and problems:
+        raise CalendarError("\n".join(problems))
+    events.sort(key=lambda e: (e.at is None, e.at or datetime.max))
+    return events
+
+
 def read_file(path: str) -> list[Event]:
-    """Читает календарь из файла .ics, выгруженного вручную.
+    """Читает календарь из файла: .ics или архива, выгруженного из Google.
 
     Запасной путь для корпоративного календаря: если администратор закрыл
-    внешний доступ, секретного адреса не будет ни у одной программы, зато
-    выгрузить файл можно всегда.
+    секретный адрес, его не будет ни у одной программы, зато выгрузить
+    календарь можно всегда.
     """
     from pathlib import Path
 
     source = Path(path.strip('"').strip())
+    if source.suffix.lower() == ".zip":
+        return read_archive(source)
     try:
         return parse(source.read_text(encoding="utf-8", errors="replace"))
     except OSError as exc:
         raise CalendarError("Не удалось прочитать файл календаря: %s" % exc) from exc
+
+
+# Что программа умеет читать с диска.
+FILE_SUFFIXES = (".ics", ".zip")
 
 
 def is_file_source(value: str) -> bool:
@@ -205,7 +248,7 @@ def is_file_source(value: str) -> bool:
     text = (value or "").strip().strip('"')
     if not text or "://" in text:
         return False
-    if text.lower().endswith(".ics"):
+    if text.lower().endswith(FILE_SUFFIXES):
         return True
     try:
         return Path(text).is_file()

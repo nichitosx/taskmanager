@@ -464,7 +464,7 @@ class SettingsDialog(QDialog):
 
     def _pick_ics_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Файл календаря", "", "Календарь (*.ics)"
+            self, "Файл календаря", "", "Календарь (*.ics *.zip)"
         )
         if path:
             self.ics_url.setText(path)
@@ -801,11 +801,13 @@ class SettingsDialog(QDialog):
         ics_row.setSpacing(8)
         self.ics_url = QLineEdit()
         self.ics_url.setPlaceholderText(
-            "адрес iCal или путь к выгруженному файлу .ics"
+            "адрес iCal или путь к выгруженному календарю (.ics или архив)"
         )
         ics_row.addWidget(self.ics_url, 1)
         ics_browse = _button("Выбрать файл…", "flat")
-        ics_browse.setToolTip("Взять календарь из выгруженного файла .ics")
+        ics_browse.setToolTip(
+            "Взять календарь из выгрузки: «Настройки календаря → Экспорт»"
+        )
         ics_browse.clicked.connect(self._pick_ics_file)
         ics_row.addWidget(ics_browse)
         layout.addLayout(ics_row)
@@ -821,9 +823,10 @@ class SettingsDialog(QDialog):
         ics_note = QLabel(
             "Адрес берётся в Google-календаре: «Настройки и общий доступ» → "
             "«Интеграция календаря» → «Секретный адрес в формате iCal»; он "
-            "оканчивается на /basic.ics. В корпоративном Google администратор "
-            "может закрывать такой доступ — тогда выгрузите календарь файлом "
-            "(«Экспорт») и укажите путь к нему кнопкой рядом. Встречи видны в "
+            "оканчивается на /basic.ics. Если такой строки в настройках календаря "
+            "нет, администратор её закрыл — делать календарь общедоступным ради "
+            "этого не нужно: выгрузите его («Настройки календаря → Экспорт») и "
+            "укажите путь к скачанному архиву кнопкой рядом. Встречи видны в "
             "календаре программы и в строке «дальше»; создавать события нельзя — "
             "это только чтение."
         )
