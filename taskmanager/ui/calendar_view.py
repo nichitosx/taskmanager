@@ -393,6 +393,7 @@ class CalendarDialog(QDialog):
         self.colors = theme.palette(settings.get("theme", "dark"))
         self.month = date.today().replace(day=1)
         self.selected = date.today()
+        self.show_weekends = bool(settings.get("calendar.show_weekends", False))
         self.view = settings.get("calendar_view", VIEW_WEEK)
         if self.view not in (VIEW_WEEK, VIEW_MONTH):
             self.view = VIEW_WEEK
@@ -417,6 +418,11 @@ class CalendarDialog(QDialog):
         self.month_button = _button("Месяц", "flat")
         self.month_button.clicked.connect(lambda: self._set_view(VIEW_MONTH))
         head.addWidget(self.month_button)
+
+        self.weekend_button = _button("Выходные", "flat")
+        self.weekend_button.setToolTip("Показывать субботу и воскресенье")
+        self.weekend_button.clicked.connect(self._toggle_weekends)
+        head.addWidget(self.weekend_button)
 
         today_button = _button("Сегодня", "flat")
         today_button.clicked.connect(self._go_today)
@@ -459,11 +465,7 @@ class CalendarDialog(QDialog):
         # недели перестают попадать в свои столбцы.
         for column in range(7):
             self.grid.setColumnStretch(column, 1)
-        for column, name in enumerate(WEEKDAY_SHORT):
-            label = QLabel(name)
-            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            label.setProperty("section", "true")
-            self.grid.addWidget(label, 0, column)
+        self.grid_heads: list = []
         left.addWidget(self.grid_host, 1)
 
         # Недельный вид: шапка с днями, полоса «весь день» и сетка часов.
@@ -728,6 +730,51 @@ class CalendarDialog(QDialog):
         self.selected = date.today()
         self.refresh()
 
+    def _toggle_weekends(self) -> None:
+        self.show_weekends = not self.show_weekends
+        self.settings.set("calendar.show_weekends", self.show_weekends)
+        self.settings.save()
+        self.refresh()
+
+    def workdays(self, days: list) -> list:
+        """Дни, которые показываем: со свёрнутыми выходными — только будни."""
+        if self.show_weekends:
+            return list(days)
+        return [day for day in days if day.weekday() < 5]
+
+    def _weekend_load(self, days: list) -> int:
+        """Сколько записей спрятано в выходных — чтобы о них не забыли."""
+        tasks = self._tasks_by_day()
+        reminders = self._reminders_by_day()
+        meetings = self._events_by_day()
+        return sum(
+            len(tasks.get(day, [])) + len(reminders.get(day, []))
+            + len(meetings.get(day, []))
+            for day in days
+            if day.weekday() >= 5
+        )
+
+    def _sync_weekend_button(self, days: list) -> None:
+        if self.show_weekends:
+            self.weekend_button.setText("Будни")
+            self.weekend_button.setToolTip("Свернуть субботу и воскресенье")
+            self.weekend_button.setProperty("accent", "false")
+        else:
+            hidden = self._weekend_load(days)
+            # Если в выходные что-то назначено, молчать нельзя: иначе запись
+            # исчезнет из виду вместе со столбцом.
+            self.weekend_button.setText(
+                "Выходные (%d)" % hidden if hidden else "Выходные"
+            )
+            self.weekend_button.setToolTip(
+                "В выходных есть записи — показать субботу и воскресенье"
+                if hidden
+                else "Показывать субботу и воскресенье"
+            )
+            self.weekend_button.setProperty("accent", "true" if hidden else "false")
+        self.weekend_button.style().unpolish(self.weekend_button)
+        self.weekend_button.style().polish(self.weekend_button)
+
     def _sync_view_buttons(self) -> None:
         for button, view in ((self.week_button, VIEW_WEEK),
                              (self.month_button, VIEW_MONTH)):
@@ -740,6 +787,28 @@ class CalendarDialog(QDialog):
         self.next_button.setToolTip(
             "Следующая неделя" if self.view == VIEW_WEEK else "Следующий месяц"
         )
+
+    def weekday_columns(self) -> list:
+        """Номера дней недели, которые показываем в сетке месяца."""
+        return list(range(7)) if self.show_weekends else list(range(5))
+
+    def _fill_month_heads(self) -> None:
+        """Подписи дней недели над сеткой месяца — по числу колонок."""
+        for label in getattr(self, "grid_heads", []):
+            self.grid.removeWidget(label)
+            label.setParent(None)
+            label.deleteLater()
+        self.grid_heads = []
+
+        columns = self.weekday_columns()
+        for column in range(7):
+            self.grid.setColumnStretch(column, 1 if column < len(columns) else 0)
+        for column, weekday in enumerate(columns):
+            label = QLabel(WEEKDAY_SHORT[weekday])
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            label.setProperty("section", "true")
+            self.grid.addWidget(label, 0, column)
+            self.grid_heads.append(label)
 
     def _sync_stale_note(self) -> None:
         note = ics.staleness_note(self.settings.get("calendar.ics_url", ""))
@@ -788,7 +857,9 @@ class CalendarDialog(QDialog):
         self.grid_host.setVisible(not week_view)
         self.week_host.setVisible(week_view)
         if week_view:
-            days = [first + timedelta(days=shift) for shift in range(7)]
+            whole_week = [first + timedelta(days=shift) for shift in range(7)]
+            self._sync_weekend_button(whole_week)
+            days = self.workdays(whole_week)
             timed, all_day = self._week_entries(days)
             self._fill_week_head(days, all_day)
             self.week_grid.set_week(days, timed, self.selected)
@@ -796,8 +867,13 @@ class CalendarDialog(QDialog):
             self._show_day(self.selected)
             return
 
+        self._sync_weekend_button(
+            [first + timedelta(days=shift) for shift in range(weeks * 7)]
+        )
+        self._fill_month_heads()
+
         for week in range(weeks):
-            for weekday in range(7):
+            for column, weekday in enumerate(self.weekday_columns()):
                 day = first + timedelta(days=week * 7 + weekday)
                 cell = DayCell(
                     day,
@@ -810,7 +886,7 @@ class CalendarDialog(QDialog):
                 )
                 cell.picked.connect(self._pick_day)
                 cell.add_here.connect(self.add_task.emit)
-                self.grid.addWidget(cell, week + 1, weekday)
+                self.grid.addWidget(cell, week + 1, column)
             self.grid.setRowStretch(week + 1, 1)
 
         self._sync_view_buttons()

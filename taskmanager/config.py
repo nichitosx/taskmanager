@@ -72,6 +72,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "calendar": {
         "ics_url": "",
         "enabled": True,
+        # Календарь рабочий: суббота с воскресеньем только занимают место.
+        "show_weekends": False,
     },
     # Спрашивать, что сделано, если по задаче нет ни одной отметки.
     "ask_result": True,
