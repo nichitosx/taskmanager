@@ -462,12 +462,22 @@ class SettingsDialog(QDialog):
             auth=self.jira_auth.currentData() or "auto",
         )
 
+    def _pick_ics_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Файл календаря", "", "Календарь (*.ics)"
+        )
+        if path:
+            self.ics_url.setText(path)
+
     def _check_calendar(self) -> None:
         """Проверяет ссылку на календарь и говорит, что по ней пришло."""
         url = self.ics_url.text().strip()
         if not url:
-            self.status.setText("Укажите ссылку на календарь.")
+            self.status.setText("Укажите ссылку или файл календаря.")
             return
+        # Подсказываем заранее: до сети видно, что адрес не тот.
+        if not ics.is_file_source(url) and not ics.looks_like_secret(url):
+            self.status.setText("Адрес не похож на секретный — проверяю всё равно…")
         self.status.setText("Читаю календарь…")
         QApplication.processEvents()
         try:
@@ -787,25 +797,35 @@ class SettingsDialog(QDialog):
         layout.addWidget(section_label("календарь"))
         self.ics_check = QCheckBox("Показывать встречи из внешнего календаря")
         layout.addWidget(self.ics_check)
-        self.ics_url = QLineEdit()
-        self.ics_url.setPlaceholderText(
-            "секретный адрес в формате iCal — https://calendar.google.com/…/basic.ics"
-        )
-        layout.addWidget(self.ics_url)
-
         ics_row = QHBoxLayout()
         ics_row.setSpacing(8)
+        self.ics_url = QLineEdit()
+        self.ics_url.setPlaceholderText(
+            "адрес iCal или путь к выгруженному файлу .ics"
+        )
+        ics_row.addWidget(self.ics_url, 1)
+        ics_browse = _button("Выбрать файл…", "flat")
+        ics_browse.setToolTip("Взять календарь из выгруженного файла .ics")
+        ics_browse.clicked.connect(self._pick_ics_file)
+        ics_row.addWidget(ics_browse)
+        layout.addLayout(ics_row)
+
+        ics_buttons = QHBoxLayout()
+        ics_buttons.setSpacing(8)
         self.ics_check_button = _button("Проверить календарь", "flat")
         self.ics_check_button.clicked.connect(self._check_calendar)
-        ics_row.addWidget(self.ics_check_button)
-        ics_row.addStretch(1)
-        layout.addLayout(ics_row)
+        ics_buttons.addWidget(self.ics_check_button)
+        ics_buttons.addStretch(1)
+        layout.addLayout(ics_buttons)
 
         ics_note = QLabel(
             "Адрес берётся в Google-календаре: «Настройки и общий доступ» → "
-            "«Интеграция календаря» → «Секретный адрес в формате iCal». Встречи "
-            "будут видны в календаре программы и в строке «дальше», но создавать "
-            "события по такой ссылке нельзя — она только на чтение."
+            "«Интеграция календаря» → «Секретный адрес в формате iCal»; он "
+            "оканчивается на /basic.ics. В корпоративном Google администратор "
+            "может закрывать такой доступ — тогда выгрузите календарь файлом "
+            "(«Экспорт») и укажите путь к нему кнопкой рядом. Встречи видны в "
+            "календаре программы и в строке «дальше»; создавать события нельзя — "
+            "это только чтение."
         )
         ics_note.setWordWrap(True)
         ics_note.setProperty("faint", "true")

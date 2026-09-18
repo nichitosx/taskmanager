@@ -35,6 +35,39 @@ UNESCAPE = (
 )
 
 
+# Правильный секретный адрес оканчивается на /basic.ics и несёт длинный ключ
+# после слова private. Всё остальное Google закрывает входом.
+SECRET_RE = re.compile(r"/calendar/ical/.+/private-[^/]+/basic\.ics$", re.IGNORECASE)
+
+WHERE_TO_GET = (
+    "Адрес берётся так: откройте нужный календарь в Google, «Настройки и общий "
+    "доступ» → «Интеграция календаря» → «Секретный адрес в формате iCal». Он "
+    "оканчивается на /basic.ics и содержит длинный ключ после слова private."
+)
+
+WORKSPACE_HINT = (
+    "В корпоративном Google (Workspace) администратор может запрещать внешний "
+    "доступ к календарям — тогда секретный адрес не работает ни в одной "
+    "программе. Проверить просто: откройте этот адрес в окне браузера без входа "
+    "в аккаунт. Если и там просят войти — доступ закрыт, и обойти это нельзя. "
+    "Тогда остаётся выгрузить календарь файлом .ics и указать путь к нему."
+)
+
+
+def looks_like_secret(url: str) -> bool:
+    """Похож ли адрес на секретный iCal — до всякой сети."""
+    return bool(SECRET_RE.search(normalize_url(url).split("?")[0]))
+
+
+def looks_like_login(text: str, final_url: str = "") -> bool:
+    """Ответ — это страница входа, а не календарь?"""
+    probe = (final_url + " " + (text or "")[:400]).lower()
+    return any(
+        marker in probe
+        for marker in ("accounts.google.com", "servicelogin", "signin", "<html")
+    )
+
+
 class CalendarError(Exception):
     """Не удалось прочитать календарь — текст пригоден для показа человеку."""
 
@@ -100,12 +133,17 @@ def unescape(text: str) -> str:
     return text
 
 
-def parse(text: str) -> list[Event]:
+def parse(text: str, final_url: str = "") -> list[Event]:
     """Достаёт события из текста календаря."""
     if not text or "BEGIN:VCALENDAR" not in text.upper():
+        if looks_like_login(text, final_url):
+            raise CalendarError(
+                "Вместо календаря пришла страница входа Google: по этому адресу "
+                "нужен вход, а программа входить не умеет.\n\n%s\n\n%s"
+                % (WHERE_TO_GET, WORKSPACE_HINT)
+            )
         raise CalendarError(
-            "По этой ссылке пришёл не календарь. Проверьте, что это «секретный "
-            "адрес в формате iCal» из настроек календаря Google."
+            "По этой ссылке пришёл не календарь.\n\n%s" % WHERE_TO_GET
         )
 
     events: list[Event] = []
@@ -140,11 +178,49 @@ def parse(text: str) -> list[Event]:
     return events
 
 
+def read_file(path: str) -> list[Event]:
+    """Читает календарь из файла .ics, выгруженного вручную.
+
+    Запасной путь для корпоративного календаря: если администратор закрыл
+    внешний доступ, секретного адреса не будет ни у одной программы, зато
+    выгрузить файл можно всегда.
+    """
+    from pathlib import Path
+
+    source = Path(path.strip('"').strip())
+    try:
+        return parse(source.read_text(encoding="utf-8", errors="replace"))
+    except OSError as exc:
+        raise CalendarError("Не удалось прочитать файл календаря: %s" % exc) from exc
+
+
+def is_file_source(value: str) -> bool:
+    """Это путь к файлу, а не ссылка?
+
+    Расширения мало: файл могли назвать как угодно. Поэтому если схемы нет, а
+    такой файл на диске есть — считаем путём.
+    """
+    from pathlib import Path
+
+    text = (value or "").strip().strip('"')
+    if not text or "://" in text:
+        return False
+    if text.lower().endswith(".ics"):
+        return True
+    try:
+        return Path(text).is_file()
+    except OSError:
+        return False
+
+
 def fetch(url: str, timeout: int = 20, ca_file: str = "", proxy: str = "") -> list[Event]:
-    """Скачивает календарь по ссылке и разбирает его."""
+    """Читает календарь: по ссылке или из файла .ics."""
     import urllib.error
     import urllib.parse
     import urllib.request
+
+    if is_file_source(url):
+        return read_file(url)
 
     address = normalize_url(url)
     if not address:
@@ -154,11 +230,23 @@ def fetch(url: str, timeout: int = 20, ca_file: str = "", proxy: str = "") -> li
     try:
         with net.opener(ca_file, proxy).open(request, timeout=timeout) as response:
             body = response.read().decode("utf-8", "replace")
+            final_url = response.geturl()
     except urllib.error.HTTPError as exc:
-        if exc.code in (401, 403, 404):
+        if exc.code in (401, 403):
+            reason = (
+                "Адрес не похож на секретный: он должен оканчиваться на "
+                "/basic.ics.\n\n%s" % WHERE_TO_GET
+                if not looks_like_secret(address)
+                else "Адрес выглядит правильно, значит дело в доступе.\n\n%s"
+                % WORKSPACE_HINT
+            )
             raise CalendarError(
-                "Календарь по этой ссылке недоступен (%s). Секретный адрес мог "
-                "быть обновлён — возьмите его в календаре заново." % exc.code
+                "Календарь потребовал вход (%s). %s" % (exc.code, reason)
+            ) from exc
+        if exc.code == 404:
+            raise CalendarError(
+                "Календаря по этому адресу нет (404). Секретный адрес могли "
+                "сбросить — возьмите его заново.\n\n%s" % WHERE_TO_GET
             ) from exc
         raise CalendarError("Календарь ответил ошибкой %s." % exc.code) from exc
     except urllib.error.URLError as exc:
@@ -166,7 +254,7 @@ def fetch(url: str, timeout: int = 20, ca_file: str = "", proxy: str = "") -> li
         raise CalendarError(
             "Не удалось скачать календарь: %s" % net.describe(exc.reason, host)
         ) from exc
-    return parse(body)
+    return parse(body, final_url)
 
 
 def between(events: list[Event], start: date, end: date) -> dict:

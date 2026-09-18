@@ -1355,7 +1355,10 @@ class MainWindow(QMainWindow):
         if thread is not None and thread.isRunning():
             return
         fresh = getattr(self, "_events_at", None)
-        if not force and fresh and (datetime.now() - fresh).total_seconds() < 1800:
+        # Файл на диске перечитываем чаще: он меняется, когда календарь
+        # выгрузили заново, и ждать полчаса незачем.
+        gap = 60 if ics.is_file_source(url) else 1800
+        if not force and fresh and (datetime.now() - fresh).total_seconds() < gap:
             return
 
         thread = CalendarFetch(
