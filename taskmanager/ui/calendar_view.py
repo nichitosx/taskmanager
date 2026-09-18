@@ -64,12 +64,14 @@ class DayCell(Card):
         current_month: bool,
         reminders: list | None = None,
         tall: bool = False,
+        events: list | None = None,
         parent=None,
     ) -> None:
         super().__init__(colors, parent)
         self.day = day
         self.tasks = tasks
         self.reminders = reminders or []
+        self.events = events or []
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         # В недельном виде клеток всего семь — им можно отдать всю высоту.
         self.setMinimumHeight(240 if tall else 74)
@@ -104,7 +106,7 @@ class DayCell(Card):
         head.addWidget(number)
         head.addStretch(1)
 
-        total = len(tasks) + len(self.reminders)
+        total = len(tasks) + len(self.reminders) + len(self.events)
         if total:
             count = QLabel(str(total))
             count.setFont(theme.accent_font(8))
@@ -117,7 +119,12 @@ class DayCell(Card):
         self._lines: list[tuple[QLabel, str]] = []
         shown = 8 if tall else 2
         # Напоминания идут первыми: у них есть время, они привязаны к минуте.
+        # Встречи идут первыми: они занимают время, всё остальное подстраивается.
         entries = [
+            (("%s %s" % (e.clock(), e.title)).strip(), colors["success"])
+            for e in self.events
+        ]
+        entries += [
             (("%s %s" % (r.at.strftime("%H:%M") if r.at else "", r.title)).strip(),
              colors["info"])
             for r in self.reminders
@@ -173,10 +180,13 @@ class CalendarDialog(QDialog):
     add_task = Signal(object)        # завести задачу на этот день
     add_reminder = Signal(object)    # завести напоминание на этот день
 
-    def __init__(self, storage: Storage, settings: Settings, parent=None) -> None:
+    def __init__(self, storage: Storage, settings: Settings, parent=None,
+                 events: list | None = None) -> None:
         super().__init__(parent)
         self.storage = storage
         self.settings = settings
+        # Встречи из внешнего календаря: их читает главное окно и передаёт сюда.
+        self.events = list(events or [])
         self.colors = theme.palette(settings.get("theme", "dark"))
         self.month = date.today().replace(day=1)
         self.selected = date.today()
@@ -308,6 +318,14 @@ class CalendarDialog(QDialog):
             items.sort(key=lambda r: r.at or r.created_at)
         return by_day
 
+    def _events_by_day(self) -> dict:
+        by_day: dict = {}
+        for event in self.events:
+            if event.when is None:
+                continue
+            by_day.setdefault(event.when, []).append(event)
+        return by_day
+
     def _week_start(self) -> date:
         return self.selected - timedelta(days=self.selected.weekday())
 
@@ -367,6 +385,7 @@ class CalendarDialog(QDialog):
 
         by_day = self._tasks_by_day()
         reminders = self._reminders_by_day()
+        meetings = self._events_by_day()
         week_view = self.view == VIEW_WEEK
 
         if week_view:
@@ -402,6 +421,7 @@ class CalendarDialog(QDialog):
                     week_view or day.month == self.month.month,
                     reminders.get(day, []),
                     tall=week_view,
+                    events=meetings.get(day, []),
                 )
                 cell.picked.connect(self._pick_day)
                 cell.add_here.connect(self.add_task.emit)
@@ -424,11 +444,17 @@ class CalendarDialog(QDialog):
         self.day_list.clear()
         tasks = self._tasks_by_day().get(day, [])
         reminders = self._reminders_by_day().get(day, [])
-        if not tasks and not reminders:
+        if not tasks and not reminders and not self._events_by_day().get(day):
             item = QListWidgetItem("На этот день ничего не назначено")
             item.setFlags(Qt.ItemFlag.NoItemFlags)
             self.day_list.addItem(item)
             return
+
+        for event in self._events_by_day().get(day, []):
+            item = QListWidgetItem("%s  %s" % (event.clock(), event.title))
+            item.setToolTip("Встреча из календаря%s"
+                            % (" · %s" % event.location if event.location else ""))
+            self.day_list.addItem(item)
 
         for reminder in reminders:
             clock = reminder.at.strftime("%H:%M") if reminder.at else "--:--"

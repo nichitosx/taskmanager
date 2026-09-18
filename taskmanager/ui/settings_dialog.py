@@ -36,7 +36,7 @@ from .. import demo
 from .. import products as products_module
 from .. import shortcut
 from ..config import Settings, data_dir, is_portable
-from ..integrations import net
+from ..integrations import ics, net
 from ..integrations.confluence import ConfluenceClient, ConfluenceConfig, ConfluenceError
 from ..integrations.jira import (
     AUTH_LABELS,
@@ -462,6 +462,30 @@ class SettingsDialog(QDialog):
             auth=self.jira_auth.currentData() or "auto",
         )
 
+    def _check_calendar(self) -> None:
+        """Проверяет ссылку на календарь и говорит, что по ней пришло."""
+        url = self.ics_url.text().strip()
+        if not url:
+            self.status.setText("Укажите ссылку на календарь.")
+            return
+        self.status.setText("Читаю календарь…")
+        QApplication.processEvents()
+        try:
+            events = ics.fetch(
+                url,
+                ca_file=self.ca_edit.text().strip(),
+                proxy=self.proxy_edit.text().strip(),
+            )
+        except ics.CalendarError as exc:
+            self.status.setText("")
+            QMessageBox.warning(self, "Календарь", str(exc))
+            return
+        upcoming = ics.next_event(events)
+        self.status.setText(
+            "Календарь прочитан: событий — %d%s"
+            % (len(events), ", ближайшее «%s»" % upcoming.title if upcoming else "")
+        )
+
     def _sync_cutoff(self) -> None:
         on = self.cutoff_check.isChecked()
         self.cutoff_day.setEnabled(on)
@@ -760,6 +784,34 @@ class SettingsDialog(QDialog):
         layout.addWidget(jql_note)
 
         layout.addWidget(hline())
+        layout.addWidget(section_label("календарь"))
+        self.ics_check = QCheckBox("Показывать встречи из внешнего календаря")
+        layout.addWidget(self.ics_check)
+        self.ics_url = QLineEdit()
+        self.ics_url.setPlaceholderText(
+            "секретный адрес в формате iCal — https://calendar.google.com/…/basic.ics"
+        )
+        layout.addWidget(self.ics_url)
+
+        ics_row = QHBoxLayout()
+        ics_row.setSpacing(8)
+        self.ics_check_button = _button("Проверить календарь", "flat")
+        self.ics_check_button.clicked.connect(self._check_calendar)
+        ics_row.addWidget(self.ics_check_button)
+        ics_row.addStretch(1)
+        layout.addLayout(ics_row)
+
+        ics_note = QLabel(
+            "Адрес берётся в Google-календаре: «Настройки и общий доступ» → "
+            "«Интеграция календаря» → «Секретный адрес в формате iCal». Встречи "
+            "будут видны в календаре программы и в строке «дальше», но создавать "
+            "события по такой ссылке нельзя — она только на чтение."
+        )
+        ics_note.setWordWrap(True)
+        ics_note.setProperty("faint", "true")
+        layout.addWidget(ics_note)
+
+        layout.addWidget(hline())
         layout.addWidget(section_label("сеть"))
         ca_row = QHBoxLayout()
         ca_row.setSpacing(8)
@@ -899,6 +951,8 @@ class SettingsDialog(QDialog):
 
         self.jira_check.setChecked(bool(s.get("jira.enabled", True)))
         self.jira_url.setText(s.get("jira.base_url", ""))
+        self.ics_check.setChecked(bool(s.get("calendar.enabled", True)))
+        self.ics_url.setText(s.get("calendar.ics_url", ""))
         self.ca_edit.setText(s.get("network.ca_file", ""))
         self.proxy_edit.setText(s.get("network.proxy", ""))
         index = self.jira_auth.findData(s.get("jira.auth", "auto"))
@@ -1058,6 +1112,8 @@ class SettingsDialog(QDialog):
         products_module.save(s, self.products)
 
         s.set("jira.enabled", self.jira_check.isChecked())
+        s.set("calendar.enabled", self.ics_check.isChecked())
+        s.set("calendar.ics_url", self.ics_url.text().strip())
         s.set("network.ca_file", self.ca_edit.text().strip())
         s.set("network.proxy", net.normalize_proxy(self.proxy_edit.text()))
         s.set("jira.auth", self.jira_auth.currentData() or "auto")

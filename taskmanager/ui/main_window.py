@@ -58,7 +58,7 @@ from ..horizons import (
     sort_tasks,
     start_text,
 )
-from ..integrations import jira
+from ..integrations import ics, jira
 from ..integrations.jira import JiraClient, JiraConfig, JiraError
 from ..models import (
     JIRA_CREATED,
@@ -179,6 +179,27 @@ class JiraFetch(QThread):
             self.failed.emit(str(exc))
         except Exception as exc:  # неожиданная ошибка не должна ронять приложение
             self.failed.emit("Не удалось прочитать задачи из Jira: %s" % exc)
+
+
+class CalendarFetch(QThread):
+    """Скачивает внешний календарь, не подвешивая окно."""
+
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, url: str, ca_file: str, proxy: str, parent=None) -> None:
+        super().__init__(parent)
+        self.url = url
+        self.ca_file = ca_file
+        self.proxy = proxy
+
+    def run(self) -> None:  # noqa: D102 (Qt naming)
+        try:
+            self.done.emit(ics.fetch(self.url, ca_file=self.ca_file, proxy=self.proxy))
+        except ics.CalendarError as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:  # неожиданная ошибка не должна ронять окно
+            self.failed.emit("Не удалось прочитать календарь: %s" % exc)
 
 
 class TaskDetail(QWidget):
@@ -433,6 +454,10 @@ class MainWindow(QMainWindow):
         self._jira_issues: dict[str, list] = {key: [] for key in JIRA_VIEWS}
         # О чём уже напомнили — чтобы не повторяться каждую минуту.
         self._reminded: set = set()
+        # События внешнего календаря и время, когда их прочитали.
+        self._events: list = []
+        self._events_at = None
+        self._calendar_error = ""
         self._sync_tasks: list | None = None
         self._sync_keys: set = set()
         # Ширина, под которую посчитаны высоты строк.
@@ -1313,6 +1338,50 @@ class MainWindow(QMainWindow):
             self.list.addItem(item)
             self.list.setItemWidget(item, card)
 
+    # --- Внешний календарь ----------------------------------------------------
+
+    def calendar_events(self) -> list:
+        """События, прочитанные из внешнего календаря."""
+        return list(getattr(self, "_events", []))
+
+    def load_calendar(self, force: bool = False) -> None:
+        """Раз в полчаса перечитывает внешний календарь."""
+        if not self.settings.get("calendar.enabled", True):
+            return
+        url = (self.settings.get("calendar.ics_url", "") or "").strip()
+        if not url:
+            return
+        thread = getattr(self, "_calendar_thread", None)
+        if thread is not None and thread.isRunning():
+            return
+        fresh = getattr(self, "_events_at", None)
+        if not force and fresh and (datetime.now() - fresh).total_seconds() < 1800:
+            return
+
+        thread = CalendarFetch(
+            url,
+            self.settings.get("network.ca_file", ""),
+            self.settings.get("network.proxy", ""),
+            self,
+        )
+        thread.done.connect(self._on_calendar_done)
+        thread.failed.connect(self._on_calendar_failed)
+        self._calendar_thread = thread
+        thread.start()
+
+    def _on_calendar_done(self, events) -> None:
+        self._events = list(events)
+        self._events_at = datetime.now()
+        self._calendar_error = ""
+        self._sync_next_reminder()
+
+    def _on_calendar_failed(self, message: str) -> None:
+        # Календарь — подспорье, а не основа: молчим в строке состояния.
+        self._events = []
+        self._events_at = datetime.now()
+        self._calendar_error = message
+        self.statusBar().showMessage("Календарь: %s" % message.split("\n")[0], 6000)
+
     # --- Напоминания ----------------------------------------------------------
 
     def open_reminder(self, reminder_id: int | None = None, when=None) -> None:
@@ -1371,8 +1440,18 @@ class MainWindow(QMainWindow):
         self._sync_next_reminder()
 
     def next_event(self):
-        """Ближайшее впереди: напоминание или задача со сроком на сегодня."""
-        return self.storage.next_reminder()
+        """Ближайшее впереди: напоминание или встреча из календаря.
+
+        Возвращает пару (когда, текст) — или None, если впереди ничего нет.
+        """
+        soon: list[tuple] = []
+        reminder = self.storage.next_reminder()
+        if reminder is not None and reminder.at:
+            soon.append((reminder.at, reminder.title))
+        meeting = ics.next_event(self.calendar_events())
+        if meeting is not None and meeting.at:
+            soon.append((meeting.at, meeting.title))
+        return min(soon, key=lambda pair: pair[0]) if soon else None
 
     def _sync_next_reminder(self) -> None:
         """Подпись в углу: что и через сколько."""
@@ -1384,7 +1463,8 @@ class MainWindow(QMainWindow):
             label.setText("")
             label.hide()
             return
-        label.setText("дальше: %s — %s" % (describe_when(upcoming.at), upcoming.title))
+        when, title = upcoming
+        label.setText("дальше: %s — %s" % (describe_when(when), title))
         label.show()
 
     def visible_tasks(self) -> list[Task]:
@@ -1713,6 +1793,7 @@ class MainWindow(QMainWindow):
         self._clock.setInterval(30_000)
         self._clock.timeout.connect(lambda: self.day_indicator.set_clock(datetime.now()))
         self._clock.timeout.connect(self._check_reminders)
+        self._clock.timeout.connect(lambda: self.load_calendar())
         self._clock.start()
 
     def _update_tray_tooltip(self, counters: dict[str, int]) -> None:
@@ -2149,7 +2230,10 @@ class MainWindow(QMainWindow):
 
     def open_calendar(self) -> None:
         """Месяц целиком: где какие сроки."""
-        dialog = CalendarDialog(self.storage, self.settings, self)
+        self.load_calendar()
+        dialog = CalendarDialog(
+            self.storage, self.settings, self, self.calendar_events()
+        )
         dialog.open_task.connect(self.open_task)
         dialog.add_task.connect(self._new_task_on)
         dialog.add_reminder.connect(lambda day: self.open_reminder(when=day))
