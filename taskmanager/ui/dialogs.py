@@ -132,9 +132,12 @@ class ReminderDialog(QDialog):
             at=reminders_module.next_slot()
         )
         if self.is_new and when is not None:
-            # Пришли из календаря: день уже выбран, время оставляем разумное.
-            slot = reminders_module.next_slot()
-            self.reminder.at = datetime.combine(when, slot.time())
+            # Пришли из календаря. Клик по сетке приносит и час — берём его
+            # целиком; клик по дню приносит только дату, время подставляем.
+            if isinstance(when, datetime):
+                self.reminder.at = when
+            else:
+                self.reminder.at = datetime.combine(when, reminders_module.next_slot().time())
         self.deleted = False
         self.setWindowTitle("Новое напоминание" if self.is_new else "Напоминание")
 

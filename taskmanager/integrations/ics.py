@@ -300,6 +300,41 @@ def fetch(url: str, timeout: int = 20, ca_file: str = "", proxy: str = "") -> li
     return parse(body, final_url)
 
 
+def file_age_days(source: str) -> Optional[int]:
+    """Сколько дней назад выгружали файл. None — источник не файл.
+
+    Выгрузка не обновляется сама, и через неделю в ней уже нет новых встреч.
+    Молчать об этом нельзя: пустой календарь выглядит как свободный день.
+    """
+    from pathlib import Path
+
+    if not is_file_source(source):
+        return None
+    try:
+        path = Path(source.strip().strip('"'))
+        changed = datetime.fromtimestamp(path.stat().st_mtime)
+    except OSError:
+        return None
+    return max(0, (datetime.now() - changed).days)
+
+
+def staleness_note(source: str, limit: int = 3) -> str:
+    """Строка-предупреждение, если выгрузка залежалась. Пусто — всё свежо."""
+    age = file_age_days(source)
+    if age is None or age < limit:
+        return ""
+    if age == 1:
+        when = "вчера"
+    elif age < 5:
+        when = "%d дня назад" % age
+    else:
+        when = "%d дней назад" % age
+    return (
+        "Календарь выгружен %s — новых встреч в нём нет. "
+        "Обновите файл: «Настройки календаря → Экспорт»." % when
+    )
+
+
 def between(events: list[Event], start: date, end: date) -> dict:
     """Раскладывает события по дням внутри отрезка."""
     by_day: dict = {}

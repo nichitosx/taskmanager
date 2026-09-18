@@ -8,11 +8,13 @@
 from __future__ import annotations
 
 import calendar
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QDialog,
+    QScrollArea,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -27,6 +29,7 @@ from PySide6.QtWidgets import (
 
 from ..config import Settings
 from ..models import Task
+from ..integrations import ics
 from ..reports import MONTH_NAMES, WEEKDAY_NAMES, fmt_date_long
 from ..storage import Storage
 from . import theme
@@ -168,6 +171,206 @@ VIEW_WEEK = "week"
 VIEW_MONTH = "month"
 
 
+class TimeBlock(QFrame):
+    """Запись на сетке недели: встреча, напоминание или задача со сроком."""
+
+    picked = Signal(object)
+
+    def __init__(self, text: str, colour: str, colors: dict[str, str],
+                 tooltip: str = "", payload=None, parent=None) -> None:
+        super().__init__(parent)
+        self.payload = payload
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        if tooltip:
+            self.setToolTip(tooltip)
+        self.setStyleSheet(
+            "background: %s; border-left: 3px solid %s; border-radius: %dpx;"
+            % (theme.tint(colour, 0.22), colour, theme.radius("small"))
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 3, 4, 3)
+        layout.setSpacing(0)
+        self.label = QLabel(text)
+        self.label.setWordWrap(True)
+        self.label.setFont(theme.mono_font(7))
+        self.label.setStyleSheet("color: %s; background: transparent;" % colors["text"])
+        self.label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        layout.addWidget(self.label)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        self.picked.emit(self.payload)
+        super().mousePressEvent(event)
+
+
+class WeekTimeGrid(QWidget):
+    """Семь дней по горизонтали, часы по вертикали.
+
+    Так видно не только «что назначено», но и «когда свободно»: пустое место
+    между блоками — это и есть время, в которое можно взяться за задачу.
+    """
+
+    HOUR = 46          # высота одного часа
+    GUTTER = 52        # ширина колонки с часами
+    GAP = 3            # зазор между блоком и краем колонки
+
+    picked_day = Signal(object)          # кликнули по колонке дня
+    picked_slot = Signal(object, int)    # день и час — двойной клик по пустому месту
+    picked_entry = Signal(object)        # кликнули по записи
+
+    def __init__(self, colors: dict[str, str], parent=None) -> None:
+        super().__init__(parent)
+        self.colors = colors
+        self.days: list[date] = []
+        self.entries: dict = {}
+        self.selected: date | None = None
+        self.first_hour = 8
+        self.last_hour = 20
+        self.setMouseTracking(True)
+
+    # --- Данные ---------------------------------------------------------------
+
+    def set_week(self, days: list, entries: dict, selected=None) -> None:
+        """Записи: по дню список (начало, конец, текст, цвет, подсказка, что это)."""
+        self.days = list(days)
+        self.entries = entries or {}
+        self.selected = selected
+        self._fit_hours()
+        self._rebuild()
+
+    def _fit_hours(self) -> None:
+        """Рабочий день по умолчанию, но края раздвигаем под реальные встречи."""
+        first, last = 8, 20
+        for items in self.entries.values():
+            for start, end, *_ in items:
+                if start is None:
+                    continue
+                first = min(first, start.hour)
+                last = max(last, (end or start).hour + 1)
+        self.first_hour = max(0, first)
+        self.last_hour = min(24, max(last, self.first_hour + 4))
+        self.setMinimumHeight((self.last_hour - self.first_hour) * self.HOUR + 8)
+
+    def _rebuild(self) -> None:
+        for block in self.findChildren(TimeBlock):
+            block.setParent(None)
+            block.deleteLater()
+        self._blocks: list[tuple] = []
+        for index, day in enumerate(self.days):
+            for entry in self.entries.get(day, []):
+                start, end, text, colour, tooltip, payload = entry
+                if start is None:
+                    continue
+                block = TimeBlock(text, colour, self.colors, tooltip, payload, self)
+                block.picked.connect(self.picked_entry.emit)
+                block.show()
+                self._blocks.append((index, start, end, block))
+        self._place_blocks()
+
+    # --- Раскладка ------------------------------------------------------------
+
+    def column_width(self) -> float:
+        if not self.days:
+            return 0.0
+        return max(1.0, (self.width() - self.GUTTER) / len(self.days))
+
+    def _y_of(self, moment) -> int:
+        minutes = (moment.hour - self.first_hour) * 60 + moment.minute
+        return int(minutes * self.HOUR / 60)
+
+    def _place_blocks(self) -> None:
+        width = self.column_width()
+        for index, start, end, block in getattr(self, "_blocks", []):
+            top = self._y_of(start)
+            bottom = self._y_of(end) if end and end > start else top + self.HOUR // 2
+            height = max(18, bottom - top)
+            left = int(self.GUTTER + index * width) + self.GAP
+            block.setGeometry(
+                left, top + 1, max(20, int(width) - self.GAP * 2), height - 2
+            )
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        super().resizeEvent(event)
+        self._place_blocks()
+
+    # --- Отрисовка ------------------------------------------------------------
+
+    @staticmethod
+    def _shade(color: str, alpha: int) -> QColor:
+        """Полупрозрачный цвет для заливки.
+
+        theme.tint отдаёт строку rgba(...) для таблиц стилей, а QColor такую
+        строку не понимает и молча становится чёрным — поэтому альфу ставим сами.
+        """
+        shade = QColor(color)
+        shade.setAlpha(alpha)
+        return shade
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        c = self.colors
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(c["bg"]))
+        width = self.column_width()
+        today = date.today()
+
+        # Колонка выбранного дня и сегодняшнего — подсвечены.
+        for index, day in enumerate(self.days):
+            left = int(self.GUTTER + index * width)
+            if day == today:
+                painter.fillRect(
+                    left, 0, int(width), self.height(),
+                    self._shade(c["accent"], 26),
+                )
+            elif day == self.selected:
+                painter.fillRect(
+                    left, 0, int(width), self.height(), QColor(c["surface"])
+                )
+
+        painter.setFont(theme.mono_font(7))
+        for hour in range(self.first_hour, self.last_hour + 1):
+            y = (hour - self.first_hour) * self.HOUR
+            painter.setPen(QColor(c["border_soft"]))
+            painter.drawLine(self.GUTTER, y, self.width(), y)
+            painter.setPen(QColor(c["text_faint"]))
+            painter.drawText(6, y + 12, "%02d:00" % hour)
+
+        painter.setPen(QColor(c["border_soft"]))
+        for index in range(len(self.days) + 1):
+            x = int(self.GUTTER + index * width)
+            painter.drawLine(x, 0, x, self.height())
+
+        # Линия «сейчас» — только если сегодняшний день на экране.
+        if today in self.days and self.first_hour <= datetime.now().hour < self.last_hour:
+            y = self._y_of(datetime.now())
+            painter.setPen(QPen(QColor(c["accent"]), 2))
+            painter.drawLine(self.GUTTER, y, self.width(), y)
+        painter.end()
+
+    # --- Мышь -----------------------------------------------------------------
+
+    def _day_at(self, x: float):
+        width = self.column_width()
+        if not width or x < self.GUTTER:
+            return None
+        index = int((x - self.GUTTER) // width)
+        return self.days[index] if 0 <= index < len(self.days) else None
+
+    def _hour_at(self, y: float) -> int:
+        return int(self.first_hour + max(0, y) // self.HOUR)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        day = self._day_at(event.position().x())
+        if day is not None:
+            self.picked_day.emit(day)
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        day = self._day_at(event.position().x())
+        if day is not None:
+            self.picked_slot.emit(day, self._hour_at(event.position().y()))
+        super().mouseDoubleClickEvent(event)
+
+
 class CalendarDialog(QDialog):
     """Календарь дел: неделя крупно или месяц целиком.
 
@@ -225,6 +428,17 @@ class CalendarDialog(QDialog):
         self.next_button.clicked.connect(lambda: self._shift(1))
         head.addWidget(self.next_button)
         layout.addLayout(head)
+
+        # Выгрузка не обновляется сама — говорим об этом, пока не поздно.
+        self.stale_note = QLabel("")
+        self.stale_note.setWordWrap(True)
+        self.stale_note.setFont(theme.mono_font(8))
+        self.stale_note.setStyleSheet(
+            "color: %s; background: transparent;" % self.colors["warning"]
+        )
+        self.stale_note.hide()
+        layout.addWidget(self.stale_note)
+
         layout.addWidget(hline())
 
         body = QHBoxLayout()
@@ -251,6 +465,39 @@ class CalendarDialog(QDialog):
             label.setProperty("section", "true")
             self.grid.addWidget(label, 0, column)
         left.addWidget(self.grid_host, 1)
+
+        # Недельный вид: шапка с днями, полоса «весь день» и сетка часов.
+        self.week_host = QWidget()
+        week_layout = QVBoxLayout(self.week_host)
+        week_layout.setContentsMargins(0, 0, 0, 0)
+        week_layout.setSpacing(0)
+
+        self.week_head = QWidget()
+        self.week_head_row = QHBoxLayout(self.week_head)
+        self.week_head_row.setContentsMargins(0, 0, 0, 6)
+        self.week_head_row.setSpacing(0)
+        week_layout.addWidget(self.week_head)
+
+        self.all_day_row = QWidget()
+        self.all_day_layout = QHBoxLayout(self.all_day_row)
+        self.all_day_layout.setContentsMargins(0, 0, 0, 6)
+        self.all_day_layout.setSpacing(0)
+        week_layout.addWidget(self.all_day_row)
+
+        self.week_scroll = QScrollArea()
+        self.week_scroll.setWidgetResizable(True)
+        self.week_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.week_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.week_grid = WeekTimeGrid(self.colors)
+        self.week_grid.picked_day.connect(self._pick_day)
+        self.week_grid.picked_slot.connect(self._add_on_slot)
+        self.week_grid.picked_entry.connect(self._open_entry)
+        self.week_scroll.setWidget(self.week_grid)
+        week_layout.addWidget(self.week_scroll, 1)
+
+        left.addWidget(self.week_host, 1)
 
         right_host = QWidget()
         right_host.setMinimumWidth(220)
@@ -326,6 +573,127 @@ class CalendarDialog(QDialog):
             by_day.setdefault(event.when, []).append(event)
         return by_day
 
+    def _week_entries(self, days: list) -> tuple[dict, dict]:
+        """Записи недели: со временем — на сетку, без времени — в полосу сверху."""
+        tasks = self._tasks_by_day()
+        reminders = self._reminders_by_day()
+        meetings = self._events_by_day()
+
+        timed: dict = {day: [] for day in days}
+        all_day: dict = {day: [] for day in days}
+
+        for day in days:
+            for event in meetings.get(day, []):
+                text = "%s %s" % (event.clock(), event.title)
+                tip = "Встреча%s" % (" · %s" % event.location if event.location else "")
+                if event.all_day or event.at is None:
+                    all_day[day].append((event.title, self.colors["success"], tip, None))
+                else:
+                    timed[day].append((
+                        event.at, event.until, text, self.colors["success"], tip, None
+                    ))
+
+            for reminder in reminders.get(day, []):
+                if reminder.at is None:
+                    continue
+                timed[day].append((
+                    reminder.at,
+                    None,
+                    "%s %s" % (reminder.at.strftime("%H:%M"), reminder.title),
+                    self.colors["info"],
+                    "Напоминание",
+                    ("reminder", reminder.id),
+                ))
+
+            # У задач есть срок, но нет часа — им место в полосе «весь день».
+            for task in tasks.get(day, []):
+                all_day[day].append((
+                    task.title,
+                    self.colors["accent"] if task.is_overdue else self.colors["warning"],
+                    "Задача · срок",
+                    ("task", task.id),
+                ))
+
+        for items in timed.values():
+            items.sort(key=lambda entry: entry[0])
+        return timed, all_day
+
+    def _fill_week_head(self, days: list, all_day: dict) -> None:
+        """Числа дней сверху и полоса задач на весь день под ними."""
+        for row in (self.week_head_row, self.all_day_layout):
+            while row.count():
+                item = row.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.setParent(None)
+                    widget.deleteLater()
+
+        gutter = QWidget()
+        gutter.setFixedWidth(WeekTimeGrid.GUTTER)
+        self.week_head_row.addWidget(gutter)
+        gutter_two = QWidget()
+        gutter_two.setFixedWidth(WeekTimeGrid.GUTTER)
+        self.all_day_layout.addWidget(gutter_two)
+
+        today = date.today()
+        for day in days:
+            head = QWidget()
+            head.setCursor(Qt.CursorShape.PointingHandCursor)
+            column = QVBoxLayout(head)
+            column.setContentsMargins(0, 0, 0, 0)
+            column.setSpacing(1)
+
+            name = QLabel(WEEKDAY_SHORT[day.weekday()])
+            name.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            name.setProperty("section", "true")
+            column.addWidget(name)
+
+            number = QLabel(str(day.day))
+            number.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            number.setFont(theme.ui_font(14, bold=day == today))
+            number.setStyleSheet(
+                "color: %s; background: transparent;"
+                % (self.colors["accent"] if day == today
+                   else (self.colors["text"] if day == self.selected
+                         else self.colors["text_dim"]))
+            )
+            column.addWidget(number)
+            head.mousePressEvent = (  # type: ignore[assignment]
+                lambda _event, picked=day: self._pick_day(picked)
+            )
+            self.week_head_row.addWidget(head, 1)
+
+            strip = QWidget()
+            strip_layout = QVBoxLayout(strip)
+            strip_layout.setContentsMargins(2, 0, 2, 0)
+            strip_layout.setSpacing(2)
+            for title, colour, tip, payload in all_day.get(day, [])[:3]:
+                block = TimeBlock(title, colour, self.colors, tip, payload)
+                block.setFixedHeight(18)
+                block.picked.connect(self._open_entry)
+                strip_layout.addWidget(block)
+            extra = len(all_day.get(day, [])) - 3
+            if extra > 0:
+                more = QLabel("+%d" % extra)
+                more.setFont(theme.mono_font(7))
+                more.setStyleSheet(
+                    "color: %s; background: transparent;" % self.colors["text_faint"]
+                )
+                strip_layout.addWidget(more)
+            self.all_day_layout.addWidget(strip, 1)
+
+    def _add_on_slot(self, day, hour: int) -> None:
+        """Двойной клик по пустому месту — напоминание на это время."""
+        self.add_reminder.emit(datetime.combine(day, time(hour=min(23, hour))))
+
+    def _open_entry(self, payload) -> None:
+        if not payload:
+            return
+        kind, identifier = payload
+        if kind == "task":
+            self.open_task.emit(int(identifier))
+            self.accept()
+
     def _week_start(self) -> date:
         return self.selected - timedelta(days=self.selected.weekday())
 
@@ -373,7 +741,13 @@ class CalendarDialog(QDialog):
             "Следующая неделя" if self.view == VIEW_WEEK else "Следующий месяц"
         )
 
+    def _sync_stale_note(self) -> None:
+        note = ics.staleness_note(self.settings.get("calendar.ics_url", ""))
+        self.stale_note.setText(note)
+        self.stale_note.setVisible(bool(note))
+
     def refresh(self) -> None:
+        self._sync_stale_note()
         for cell in self.grid_host.findChildren(DayCell):
             self.grid.removeWidget(cell)
             # Родителя снимаем сразу: deleteLater отложит удаление до следующего
@@ -410,6 +784,17 @@ class CalendarDialog(QDialog):
                 "%s %d"
                 % (MONTH_NOMINATIVE[self.month.month - 1].capitalize(), self.month.year)
             )
+
+        self.grid_host.setVisible(not week_view)
+        self.week_host.setVisible(week_view)
+        if week_view:
+            days = [first + timedelta(days=shift) for shift in range(7)]
+            timed, all_day = self._week_entries(days)
+            self._fill_week_head(days, all_day)
+            self.week_grid.set_week(days, timed, self.selected)
+            self._sync_view_buttons()
+            self._show_day(self.selected)
+            return
 
         for week in range(weeks):
             for weekday in range(7):

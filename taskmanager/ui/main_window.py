@@ -1377,6 +1377,12 @@ class MainWindow(QMainWindow):
         self._events_at = datetime.now()
         self._calendar_error = ""
         self._sync_next_reminder()
+        # Выгрузка не обновляется сама: если она залежалась, лучше сказать
+        # сразу — пустой календарь легко принять за свободную неделю.
+        note = ics.staleness_note(self.settings.get("calendar.ics_url", ""))
+        if note and note != getattr(self, "_stale_said", ""):
+            self._stale_said = note
+            self.statusBar().showMessage(note, 12000)
 
     def _on_calendar_failed(self, message: str) -> None:
         # Календарь — подспорье, а не основа: молчим в строке состояния.
