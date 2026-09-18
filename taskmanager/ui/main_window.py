@@ -1388,15 +1388,7 @@ class MainWindow(QMainWindow):
         reminder = self.storage.get_reminder(reminder_id) if reminder_id else None
         dialog = ReminderDialog(self.storage, self.settings, reminder, when, self)
         if dialog.exec() == dialog.DialogCode.Accepted:
-            if not dialog.deleted and dialog.wants_calendar():
-                self._push_to_calendar(dialog.reminder)
             self.refresh(keep_selection=True)
-
-    def _push_to_calendar(self, reminder) -> None:
-        """Отправляет напоминание в Google-календарь, если он подключён."""
-        # Подключения пока может не быть — тогда просто молчим: напоминание
-        # всё равно сохранено и сработает в программе.
-        pass
 
     def _toggle_reminder(self, reminder_id: int, done: bool) -> None:
         self.storage.set_reminder_done(reminder_id, done)

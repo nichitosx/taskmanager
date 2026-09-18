@@ -170,8 +170,15 @@ class ReminderDialog(QDialog):
         self.notes_edit.setMaximumHeight(120)
         layout.addWidget(self.notes_edit)
 
+        # Пока календарь подключается ссылкой только на чтение, событие туда не
+        # создать. Галочку показываем выключенной, а не молча бездействующей:
+        # обманчивое согласие хуже честного «нельзя».
         self.to_calendar = QCheckBox("Поставить и в Google-календарь")
-        self.to_calendar.setChecked(bool(self.reminder.event_id) or self.is_new)
+        self.to_calendar.setEnabled(False)
+        self.to_calendar.setChecked(False)
+        self.to_calendar.setToolTip(
+            "Ссылка iCal работает только на чтение — для записи нужны доступы Google"
+        )
         layout.addWidget(self.to_calendar)
 
         hint = QLabel(
