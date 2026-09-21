@@ -1455,8 +1455,11 @@ class GoalCard(Card):
         self.set_bar(colors["warning"])
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 10, 14, 10)
-        layout.setSpacing(6)
+        layout.setContentsMargins(14, 11, 14, 11)
+        # Тот же зазор, что у задачи между названием и метками, плюс пара
+        # пикселей: заголовок цели крупнее и жирнее, и вплотную к меткам он
+        # выглядел склеенным.
+        layout.setSpacing(9 + theme.line_extra())
 
         head = QHBoxLayout()
         head.setContentsMargins(0, 0, 0, 0)
