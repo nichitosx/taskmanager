@@ -96,6 +96,7 @@ from .widgets import (
     elide_text,
     headline,
     GoalCard,
+    GoalResultList,
     JiraIssueRow,
     ReminderRow,
     NavItem,
@@ -210,6 +211,9 @@ class TaskDetail(QWidget):
         self.storage = storage
         self.settings = settings
         self.task: Task | None = None
+        # Панель одна на три вида записей: задача, цель, напоминание.
+        self.goal = None
+        self.reminder = None
         self.owner = parent
         self._build()
 
@@ -328,6 +332,9 @@ class TaskDetail(QWidget):
 
         self.body_scroll.hide()
 
+        layout.addWidget(self._build_goal_page(colors), 1)
+        layout.addWidget(self._build_reminder_page(colors), 1)
+
         # Ближайшее событие — вне прокручиваемой части: панель прячется, когда
         # задача не выбрана, а знать, что дальше, нужно всегда.
         layout.addStretch(0)
@@ -345,10 +352,210 @@ class TaskDetail(QWidget):
         self.next_event.hide()
         layout.addWidget(self.next_event)
 
+    # --- Цель квартала --------------------------------------------------------
+
+    def _build_goal_page(self, colors: dict[str, str]) -> QWidget:
+        """Подробности цели: та же панель, что у задачи, но про квартал."""
+        self.goal_page = QScrollArea()
+        self.goal_page.setWidgetResizable(True)
+        self.goal_page.setFrameShape(QFrame.Shape.NoFrame)
+        self.goal_page.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+
+        holder = QWidget()
+        holder.setStyleSheet("background: transparent;")
+        column = QVBoxLayout(holder)
+        column.setContentsMargins(0, 0, 10, 0)
+        column.setSpacing(10)
+
+        self.goal_title = QLabel()
+        self.goal_title.setWordWrap(True)
+        self.goal_title.setFont(theme.ui_font(13, bold=True))
+        self.goal_title.setStyleSheet(
+            "color: %s; background: transparent;" % colors["warning"]
+        )
+        column.addWidget(self.goal_title)
+
+        self.goal_meta = QLabel()
+        self.goal_meta.setWordWrap(True)
+        self.goal_meta.setFont(theme.mono_font(8))
+        self.goal_meta.setProperty("dim", "true")
+        column.addWidget(self.goal_meta)
+
+        column.addWidget(hline())
+        column.addWidget(section_label("как идут дела"))
+        self.goal_comment = QPlainTextEdit()
+        self.goal_comment.setPlaceholderText("Где сейчас, что мешает, что дальше")
+        self.goal_comment.setFixedHeight(110)
+        self.goal_comment.focusOutEvent = self._goal_comment_saved  # type: ignore[assignment]
+        column.addWidget(self.goal_comment)
+
+        self.goal_results = GoalResultList(
+            self.storage, theme.palette(self.settings.get("theme", "dark"))
+        )
+        self.goal_results.changed.connect(self._goal_results_changed)
+        column.addWidget(self.goal_results)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(6)
+        self.goal_edit_button = QPushButton("Изменить")
+        self.goal_edit_button.setProperty("accent", "true")
+        self.goal_edit_button.clicked.connect(self._edit_goal)
+        buttons.addWidget(self.goal_edit_button)
+        self.goal_done_button = QPushButton("Достигнута")
+        self.goal_done_button.setProperty("flat", "true")
+        self.goal_done_button.clicked.connect(self._toggle_goal_here)
+        buttons.addWidget(self.goal_done_button)
+        buttons.addStretch(1)
+        column.addLayout(buttons)
+        column.addStretch(1)
+
+        self.goal_page.setWidget(holder)
+        self.goal_page.hide()
+        return self.goal_page
+
+    def show_goal(self, goal) -> None:
+        """Показывает цель справа — там же, где обычно подробности задачи."""
+        self.goal = goal
+        if goal is None:
+            self.goal_page.hide()
+            return
+        self.task = None
+        self.reminder = None
+        self.body_scroll.hide()
+        self.reminder_page.hide()
+        self.placeholder.hide()
+        self.goal_page.show()
+
+        self.goal_title.setText(goal.title)
+        done, total = self.storage.goal_progress(goal.id)
+        parts = [goals_module.quarter_title(goal.quarter)]
+        if total:
+            parts.append("результаты %d из %d" % (done, total))
+        parts.append("достигнута" if goal.is_done else "в работе")
+        self.goal_meta.setText("  ·  ".join(parts))
+
+        self.goal_comment.blockSignals(True)
+        self.goal_comment.setPlainText(goal.comment)
+        self.goal_comment.blockSignals(False)
+
+        self.goal_results.goal_id = goal.id
+        self.goal_results.reload()
+        self.goal_done_button.setText("Вернуть в работу" if goal.is_done else "Достигнута")
+
+    def focus_new_result(self) -> None:
+        """Ставит курсор в поле нового контрольного результата."""
+        if self.goal is not None:
+            self.goal_results.input.setFocus()
+
+    def _goal_comment_saved(self, event) -> None:
+        QPlainTextEdit.focusOutEvent(self.goal_comment, event)
+        if self.goal is None:
+            return
+        text = self.goal_comment.toPlainText().strip()
+        if text != self.goal.comment:
+            self.goal.comment = text
+            self.storage.update_goal(self.goal)
+            if self.owner is not None:
+                self.owner.refresh(keep_selection=True)
+
+    def _goal_results_changed(self) -> None:
+        if self.goal is not None and self.owner is not None:
+            self.owner.refresh(keep_selection=True)
+
+    def _edit_goal(self) -> None:
+        if self.goal is not None and self.owner is not None:
+            self.owner.open_goal(self.goal.id)
+
+    def _toggle_goal_here(self) -> None:
+        if self.goal is not None and self.owner is not None:
+            self.owner._toggle_goal(self.goal.id, not self.goal.is_done)
+
+    # --- Напоминание ----------------------------------------------------------
+
+    def _build_reminder_page(self, colors: dict[str, str]) -> QWidget:
+        self.reminder_page = QWidget()
+        self.reminder_page.setStyleSheet("background: transparent;")
+        column = QVBoxLayout(self.reminder_page)
+        column.setContentsMargins(0, 0, 10, 0)
+        column.setSpacing(10)
+
+        self.reminder_title = QLabel()
+        self.reminder_title.setWordWrap(True)
+        self.reminder_title.setFont(theme.ui_font(13, bold=True))
+        column.addWidget(self.reminder_title)
+
+        self.reminder_meta = QLabel()
+        self.reminder_meta.setWordWrap(True)
+        self.reminder_meta.setFont(theme.mono_font(8))
+        self.reminder_meta.setProperty("dim", "true")
+        column.addWidget(self.reminder_meta)
+
+        column.addWidget(hline())
+        column.addWidget(section_label("заметка"))
+        self.reminder_notes = QLabel()
+        self.reminder_notes.setWordWrap(True)
+        self.reminder_notes.setFont(theme.ui_font(10))
+        column.addWidget(self.reminder_notes)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(6)
+        self.reminder_edit_button = QPushButton("Изменить")
+        self.reminder_edit_button.setProperty("accent", "true")
+        self.reminder_edit_button.clicked.connect(self._edit_reminder)
+        buttons.addWidget(self.reminder_edit_button)
+        self.reminder_done_button = QPushButton("Готово")
+        self.reminder_done_button.setProperty("flat", "true")
+        self.reminder_done_button.clicked.connect(self._toggle_reminder_here)
+        buttons.addWidget(self.reminder_done_button)
+        buttons.addStretch(1)
+        column.addLayout(buttons)
+        column.addStretch(1)
+
+        self.reminder_page.hide()
+        return self.reminder_page
+
+    def show_reminder(self, reminder) -> None:
+        self.reminder = reminder
+        if reminder is None:
+            self.reminder_page.hide()
+            return
+        self.task = None
+        self.goal = None
+        self.body_scroll.hide()
+        self.goal_page.hide()
+        self.placeholder.hide()
+        self.reminder_page.show()
+
+        self.reminder_title.setText(reminder.title)
+        parts = [describe_when(reminder.at)]
+        if reminder.at:
+            parts.append(reminder.at.strftime("%d.%m.%Y %H:%M"))
+        if reminder.done:
+            parts.append("отмечено")
+        elif reminder.is_past:
+            parts.append("пора")
+        self.reminder_meta.setText("  ·  ".join(parts))
+        self.reminder_notes.setText(reminder.notes.strip() or "—")
+        self.reminder_done_button.setText("Вернуть" if reminder.done else "Готово")
+
+    def _edit_reminder(self) -> None:
+        if self.reminder is not None and self.owner is not None:
+            self.owner.open_reminder(self.reminder.id)
+
+    def _toggle_reminder_here(self) -> None:
+        if self.reminder is not None and self.owner is not None:
+            self.owner._toggle_reminder(self.reminder.id, not self.reminder.done)
+
     # --- Отображение ----------------------------------------------------------
 
     def show_task(self, task: Task | None) -> None:
         self.task = task
+        self.goal = None
+        self.reminder = None
+        self.goal_page.hide()
+        self.reminder_page.hide()
         if task is None:
             self.body_scroll.hide()
             self.placeholder.show()
@@ -452,6 +659,9 @@ class MainWindow(QMainWindow):
         self.filter = "active"
         self.selected_id: int | None = None
         self._jira_issues: dict[str, list] = {key: [] for key in JIRA_VIEWS}
+        # Что выбрано в разделах целей и напоминаний.
+        self.selected_goal: int | None = None
+        self.selected_reminder: int | None = None
         # О чём уже напомнили — чтобы не повторяться каждую минуту.
         self._reminded: set = set()
         # События внешнего календаря и время, когда их прочитали.
@@ -554,6 +764,16 @@ class MainWindow(QMainWindow):
         self.new_goal_button.clicked.connect(lambda: self.open_goal())
         self.new_goal_button.hide()
         search_row.addWidget(self.new_goal_button)
+
+        self.add_result_button = QPushButton("Добавить КР")
+        self.add_result_button.setProperty("flat", "true")
+        self.add_result_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.add_result_button.setToolTip(
+            "Контрольный результат выбранной цели — по нему видно движение"
+        )
+        self.add_result_button.clicked.connect(self._add_goal_result)
+        self.add_result_button.hide()
+        search_row.addWidget(self.add_result_button)
 
         self.new_reminder_button = QPushButton("Новое напоминание")
         self.new_reminder_button.setProperty("flat", "true")
@@ -1301,8 +1521,25 @@ class MainWindow(QMainWindow):
     def _goal_card(self, goal) -> GoalCard:
         card = GoalCard(goal, self.colors, self.storage.goal_progress(goal.id))
         card.activated.connect(self.open_goal)
+        card.clicked.connect(self._select_goal)
         card.toggled.connect(self._toggle_goal)
         return card
+
+    def _select_goal(self, goal_id: int) -> None:
+        """Клик по цели: подробности уходят вправо, как у задачи."""
+        goal = self.storage.get_goal(goal_id)
+        if goal is None:
+            return
+        self.selected_goal = goal_id
+        self.detail.show_goal(goal)
+        if hasattr(self, "add_result_button"):
+            self.add_result_button.setVisible(self.filter == GOALS)
+
+    def _add_goal_result(self) -> None:
+        """Кнопка «Добавить КР» — курсор в поле нового результата справа."""
+        if self.selected_goal is None:
+            return
+        self.detail.focus_new_result()
 
     def _fill_goals(self) -> None:
         """Раздел «Цели квартала»: только цели, крупно и по порядку."""
@@ -1399,6 +1636,13 @@ class MainWindow(QMainWindow):
         if dialog.exec() == dialog.DialogCode.Accepted:
             self.refresh(keep_selection=True)
 
+    def _select_reminder(self, reminder_id: int) -> None:
+        reminder = self.storage.get_reminder(reminder_id)
+        if reminder is None:
+            return
+        self.selected_reminder = reminder_id
+        self.detail.show_reminder(reminder)
+
     def _toggle_reminder(self, reminder_id: int, done: bool) -> None:
         self.storage.set_reminder_done(reminder_id, done)
         self.refresh(keep_selection=True)
@@ -1421,6 +1665,7 @@ class MainWindow(QMainWindow):
             row = ReminderRow(reminder, self.colors)
             row.toggled.connect(self._toggle_reminder)
             row.activated.connect(self.open_reminder)
+            row.clicked.connect(self._select_reminder)
             item = QListWidgetItem()
             item.setSizeHint(QSize(0, self._row_height(row)))
             self.list.addItem(item)
@@ -1502,6 +1747,10 @@ class MainWindow(QMainWindow):
     def refresh(self, keep_selection: bool = True) -> None:
         previous = self.selected_id if keep_selection else None
         self.forget_sync()
+        if self.filter != GOALS:
+            self.selected_goal = None
+        if self.filter != REMINDERS:
+            self.selected_reminder = None
         stale_days = self.settings.get_int("stale_days", 5)
 
         if self.filter in JIRA_VIEWS and not self.search.text().strip():
@@ -1510,16 +1759,34 @@ class MainWindow(QMainWindow):
             self.detail.show_task(None)
             return
 
-        if self.filter == GOALS and not self.search.text().strip():
+        if self.filter == GOALS:
             self._refresh_chrome(stale_days)
             self._fill_goals()
-            self.detail.show_task(None)
+            goal = (
+                self.storage.get_goal(self.selected_goal)
+                if self.selected_goal is not None
+                else None
+            )
+            if goal is None:
+                self.selected_goal = None
+                self.detail.show_task(None)
+            else:
+                self.detail.show_goal(goal)
             return
 
-        if self.filter == REMINDERS and not self.search.text().strip():
+        if self.filter == REMINDERS:
             self._refresh_chrome(stale_days)
             self._fill_reminders()
-            self.detail.show_task(None)
+            reminder = (
+                self.storage.get_reminder(self.selected_reminder)
+                if self.selected_reminder is not None
+                else None
+            )
+            if reminder is None:
+                self.selected_reminder = None
+                self.detail.show_task(None)
+            else:
+                self.detail.show_reminder(reminder)
             return
 
         self.list.clear()
@@ -1591,9 +1858,19 @@ class MainWindow(QMainWindow):
         for key in JIRA_VIEWS:
             if key in self.nav_items:
                 self.nav_items[key].setVisible(self._jira_ready())
-        # Кнопка нужна только там, где цели и заводят.
+        # Цели и напоминания — не задачи: ни быстрый ввод задачи, ни поиск по
+        # задачам в их разделах не нужны, только своя кнопка «добавить».
+        own_section = self.filter in (GOALS, REMINDERS)
+        if hasattr(self, "quick_add"):
+            self.quick_add.setVisible(not own_section)
+        if hasattr(self, "search"):
+            self.search.setVisible(not own_section)
         if hasattr(self, "new_goal_button"):
             self.new_goal_button.setVisible(self.filter == GOALS)
+        if hasattr(self, "add_result_button"):
+            self.add_result_button.setVisible(
+                self.filter == GOALS and self.selected_goal is not None
+            )
         if hasattr(self, "new_reminder_button"):
             self.new_reminder_button.setVisible(self.filter == REMINDERS)
         if JIRA_SYNC in self.nav_items:

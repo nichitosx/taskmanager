@@ -1350,6 +1350,7 @@ class ReminderRow(Card):
 
     toggled = Signal(int, bool)
     activated = Signal(int)
+    clicked = Signal(int)     # выбрать напоминание — подробности справа
 
     def __init__(self, reminder, colors: dict[str, str], parent=None) -> None:
         super().__init__(colors, parent)
@@ -1425,6 +1426,10 @@ class ReminderRow(Card):
         super().resizeEvent(event)
         fit_title(self.title, self._text_width(self.width()))
 
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        self.clicked.emit(self.reminder.id)
+        super().mousePressEvent(event)
+
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         self.activated.emit(self.reminder.id)
         super().mouseDoubleClickEvent(event)
@@ -1438,6 +1443,7 @@ class GoalCard(Card):
     """
 
     activated = Signal(int)   # открыть цель
+    clicked = Signal(int)     # выбрать цель — подробности уйдут в правую панель
     toggled = Signal(int, bool)
 
     def __init__(self, goal, colors: dict[str, str], progress: tuple[int, int] = (0, 0),
@@ -1465,6 +1471,9 @@ class GoalCard(Card):
         font = theme.title_font(bold=True)
         font.setStrikeOut(goal.is_done)
         self.title.setFont(font)
+        self.title.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         self.title.setStyleSheet(
             "color: %s; background: transparent; %s"
             % (colors["text_faint"] if goal.is_done else colors["warning"],
@@ -1474,31 +1483,77 @@ class GoalCard(Card):
         layout.addLayout(head)
 
         done, total = progress
-        meta = FlowLayout(spacing=6)
-        meta.addWidget(Pill("цель квартала", colors["warning"], strong=True))
+        self.meta = FlowLayout(spacing=6)
+        self.meta.addWidget(Pill("цель квартала", colors["warning"], strong=True))
         if total:
-            meta.addWidget(
+            self.meta.addWidget(
                 Pill(
                     "%d/%d" % (done, total),
                     colors["success"] if done >= total else colors["text_dim"],
                     strong=done >= total,
                 )
             )
-        layout.addLayout(meta)
+        layout.addLayout(self.meta)
 
+        self.note = None
         if goal.comment.strip():
             # Комментарий к цели бывает длинным, а карточка — вывеска: первые
             # полторы строки и есть то, что нужно увидеть сразу.
             text = " ".join(goal.comment.split())
             if len(text) > 140:
                 text = text[:139].rstrip() + "…"
-            note = QLabel(text)
-            note.setWordWrap(True)
-            note.setFont(theme.mono_font(8))
-            note.setStyleSheet(
+            self.note = QLabel(text)
+            self.note.setWordWrap(True)
+            self.note.setFont(theme.mono_font(8))
+            self.note.setStyleSheet(
                 "color: %s; background: transparent;" % colors["text_dim"]
             )
-            layout.addWidget(note)
+            self.note.setSizePolicy(
+                QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+            )
+            layout.addWidget(self.note)
+
+    # --- Размеры --------------------------------------------------------------
+
+    def _text_width(self, width: int) -> int:
+        """Сколько остаётся тексту после полей и круглой отметки."""
+        layout = self.layout()
+        margins = layout.contentsMargins()
+        return width - margins.left() - margins.right()
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 (Qt naming)
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 (Qt naming)
+        """Высота карточки при такой ширине.
+
+        Считаем сами: у цели длинное название переносится на две-три строки,
+        а вложенная раскладка отмеряла ему одну — текст обрезался.
+        """
+        text_width = self._text_width(width)
+        if text_width <= 0:
+            return super().heightForWidth(width)
+        layout = self.layout()
+        margins = layout.contentsMargins()
+        # В первой строке рядом с названием стоит отметка.
+        head = max(
+            wrapped_height(self.title, text_width - self.check.width() - 10),
+            self.check.height(),
+        )
+        total = head + layout.spacing() + self.meta.heightForWidth(text_width)
+        if self.note is not None:
+            total += layout.spacing() + wrapped_height(self.note, text_width)
+        return margins.top() + total + margins.bottom()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        super().resizeEvent(event)
+        fit_title(self.title, self._text_width(self.width()) - self.check.width() - 10)
+        if self.note is not None:
+            fit_title(self.note, self._text_width(self.width()))
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        self.clicked.emit(self.goal.id)
+        super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         self.activated.emit(self.goal.id)
