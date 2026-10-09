@@ -66,6 +66,25 @@ class ConfluenceConfig:
         return base
 
 
+def _first_column_spans(rows: list[list[str]], start: int) -> dict[int, int]:
+    """На сколько строк растянуть каждую клетку первой колонки.
+
+    Пустая клетка под заполненной — продолжение той же ячейки: так в отчёте
+    подписан раздел «Выполнено» или «В работе». Строки, которые влились в
+    ячейку сверху, в ответе отсутствуют — свою клетку они не рисуют.
+    """
+    spans: dict[int, int] = {}
+    owner: int | None = None
+    for number in range(start, len(rows)):
+        first = rows[number][0] if rows[number] else ""
+        if first or owner is None:
+            spans[number] = 1
+            owner = number if first else None
+            continue
+        spans[owner] += 1
+    return spans
+
+
 def markdown_to_storage(markdown: str) -> str:
     """Простая конвертация нашего Markdown в storage format Confluence.
 
@@ -113,13 +132,29 @@ def markdown_to_storage(markdown: str) -> str:
 
             rows = [row for row in block if not is_separator(row)]
             has_header = len(block) > 1 and is_separator(block[1])
+            body = [cells(row) for row in rows]
+
+            # Подпись раздела пишется один раз, а ниже клетки пустые. В
+            # Confluence такая группа — одна высокая ячейка, поэтому считаем,
+            # на сколько строк её растянуть.
+            spans = _first_column_spans(body, 1 if has_header else 0)
+
             out.append('<table><tbody>')
-            for number, row in enumerate(rows):
+            for number, row in enumerate(body):
                 tag = "th" if (has_header and number == 0) else "td"
-                columns = "".join(
-                    "<%s>%s</%s>" % (tag, inline(cell), tag) for cell in cells(row)
-                )
-                out.append("<tr>%s</tr>" % columns)
+                columns = []
+                for position, cell in enumerate(row):
+                    if position == 0 and tag == "td":
+                        span = spans.get(number)
+                        if span is None:
+                            continue
+                        if span > 1:
+                            columns.append(
+                                '<td rowspan="%d">%s</td>' % (span, inline(cell))
+                            )
+                            continue
+                    columns.append("<%s>%s</%s>" % (tag, inline(cell), tag))
+                out.append("<tr>%s</tr>" % "".join(columns))
             out.append("</tbody></table>")
             continue
         heading = re.match(r"^(#{1,6})\s+(.*)$", line)

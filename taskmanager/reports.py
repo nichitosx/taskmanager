@@ -383,6 +383,26 @@ def _key_cell(key: str, jira_base: str, with_jira: bool) -> str:
     return key
 
 
+def _title_cell(title: str, key: str, jira_base: str, with_jira: bool) -> str:
+    """Название задачи. Если задача есть в Jira — ссылкой на неё же."""
+    title = _cell(title)
+    key = (key or "").strip()
+    base = (jira_base or "").strip().rstrip("/")
+    if not title or not key or not with_jira or not base:
+        return title
+    return "[%s](%s/browse/%s)" % (title, base, key)
+
+
+# Подпись раздела в первой колонке. В Confluence такая клетка объединяется на
+# всю группу — об этом знает markdown_to_storage.
+ROW_GROUPS = {
+    ROW_DONE_WITH_KEY: "Выполнено",
+    ROW_DONE_NO_KEY: "Выполнено",
+    ROW_NOTED_WITH_KEY: "В работе",
+    ROW_NOTED_NO_KEY: "В работе",
+}
+
+
 def render_week_table(
     data: dict,
     jira_base: str = "",
@@ -392,16 +412,19 @@ def render_week_table(
 ) -> list[str]:
     """Таблица работы за неделю для вставки в Confluence.
 
-    Три колонки: задача (ссылкой на Jira), тема и результат за неделю. Сначала
-    выполненное, потом то, по чему за неделю есть запись о работе: она тоже
-    результат. Задача, по которой за неделю ничего не записали, в таблицу не
-    попадает — писать в отчёт нечего.
+    Четыре колонки: статус, номер задачи (ссылкой на Jira), тема (тоже ссылкой)
+    и результат за неделю. Сначала выполненное, потом то, по чему за неделю
+    есть запись о работе: она тоже результат. Задача, по которой за неделю
+    ничего не записали, в таблицу не попадает — писать в отчёт нечего.
+
+    Статус пишется только в первой строке своей группы: ниже клетки пустые,
+    и при вставке в Confluence они сливаются в одну на всю группу.
 
     ``header`` выключается, когда таблицу вставляют в уже готовую страницу:
     там своя шапка, и вторая только мешает.
     """
     lines = (
-        ["| Задача | Тема | Результат за неделю |", "|---|---|---|"]
+        ["| Статус | Задача | Тема | Результат за неделю |", "|---|---|---|---|"]
         if header
         else []
     )
@@ -420,7 +443,8 @@ def render_week_table(
              (task.product or NO_PRODUCT).lower(),
              (task.title or "").lower()),
             _key_cell(task.jira_key, jira_base, with_jira),
-            facts.title(task) if facts else task.title,
+            _title_cell(facts.title(task) if facts else task.title,
+                        task.jira_key, jira_base, with_jira),
             "выполнено" if summary == NOTHING_DONE else summary,
         ))
 
@@ -442,7 +466,8 @@ def render_week_table(
              (task.product or NO_PRODUCT).lower(),
              (task.title or "").lower()),
             _key_cell(task.jira_key, jira_base, with_jira),
-            facts.title(task) if facts else task.title,
+            _title_cell(facts.title(task) if facts else task.title,
+                        task.jira_key, jira_base, with_jira),
             task_week_summary(data, task, facts),
         ))
 
@@ -456,16 +481,21 @@ def render_week_table(
         rows.append((
             (ROW_DONE_WITH_KEY, NO_PRODUCT, (issue.summary or "").lower()),
             _key_cell(issue.key, jira_base, with_jira),
-            issue.summary or issue.key,
+            _title_cell(issue.summary or issue.key, issue.key, jira_base, with_jira),
             issue.comment or "закрыта в Jira",
         ))
 
     rows.sort(key=lambda row: row[0])
-    for _, key_cell, title, summary in rows:
-        lines.append("| %s | %s | %s |" % (_cell(key_cell), _cell(title), _cell(summary)))
+    group = ""
+    for sort_key, key_cell, title, summary in rows:
+        label = ROW_GROUPS.get(sort_key[0], "")
+        # Подпись только в первой строке группы: ниже она «продолжается».
+        shown, group = ("" if label == group else label), label
+        lines.append("| %s | %s | %s | %s |"
+                     % (shown, _cell(key_cell), title, _cell(summary)))
 
     if len(lines) == (2 if header else 0):
-        lines.append("|  | — | за неделю ничего не отмечено |")
+        lines.append("|  |  | — | за неделю ничего не отмечено |")
     lines.append("")
     return lines
 
