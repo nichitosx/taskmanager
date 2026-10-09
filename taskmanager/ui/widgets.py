@@ -2018,6 +2018,151 @@ class PriorityBars(QWidget):
         super().leaveEvent(event)
 
 
+# --- ASCII по клеткам ---------------------------------------------------------
+# Пиксельные шрифты не моноширинные: у «#» и пробела разная ширина, и любой
+# рисунок из символов расползается. Поэтому символы расставляются по клеткам
+# вручную — так ASCII держит строй в любом шрифте.
+
+ASCII_FULL = "#"      # полная клетка столбика
+ASCII_HALF = ":"      # половинка сверху
+ASCII_BASE = "_"      # линия основания
+
+
+def ascii_chart(values: list[int], rows: int = 4) -> list[str]:
+    """Столбиковая диаграмма из символов: один столбец — одно значение.
+
+    Последняя строка — основание: без него столбики висят в воздухе и ряд
+    пустых дней не читается.
+    """
+    width = len(values)
+    top = max(values) if values else 0
+    if width == 0:
+        return []
+    if top <= 0:
+        return [" " * width for _ in range(rows)] + [ASCII_BASE * width]
+
+    lines = []
+    for row in range(rows, 0, -1):
+        line = ""
+        for value in values:
+            height = value / top * rows
+            if height >= row:
+                line += ASCII_FULL
+            elif height >= row - 0.5:
+                line += ASCII_HALF
+            else:
+                line += " "
+        lines.append(line)
+    lines.append(ASCII_BASE * width)
+    return lines
+
+
+def ascii_readout(label: str, value: str, width: int) -> str:
+    """Строка сводки: подпись, отточие и число у правого края."""
+    label, value = label.upper(), str(value)
+    dots = max(1, width - len(label) - len(value) - 2)
+    return "%s %s %s" % (label, "." * dots, value)
+
+
+def ascii_frame(lines: list[str], width: int = 0) -> list[str]:
+    """Обводит текст рамкой из плюсов и чёрточек."""
+    width = max([width] + [len(line) for line in lines])
+    edge = "+" + "-" * (width + 2) + "+"
+    return [edge] + ["| %-*s |" % (width, line) for line in lines] + [edge]
+
+
+class GridText(QWidget):
+    """Текст по сетке, как на терминале: каждый символ в своей клетке.
+
+    Цвет можно задать и всей строке, и отдельным символам — так столбики
+    диаграммы горят акцентом, а основание остаётся тихой линией.
+    """
+
+    def __init__(self, colors: dict[str, str], parent=None) -> None:
+        super().__init__(parent)
+        self.colors = colors
+        self._lines: list[tuple[str, str]] = []
+        self._ink: dict[str, str] = {}
+        self.setFont(theme.mono_font(8))
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        # Размер считается по сетке: раскладка не должна ни растягивать рисунок,
+        # ни обрезать последнюю строку.
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+    def set_ink(self, ink: dict[str, str]) -> None:
+        """Свой цвет для отдельных символов: {«#»: акцент, «_»: рамка}."""
+        self._ink = dict(ink)
+        self.update()
+
+    def set_lines(self, lines: list[tuple[str, str]]) -> None:
+        self._lines = list(lines)
+        self._fit()
+
+    def _fit(self) -> None:
+        """Просит у раскладки ровно столько места, сколько занимает сетка."""
+        self.setMinimumSize(self.sizeHint())
+        self.updateGeometry()
+        self.update()
+
+    def changeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        # Шрифт виджету достаётся дважды: сначала свой, потом из таблицы
+        # стилей. Со вторым меняется размер клетки — его надо пересчитать,
+        # иначе у рисунка обрезается то правый край, то нижняя строка.
+        if event.type() == QEvent.Type.FontChange:
+            self._fit()
+        super().changeEvent(event)
+
+    def text(self) -> str:
+        """Весь рисунок одной строкой — так его удобно проверять."""
+        return "\n".join(line for line, _ in self._lines)
+
+    def cell_width(self) -> int:
+        """Ширина клетки — по самому широкому символу рисунка.
+
+        Кириллица в пиксельных шрифтах шире латиницы: если мерить по «_»,
+        широкие буквы вылезают за свою клетку, и правый край обрезается.
+        """
+        metrics = self.fontMetrics()
+        used = {char for line, _ in self._lines for char in line}
+        return max(
+            [metrics.horizontalAdvance(ASCII_BASE)]
+            + [metrics.horizontalAdvance(char) for char in used]
+        )
+
+    def line_height(self) -> int:
+        return self.fontMetrics().height() + theme.line_extra()
+
+    def columns(self) -> int:
+        return max([0] + [len(line) for line, _ in self._lines])
+
+    def sizeHint(self) -> QSize:  # noqa: N802 (Qt naming)
+        return QSize(
+            self.columns() * self.cell_width(),
+            max(1, len(self._lines)) * self.line_height(),
+        )
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 (Qt naming)
+        return self.sizeHint()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        if not self._lines:
+            return
+        painter = QPainter(self)
+        painter.setFont(self.font())
+        metrics = self.fontMetrics()
+        cell, step = self.cell_width(), self.line_height()
+        baseline = metrics.ascent() + theme.line_extra() // 2
+        for row, (line, color) in enumerate(self._lines):
+            y = row * step + baseline
+            for column, char in enumerate(line):
+                if char == " ":
+                    continue
+                painter.setPen(QColor(self._ink.get(char, color)))
+                shift = (cell - metrics.horizontalAdvance(char)) // 2
+                painter.drawText(column * cell + shift, y, char)
+        painter.end()
+
+
 class DayProgress(QWidget):
     """Пиксельная шкала: сколько задач сегодня уже отмечено."""
 

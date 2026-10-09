@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from PySide6.QtCore import (
     QAbstractAnimation,
@@ -87,6 +87,13 @@ from .dialogs import (
 from .reports_ui import HistoryDialog, WeeklyReportDialog
 from .settings_dialog import SettingsDialog
 from .widgets import (
+    ASCII_BASE,
+    ASCII_FULL,
+    ASCII_HALF,
+    ascii_chart,
+    ascii_frame,
+    ascii_readout,
+    GridText,
     Card,
     DayIndicator,
     fit_to_screen,
@@ -234,22 +241,53 @@ class TaskDetail(QWidget):
         hint_layout.setContentsMargins(0, 30, 0, 0)
         hint_layout.setSpacing(14)
 
-        art = QLabel()
-        art.setPixmap(make_watermark(96, colors["text_faint"], 34))
-        art.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        art.setStyleSheet("background: transparent;")
-        hint_layout.addWidget(art)
+        if theme.is_pixel():
+            # В пиксельном стиле заставка набрана символами: та же подсказка,
+            # но на языке приборной панели.
+            art = GridText(colors)
+            art.set_ink({
+                "+": colors["border"],
+                "-": colors["border"],
+                "|": colors["border"],
+                ".": colors["text_faint"],
+                ">": colors["accent"],
+            })
+            art.set_lines([
+                (line, colors["text_faint"])
+                for line in ascii_frame([
+                    "",
+                    "  ЗАДАЧА НЕ ВЫБРАНА",
+                    "  ....................",
+                    "  > ВЫБЕРИТЕ СЛЕВА",
+                    "  > 2 КЛИКА - КАРТОЧКА",
+                    "  > ПРАВАЯ КНОПКА - МЕНЮ",
+                    "",
+                ])
+            ])
+            holder = QHBoxLayout()
+            holder.addStretch(1)
+            holder.addWidget(art)
+            holder.addStretch(1)
+            hint_layout.addLayout(holder)
+            self.placeholder_art = art
+        else:
+            art = QLabel()
+            art.setPixmap(make_watermark(96, colors["text_faint"], 34))
+            art.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            art.setStyleSheet("background: transparent;")
+            hint_layout.addWidget(art)
+            self.placeholder_art = art
 
-        text = QLabel(
-            theme.multiline(
-                "Выберите задачу слева.\n\nДвойной клик открывает карточку,\n"
-                "правая кнопка — быстрые действия."
+            text = QLabel(
+                theme.multiline(
+                    "Выберите задачу слева.\n\nДвойной клик открывает карточку,\n"
+                    "правая кнопка — быстрые действия."
+                )
             )
-        )
-        text.setProperty("faint", "true")
-        text.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        text.setWordWrap(True)
-        hint_layout.addWidget(text)
+            text.setProperty("faint", "true")
+            text.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            text.setWordWrap(True)
+            hint_layout.addWidget(text)
         hint_layout.addStretch(1)
         layout.addWidget(self.placeholder, 1)
 
@@ -1085,6 +1123,10 @@ class MainWindow(QMainWindow):
 
         layout.addStretch(1)
 
+        self.activity_box = self._activity_box()
+        layout.addWidget(self.activity_box)
+        layout.addSpacing(6)
+
         self.plans_box = self._plans_box()
         layout.addWidget(self.plans_box)
 
@@ -1093,6 +1135,59 @@ class MainWindow(QMainWindow):
         self.hint_trigger = HintTrigger(self.colors)
         layout.addWidget(self.hint_trigger)
         return panel
+
+    # Сколько дней показывает диаграмма активности. Две недели — столько же,
+    # сколько «без движения» считает задачу залежавшейся.
+    ACTIVITY_DAYS = 14
+
+    def _activity_box(self) -> QWidget:
+        """Окошко сводки: ASCII-диаграмма работы и два счётчика."""
+        c = self.colors
+        box = Card(c)
+        box.setCursor(Qt.CursorShape.PointingHandCursor)
+        box.setToolTip("Открыть отчёт за неделю")
+        box.mousePressEvent = lambda _event: self.open_weekly()  # type: ignore[assignment]
+
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(11, 9, 11, 9)
+        layout.setSpacing(6)
+        layout.addWidget(section_label("активность // %d дн." % self.ACTIVITY_DAYS))
+
+        self.activity_grid = GridText(c)
+        self.activity_grid.set_ink({
+            ASCII_FULL: c["accent"],
+            ASCII_HALF: c["accent"],
+            ASCII_BASE: c["border"],
+            ".": c["text_faint"],
+        })
+        layout.addWidget(self.activity_grid)
+        return box
+
+    def _sync_activity_box(self, stale_days: int) -> None:
+        """Пересчитывает диаграмму: по дню на столбик, снизу — два итога."""
+        c = self.colors
+        today = date.today()
+        start = today - timedelta(days=self.ACTIVITY_DAYS - 1)
+
+        per_day = {start + timedelta(days=i): 0 for i in range(self.ACTIVITY_DAYS)}
+        marks = 0
+        for log in self.storage.logs_in_range(start, today):
+            if log.log_date in per_day:
+                per_day[log.log_date] += 1
+                marks += 1
+
+        closed = 0
+        for task in self.storage.list_tasks(include_done=True):
+            if task.is_done and task.done_at and start <= task.done_at.date() <= today:
+                closed += 1
+
+        chart = ascii_chart([per_day[day] for day in sorted(per_day)], rows=4)
+        width = max(len(line) for line in chart) if chart else self.ACTIVITY_DAYS
+        lines = [(line, c["accent"]) for line in chart[:-1]]
+        lines.append((chart[-1], c["border"]))
+        lines.append((ascii_readout("отметок", marks, width), c["text_dim"]))
+        lines.append((ascii_readout("закрыто", closed, width), c["text_dim"]))
+        self.activity_grid.set_lines(lines)
 
     def _plans_box(self) -> QWidget:
         """Минималистичное окошко: что и через сколько дней начнётся."""
@@ -1884,6 +1979,7 @@ class MainWindow(QMainWindow):
         active_tasks = self.storage.list_tasks(include_done=False)
         self._sync_products_nav(active_tasks)
         self._sync_plans_box(active_tasks)
+        self._sync_activity_box(stale_days)
         for key in JIRA_VIEWS:
             if key in self.nav_items:
                 self.nav_items[key].setVisible(self._jira_ready())
