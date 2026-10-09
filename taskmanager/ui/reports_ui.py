@@ -107,6 +107,16 @@ class JiraDoneFetch(QThread):
             self.failed.emit("Не удалось спросить Jira: %s" % exc)
 
 
+def _rows_word(count: int) -> str:
+    """«строка», «строки» или «строк» — число рядом с ними живое."""
+    tail, hundred = count % 10, count % 100
+    if tail == 1 and hundred != 11:
+        return "строка"
+    if tail in (2, 3, 4) and hundred not in (12, 13, 14):
+        return "строки"
+    return "строк"
+
+
 class WeeklyReportDialog(QDialog):
     """Готовый отчёт за неделю плюс разбор задач без Jira."""
 
@@ -194,6 +204,15 @@ class WeeklyReportDialog(QDialog):
         self.jira_status.setFont(theme.mono_font(8))
         self.jira_status.setWordWrap(True)
         left_layout.addWidget(self.jira_status)
+
+        # Редактор Confluence вставляет таблицу в таблицу «поверх»: сколько
+        # строк вставляем, столько снизу и затрётся. Поэтому говорим число
+        # заранее — столько пустых строк нужно добавить перед вставкой.
+        self.table_hint = QLabel("")
+        self.table_hint.setProperty("faint", "true")
+        self.table_hint.setFont(theme.mono_font(8))
+        self.table_hint.setWordWrap(True)
+        left_layout.addWidget(self.table_hint)
 
         self.text_edit = QPlainTextEdit()
         self.text_edit.setFont(theme.mono_font(9))
@@ -311,6 +330,32 @@ class WeeklyReportDialog(QDialog):
         self.refresh(regenerate=True)
         self.status.setText("Отчёт пересобран %s" % GROUPING_LABELS[grouping])
 
+    def table_rows(self) -> int:
+        """Сколько строк в таблице отчёта — без шапки и разделителя."""
+        rows = 0
+        for line in self.content.splitlines():
+            line = line.strip()
+            if not line.startswith("|"):
+                continue
+            if set(line) <= set("|-: "):
+                continue
+            rows += 1
+        return rows
+
+    def _sync_table_hint(self) -> None:
+        """Подсказка про вставку — только там, где отчёт это таблица."""
+        if self.grouping != GROUPING_TABLE:
+            self.table_hint.setVisible(False)
+            return
+        rows = self.table_rows()
+        self.table_hint.setVisible(True)
+        self.table_hint.setText(
+            "В таблице %d %s. Confluence вставляет таблицу поверх существующих "
+            "строк, поэтому добавьте в неё столько же пустых строк перед "
+            "вставкой — иначе написанное ниже затрётся."
+            % (rows, _rows_word(rows))
+        )
+
     def _render_view(self) -> None:
         """Показывает отчёт: читаемым текстом или разметкой в режиме правки."""
         self.text_edit.setPlainText(
@@ -413,6 +458,7 @@ class WeeklyReportDialog(QDialog):
             facts=self.facts,
         )
         self._render_view()
+        self._sync_table_hint()
         self._sync_grouping_buttons()
         self._sync_navigation()
         self._fill_jira_list()
@@ -541,11 +587,14 @@ class WeeklyReportDialog(QDialog):
 
     def _copy(self) -> None:
         copy_report(self._content())
-        self.status.setText(
-            "Скопировано таблицей — вставляйте в Confluence как есть"
-            if self.grouping == GROUPING_TABLE
-            else "Отчёт скопирован в буфер обмена"
-        )
+        if self.grouping == GROUPING_TABLE:
+            rows = self.table_rows()
+            self.status.setText(
+                "Скопировано таблицей: %d %s. Столько строк Confluence и "
+                "перезапишет при вставке." % (rows, _rows_word(rows))
+            )
+        else:
+            self.status.setText("Отчёт скопирован в буфер обмена")
 
     def _export_obsidian(self) -> None:
         vault = self.settings.get("obsidian.vault_path", "")
