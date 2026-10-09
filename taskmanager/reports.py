@@ -106,6 +106,20 @@ class WeekRule:
             return week_start <= moment.date() <= week_start + timedelta(days=6)
         return self.cutoff(week_start - timedelta(days=7)) <= moment < self.cutoff(week_start)
 
+    def week_start_for(self, moment: Optional[datetime] = None) -> date:
+        """С какой даты начинается неделя, в которую попадает этот момент.
+
+        После рубежа работа идёт уже в следующий отчёт — значит и список
+        выполненного должен смотреть на следующую неделю, а не на календарную.
+        Иначе всё, сделанное вечером пятницы, пропадало бы из виду до
+        понедельника.
+        """
+        moment = moment or datetime.now()
+        start, _ = week_bounds(moment.date())
+        if self.enabled and moment >= self.cutoff(start):
+            start += timedelta(days=7)
+        return start
+
     def describe(self) -> str:
         return "%s, %s" % (WEEKDAY_NAMES[self.day], self.at.strftime("%H:%M"))
 
@@ -334,18 +348,23 @@ def task_week_summary(data: dict, task, facts: Optional[JiraFacts] = None) -> st
     return from_jira or NOTHING_DONE
 
 
-# В таблицу идёт только доведённое до конца: отчёт — о сделанном, а не о
-# планах. Сначала то, у чего есть задача в Jira, потом остальное; внутри
-# каждого раздела задачи одного продукта идут подряд.
+# Сначала доведённое до конца, потом работа, по которой за неделю есть запись:
+# она тоже результат, просто ещё не закрытый. Внутри каждого раздела задачи
+# одного продукта идут подряд.
 ROW_DONE_WITH_KEY = 0     # выполнено, есть задача в Jira
 ROW_DONE_NO_KEY = 1       # выполнено, задачи в Jira нет
+ROW_NOTED_WITH_KEY = 2    # за неделю была запись о работе, есть задача в Jira
+ROW_NOTED_NO_KEY = 3      # за неделю была запись о работе, задачи в Jira нет
 
 NO_PRODUCT = "\uffff"    # задачи без продукта уходят в конец раздела
 
 
-def _row_kind(task, with_jira: bool) -> int:
-    """К какому разделу таблицы относится выполненная задача."""
-    return ROW_DONE_WITH_KEY if (task.jira_key and with_jira) else ROW_DONE_NO_KEY
+def _row_kind(task, with_jira: bool, done: bool = True) -> int:
+    """К какому разделу таблицы относится задача."""
+    with_key = bool(task.jira_key and with_jira)
+    if done:
+        return ROW_DONE_WITH_KEY if with_key else ROW_DONE_NO_KEY
+    return ROW_NOTED_WITH_KEY if with_key else ROW_NOTED_NO_KEY
 
 
 def _cell(text: str) -> str:
@@ -371,10 +390,12 @@ def render_week_table(
     facts: Optional[JiraFacts] = None,
     header: bool = True,
 ) -> list[str]:
-    """Таблица выполненного за неделю для вставки в Confluence.
+    """Таблица работы за неделю для вставки в Confluence.
 
-    Три колонки: задача (ссылкой на Jira), тема и результат за неделю. То, что
-    ещё в работе, сюда не идёт — отчёт о сделанном.
+    Три колонки: задача (ссылкой на Jira), тема и результат за неделю. Сначала
+    выполненное, потом то, по чему за неделю есть запись о работе: она тоже
+    результат. Задача, по которой за неделю ничего не записали, в таблицу не
+    попадает — писать в отчёт нечего.
 
     ``header`` выключается, когда таблицу вставляют в уже готовую страницу:
     там своя шапка, и вторая только мешает.
@@ -391,8 +412,33 @@ def render_week_table(
     for task in data["completed"]:
         if task.jira_key:
             seen_keys.add(task.jira_key.upper())
+        # Про выполненное без записей в отчёте честнее сказать «выполнено», чем
+        # «ничего не отмечено»: результат есть, просто его не описали.
+        summary = task_week_summary(data, task, facts)
         rows.append((
             (_row_kind(task, with_jira),
+             (task.product or NO_PRODUCT).lower(),
+             (task.title or "").lower()),
+            _key_cell(task.jira_key, jira_base, with_jira),
+            facts.title(task) if facts else task.title,
+            "выполнено" if summary == NOTHING_DONE else summary,
+        ))
+
+    # Работа, которая за неделю куда-то продвинулась, но ещё не закрыта. Берём
+    # только то, по чему есть запись: без неё в графе результата пусто.
+    done_ids = {task.id for task in data["completed"]}
+    noted_ids = {
+        log.task_id
+        for log in data["logs"]
+        if log.task_id is not None and (log.comment or "").strip()
+    }
+    for task in data["touched"]:
+        if task.id in done_ids or task.id not in noted_ids:
+            continue
+        if task.jira_key:
+            seen_keys.add(task.jira_key.upper())
+        rows.append((
+            (_row_kind(task, with_jira, done=False),
              (task.product or NO_PRODUCT).lower(),
              (task.title or "").lower()),
             _key_cell(task.jira_key, jira_base, with_jira),
@@ -419,7 +465,7 @@ def render_week_table(
         lines.append("| %s | %s | %s |" % (_cell(key_cell), _cell(title), _cell(summary)))
 
     if len(lines) == (2 if header else 0):
-        lines.append("|  | — | за неделю ничего не выполнено |")
+        lines.append("|  | — | за неделю ничего не отмечено |")
     lines.append("")
     return lines
 

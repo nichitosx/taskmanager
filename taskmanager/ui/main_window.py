@@ -105,9 +105,14 @@ from .widgets import (
     section_label,
 )
 
-# Боковое меню делится на две части: «когда» — горизонты планирования,
+# Боковое меню делится на две части: «когда» — то, чем занят день,
 # «состояние» — то, что требует внимания независимо от сроков.
-HORIZON_FILTERS = [(key, HORIZON_LABELS[key]) for key in ("today", "week", "month", "planned")]
+#
+# Из горизонтов остался один: неделя, месяц и планы повторяли друг друга и
+# «Все активные», а выбирать между четырьмя почти одинаковыми списками
+# приходилось каждый раз заново. Плановые задачи видны внизу «Всех активных»
+# за чертой «плановые · N».
+HORIZON_FILTERS = [(key, HORIZON_LABELS[key]) for key in ("today",)]
 
 # Цели квартала: отдельный раздел и отдельная строка над списком задач.
 GOALS = "goals"
@@ -1094,8 +1099,8 @@ class MainWindow(QMainWindow):
         c = self.colors
         box = Card(c)
         box.setCursor(Qt.CursorShape.PointingHandCursor)
-        box.setToolTip("Открыть список плановых задач")
-        box.mousePressEvent = lambda _event: self.set_filter("planned")  # type: ignore[assignment]
+        box.setToolTip("Показать все активные задачи — плановые в конце списка")
+        box.mousePressEvent = lambda _event: self.set_filter("active")  # type: ignore[assignment]
 
         layout = QVBoxLayout(box)
         layout.setContentsMargins(11, 9, 11, 9)
@@ -1740,7 +1745,7 @@ class MainWindow(QMainWindow):
             # собрать отчёт, а не чтобы листать историю. Прошлые недели лежат
             # в «Истории отчётов».
             rule = WeekRule.from_settings(self.settings)
-            week_start, _ = week_bounds()
+            week_start = rule.week_start_for()
             tasks = [
                 task
                 for task in self.storage.list_tasks(include_done=True)
@@ -2067,9 +2072,6 @@ class MainWindow(QMainWindow):
         return {
             "active": "Задач нет. Введите первую в поле сверху.",
             "today": "На сегодня ничего не запланировано.",
-            "week": "На этой неделе задач со сроком нет.",
-            "month": "До конца месяца задач со сроком нет.",
-            "planned": "Плановых задач нет. Поставьте дату начала в карточке задачи.",
             "overdue": "Просроченных задач нет.",
             "stale": "Все задачи в движении.",
             "jira": "По всем задачам вопрос с Jira закрыт.",
@@ -2128,7 +2130,7 @@ class MainWindow(QMainWindow):
         self.quick_add.clear()
         # Остаёмся в текущем списке, только если новая задача в нём видна.
         if all(t.id != created.id for t in self.visible_tasks()):
-            self.filter = "planned" if created.is_planned else "active"
+            self.filter = "active"
         self.selected_id = created.id
         self.refresh()
 
@@ -2628,7 +2630,7 @@ class MainWindow(QMainWindow):
             return
         dialog = UpcomingTasksDialog(fresh, self.settings, self)
         if dialog.exec() == UpcomingTasksDialog.OPEN_LIST:
-            self.set_filter("planned")
+            self.set_filter("active")
 
     def _notify(self, title: str, message: str) -> None:
         if self.tray.isSystemTrayAvailable() and self.tray.supportsMessages():
