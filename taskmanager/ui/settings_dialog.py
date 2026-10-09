@@ -131,6 +131,15 @@ class SettingsDialog(QDialog):
             self.theme_box.addItem(title, key)
         form.addRow("Оформление", self.theme_box)
 
+        self.scale_box = QComboBox()
+        for step in theme.SCALE_STEPS:
+            self.scale_box.addItem("%d%%" % step, step)
+        self.scale_box.setToolTip(
+            "Размер всего интерфейса. За ноутбуком удобнее мельче, "
+            "за большим монитором — крупнее."
+        )
+        form.addRow("Масштаб", self.scale_box)
+
         self.style_box = QComboBox()
         for key, title in theme.STYLE_LABELS.items():
             self.style_box.addItem(title, key)
@@ -937,6 +946,8 @@ class SettingsDialog(QDialog):
         self.update_check_box.setChecked(bool(s.get("updates.check_on_start", True)))
         index = self.theme_box.findData(s.get("theme", "dark"))
         self.theme_box.setCurrentIndex(max(index, 0))
+        index = self.scale_box.findData(s.get_int("ui_scale", theme.DEFAULT_SCALE))
+        self.scale_box.setCurrentIndex(max(index, 0))
         index = self.style_box.findData(s.get("ui_style", theme.STYLE_SOFT))
         self.style_box.setCurrentIndex(max(index, 0))
         self._fill_fonts()
@@ -1110,6 +1121,7 @@ class SettingsDialog(QDialog):
     def _save(self) -> None:
         s = self.settings
         s.set("theme", self.theme_box.currentData())
+        s.set("ui_scale", self.scale_box.currentData())
         s.set("ui_style", self.style_box.currentData())
         s.set("pixel_font", self.pixel_font_box.currentData() or "")
         s.set("stale_days", self.stale_spin.value())

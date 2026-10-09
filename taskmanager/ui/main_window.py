@@ -87,12 +87,10 @@ from .dialogs import (
 from .reports_ui import HistoryDialog, WeeklyReportDialog
 from .settings_dialog import SettingsDialog
 from .widgets import (
-    ASCII_BASE,
-    ASCII_FULL,
-    ASCII_HALF,
     ascii_chart,
     ascii_frame,
     ascii_readout,
+    chart_glyphs,
     GridText,
     Card,
     DayIndicator,
@@ -111,6 +109,9 @@ from .widgets import (
     hline,
     section_label,
 )
+
+# Ширина боковой панели: в неё помещается самый длинный пункт меню.
+SIDEBAR_WIDTH = 216
 
 # Боковое меню делится на две части: «когда» — то, чем занят день,
 # «состояние» — то, что требует внимания независимо от сроков.
@@ -241,53 +242,38 @@ class TaskDetail(QWidget):
         hint_layout.setContentsMargins(0, 30, 0, 0)
         hint_layout.setSpacing(14)
 
-        if theme.is_pixel():
-            # В пиксельном стиле заставка набрана символами: та же подсказка,
-            # но на языке приборной панели.
-            art = GridText(colors)
-            art.set_ink({
-                "+": colors["border"],
-                "-": colors["border"],
-                "|": colors["border"],
-                ".": colors["text_faint"],
-                ">": colors["accent"],
-            })
-            art.set_lines([
-                (line, colors["text_faint"])
-                for line in ascii_frame([
-                    "",
-                    "  ЗАДАЧА НЕ ВЫБРАНА",
-                    "  ....................",
-                    "  > ВЫБЕРИТЕ СЛЕВА",
-                    "  > 2 КЛИКА - КАРТОЧКА",
-                    "  > ПРАВАЯ КНОПКА - МЕНЮ",
-                    "",
-                ])
+        # Заставка набрана знаками в любом стиле: пиксельный шрифт — лишь один
+        # из вариантов, а рамки и стрелки найдутся в любом системном.
+        arrow, dot = theme.glyph("arrow"), theme.glyph("dot")
+        art = GridText(colors)
+        art.set_ink({
+            theme.glyph("line_h"): colors["border"],
+            theme.glyph("line_v"): colors["border"],
+            theme.glyph("corner_tl"): colors["border"],
+            theme.glyph("corner_tr"): colors["border"],
+            theme.glyph("corner_bl"): colors["border"],
+            theme.glyph("corner_br"): colors["border"],
+            dot: colors["text_faint"],
+            arrow: colors["accent"],
+        })
+        art.set_lines([
+            (line, colors["text_dim"])
+            # Строки короткие: рисунок должен влезать и в системный шрифт,
+            # у которого клетка заметно шире пиксельной.
+            for line in ascii_frame([
+                "ЗАДАЧА НЕ ВЫБРАНА",
+                dot * 17,
+                "%s ВЫБЕРИТЕ СЛЕВА" % arrow,
+                "%s 2 КЛИКА %s ПРАВКА" % (arrow, theme.glyph("line_h")),
+                "%s ПКМ %s МЕНЮ" % (arrow, theme.glyph("line_h")),
             ])
-            holder = QHBoxLayout()
-            holder.addStretch(1)
-            holder.addWidget(art)
-            holder.addStretch(1)
-            hint_layout.addLayout(holder)
-            self.placeholder_art = art
-        else:
-            art = QLabel()
-            art.setPixmap(make_watermark(96, colors["text_faint"], 34))
-            art.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            art.setStyleSheet("background: transparent;")
-            hint_layout.addWidget(art)
-            self.placeholder_art = art
-
-            text = QLabel(
-                theme.multiline(
-                    "Выберите задачу слева.\n\nДвойной клик открывает карточку,\n"
-                    "правая кнопка — быстрые действия."
-                )
-            )
-            text.setProperty("faint", "true")
-            text.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            text.setWordWrap(True)
-            hint_layout.addWidget(text)
+        ])
+        holder = QHBoxLayout()
+        holder.addStretch(1)
+        holder.addWidget(art)
+        holder.addStretch(1)
+        hint_layout.addLayout(holder)
+        self.placeholder_art = art
         hint_layout.addStretch(1)
         layout.addWidget(self.placeholder, 1)
 
@@ -722,6 +708,7 @@ class MainWindow(QMainWindow):
         self._jira_thread: JiraFetch | None = None
         self._shown_filter = ""
         theme.set_style(settings.get("ui_style", theme.STYLE_SOFT))
+        theme.set_scale(settings.get("ui_scale", theme.DEFAULT_SCALE))
         theme.set_preferred_pixel(settings.get("pixel_font", ""))
         self.colors = theme.palette(settings.get("theme", "dark"))
         self._force_quit = False
@@ -769,7 +756,7 @@ class MainWindow(QMainWindow):
         body_layout.setSpacing(0)
         root.addWidget(body, 1)
 
-        body_layout.addWidget(self._sidebar())
+        body_layout.addWidget(self._sidebar_scroll())
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         body_layout.addWidget(splitter, 1)
@@ -1029,10 +1016,26 @@ class MainWindow(QMainWindow):
 
         return header
 
+    def _sidebar_scroll(self) -> QWidget:
+        """Панель в прокрутке: с Jira, продуктами и сводкой она не всегда влезает.
+
+        Без этого нижние окошки — сводка активности и ближайшие планы —
+        сжимались до обрезанных строк, стоило добавить пару разделов.
+        """
+        area = QScrollArea()
+        area.setObjectName("sidebarScroll")
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.Shape.NoFrame)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        area.setWidget(self._sidebar())
+        area.setFixedWidth(theme.px(SIDEBAR_WIDTH) + 8)
+        self.sidebar_scroll = area
+        return area
+
     def _sidebar(self) -> QWidget:
         panel = QWidget()
         panel.setObjectName("sidebarPanel")
-        panel.setFixedWidth(216)
+        panel.setFixedWidth(theme.px(SIDEBAR_WIDTH))
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 4, 0, 0)
         layout.setSpacing(theme.nav_spacing())
@@ -1122,6 +1125,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.products_scroll)
 
         layout.addStretch(1)
+        layout.addSpacing(4)
 
         self.activity_box = self._activity_box()
         layout.addWidget(self.activity_box)
@@ -1151,14 +1155,16 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(box)
         layout.setContentsMargins(11, 9, 11, 9)
         layout.setSpacing(6)
-        layout.addWidget(section_label("активность // %d дн." % self.ACTIVITY_DAYS))
+        # Подпись короткая: в узкой панели длинная обрезается на полуслове.
+        layout.addWidget(section_label("активность // %dд" % self.ACTIVITY_DAYS))
 
         self.activity_grid = GridText(c)
+        full, half, base = chart_glyphs()
         self.activity_grid.set_ink({
-            ASCII_FULL: c["accent"],
-            ASCII_HALF: c["accent"],
-            ASCII_BASE: c["border"],
-            ".": c["text_faint"],
+            full: c["accent"],
+            half: c["accent"],
+            base: c["border"],
+            theme.glyph("dot"): c["text_faint"],
         })
         layout.addWidget(self.activity_grid)
         return box
@@ -1184,6 +1190,14 @@ class MainWindow(QMainWindow):
         chart = ascii_chart([per_day[day] for day in sorted(per_day)], rows=4)
         width = max(len(line) for line in chart) if chart else self.ACTIVITY_DAYS
         lines = [(line, c["accent"]) for line in chart[:-1]]
+        # Цвета знаков могли устареть: тема сменилась, а то и шрифт.
+        full, half, base = chart_glyphs()
+        self.activity_grid.set_ink({
+            full: c["accent"],
+            half: c["accent"],
+            base: c["border"],
+            theme.glyph("dot"): c["text_faint"],
+        })
         lines.append((chart[-1], c["border"]))
         lines.append((ascii_readout("отметок", marks, width), c["text_dim"]))
         lines.append((ascii_readout("закрыто", closed, width), c["text_dim"]))
@@ -2663,6 +2677,7 @@ class MainWindow(QMainWindow):
         """Перекрашивает приложение после смены темы или стиля в настройках."""
         name = self.settings.get("theme", "dark")
         theme.set_style(self.settings.get("ui_style", theme.STYLE_SOFT))
+        theme.set_scale(self.settings.get("ui_scale", theme.DEFAULT_SCALE))
         theme.set_preferred_pixel(self.settings.get("pixel_font", ""))
         self.colors = theme.palette(name)
         app = QApplication.instance()

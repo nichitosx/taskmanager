@@ -20,7 +20,7 @@ from PySide6.QtCore import (
     Qt,
     Signal,
 )
-from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QAbstractButton,
     QFrame,
@@ -195,7 +195,7 @@ BRACKET_WIDTH = 2
 
 def paint_brackets(painter: QPainter, rect: QRectF, color: str) -> None:
     """Рисует по уголку в каждом углу — как на приборных панелях."""
-    length = min(float(BRACKET_LENGTH), rect.width() / 3, rect.height() / 3)
+    length = min(float(theme.px(BRACKET_LENGTH)), rect.width() / 3, rect.height() / 3)
     if length < 3:
         return
     pen = QPen(QColor(color), BRACKET_WIDTH)
@@ -591,7 +591,7 @@ class Pill(QLabel):
         super().__init__(text, parent)
         self.setFont(theme.small_font())
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setFixedHeight(PILL_HEIGHT)
+        self.setFixedHeight(theme.px(PILL_HEIGHT))
         # В пиксельном стиле метка — рамка в нитку почти без заливки: так она
         # читается как подпись на приборе, а не как цветная наклейка.
         pixel = theme.is_pixel()
@@ -2023,9 +2023,14 @@ class PriorityBars(QWidget):
 # рисунок из символов расползается. Поэтому символы расставляются по клеткам
 # вручную — так ASCII держит строй в любом шрифте.
 
-ASCII_FULL = "#"      # полная клетка столбика
-ASCII_HALF = ":"      # половинка сверху
-ASCII_BASE = "_"      # линия основания
+ASCII_FULL = "#"      # запасные знаки на случай, если в системе нет ни одного
+ASCII_HALF = ":"      # шрифта с рамками и столбиками
+ASCII_BASE = "_"
+
+
+def chart_glyphs() -> tuple[str, str, str]:
+    """Полная клетка, половинка и основание — лучшее, что нашлось в системе."""
+    return theme.glyph("full"), theme.glyph("half"), theme.glyph("base")
 
 
 def ascii_chart(values: list[int], rows: int = 4) -> list[str]:
@@ -2034,12 +2039,13 @@ def ascii_chart(values: list[int], rows: int = 4) -> list[str]:
     Последняя строка — основание: без него столбики висят в воздухе и ряд
     пустых дней не читается.
     """
+    full, half, base = chart_glyphs()
     width = len(values)
     top = max(values) if values else 0
     if width == 0:
         return []
     if top <= 0:
-        return [" " * width for _ in range(rows)] + [ASCII_BASE * width]
+        return [" " * width for _ in range(rows)] + [base * width]
 
     lines = []
     for row in range(rows, 0, -1):
@@ -2047,13 +2053,13 @@ def ascii_chart(values: list[int], rows: int = 4) -> list[str]:
         for value in values:
             height = value / top * rows
             if height >= row:
-                line += ASCII_FULL
+                line += full
             elif height >= row - 0.5:
-                line += ASCII_HALF
+                line += half
             else:
                 line += " "
         lines.append(line)
-    lines.append(ASCII_BASE * width)
+    lines.append(base * width)
     return lines
 
 
@@ -2061,14 +2067,20 @@ def ascii_readout(label: str, value: str, width: int) -> str:
     """Строка сводки: подпись, отточие и число у правого края."""
     label, value = label.upper(), str(value)
     dots = max(1, width - len(label) - len(value) - 2)
-    return "%s %s %s" % (label, "." * dots, value)
+    return "%s %s %s" % (label, theme.glyph("dot") * dots, value)
 
 
 def ascii_frame(lines: list[str], width: int = 0) -> list[str]:
-    """Обводит текст рамкой из плюсов и чёрточек."""
+    """Обводит текст рамкой: линиями, если шрифт их знает, иначе плюсами."""
     width = max([width] + [len(line) for line in lines])
-    edge = "+" + "-" * (width + 2) + "+"
-    return [edge] + ["| %-*s |" % (width, line) for line in lines] + [edge]
+    horizontal = theme.glyph("line_h") * (width + 2)
+    vertical = theme.glyph("line_v")
+    top = theme.glyph("corner_tl") + horizontal + theme.glyph("corner_tr")
+    bottom = theme.glyph("corner_bl") + horizontal + theme.glyph("corner_br")
+    body = [
+        "%s %-*s %s" % (vertical, width, line, vertical) for line in lines
+    ]
+    return [top] + body + [bottom]
 
 
 class GridText(QWidget):
@@ -2083,6 +2095,7 @@ class GridText(QWidget):
         self.colors = colors
         self._lines: list[tuple[str, str]] = []
         self._ink: dict[str, str] = {}
+        self._fonts: dict[str, QFont] = {}
         self.setFont(theme.mono_font(8))
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         # Размер считается по сетке: раскладка не должна ни растягивать рисунок,
@@ -2100,6 +2113,7 @@ class GridText(QWidget):
 
     def _fit(self) -> None:
         """Просит у раскладки ровно столько места, сколько занимает сетка."""
+        self._fonts.clear()
         self.setMinimumSize(self.sizeHint())
         self.updateGeometry()
         self.update()
@@ -2122,12 +2136,11 @@ class GridText(QWidget):
         Кириллица в пиксельных шрифтах шире латиницы: если мерить по «_»,
         широкие буквы вылезают за свою клетку, и правый край обрезается.
         """
-        metrics = self.fontMetrics()
         used = {char for line, _ in self._lines for char in line}
-        return max(
-            [metrics.horizontalAdvance(ASCII_BASE)]
-            + [metrics.horizontalAdvance(char) for char in used]
-        )
+        widths = [self.fontMetrics().horizontalAdvance("0")]
+        for char in used:
+            widths.append(QFontMetrics(self._font_for(char)).horizontalAdvance(char))
+        return max(widths)
 
     def line_height(self) -> int:
         return self.fontMetrics().height() + theme.line_extra()
@@ -2144,11 +2157,22 @@ class GridText(QWidget):
     def minimumSizeHint(self) -> QSize:  # noqa: N802 (Qt naming)
         return self.sizeHint()
 
+    def _font_for(self, char: str) -> QFont:
+        """Шрифт для знака: свой, а для рамок и столбиков — запасной."""
+        if char not in self._fonts:
+            family = theme.glyph_family(char, self.font().family())
+            if family == self.font().family():
+                self._fonts[char] = self.font()
+            else:
+                font = QFont(self.font())
+                font.setFamily(family)
+                self._fonts[char] = font
+        return self._fonts[char]
+
     def paintEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         if not self._lines:
             return
         painter = QPainter(self)
-        painter.setFont(self.font())
         metrics = self.fontMetrics()
         cell, step = self.cell_width(), self.line_height()
         baseline = metrics.ascent() + theme.line_extra() // 2
@@ -2157,8 +2181,10 @@ class GridText(QWidget):
             for column, char in enumerate(line):
                 if char == " ":
                     continue
+                font = self._font_for(char)
+                painter.setFont(font)
                 painter.setPen(QColor(self._ink.get(char, color)))
-                shift = (cell - metrics.horizontalAdvance(char)) // 2
+                shift = (cell - QFontMetrics(font).horizontalAdvance(char)) // 2
                 painter.drawText(column * cell + shift, y, char)
         painter.end()
 
@@ -2175,8 +2201,9 @@ class DayProgress(QWidget):
         self.colors = colors
         self._filled = 0
         self._complete = False
+        self.block, self.gap = theme.px(self.BLOCK), theme.px(self.GAP)
         self.setFixedSize(
-            self.SEGMENTS * self.BLOCK + (self.SEGMENTS - 1) * self.GAP, 12
+            self.SEGMENTS * self.block + (self.SEGMENTS - 1) * self.gap, theme.px(12)
         )
 
     def set_values(self, done: int, total: int, complete: bool = False) -> None:
@@ -2195,9 +2222,9 @@ class DayProgress(QWidget):
         active = QColor(c["success"] if self._complete else c["accent"])
         empty = QColor(c["border"])
         for index in range(self.SEGMENTS):
-            x = index * (self.BLOCK + self.GAP)
+            x = index * (self.block + self.gap)
             painter.setBrush(active if index < self._filled else empty)
-            painter.drawRect(x, 1, self.BLOCK, 10)
+            painter.drawRect(x, 1, self.block, self.height() - 2)
         painter.end()
 
 

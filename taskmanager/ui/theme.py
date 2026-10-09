@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import re
+
 from PySide6.QtGui import QFont, QFontDatabase
 
 # --- Палитры ------------------------------------------------------------------
@@ -230,6 +232,40 @@ def current_style() -> str:
     return _style
 
 
+# --- Масштаб ------------------------------------------------------------------
+# За ноутбуком хочется интерфейс помельче, за большим монитором — покрупнее.
+# Масштабируются размеры шрифтов и все расстояния в таблице стилей: один
+# множитель вместо второго комплекта размеров на каждый случай.
+
+SCALE_STEPS = (80, 90, 100, 110, 125, 150)
+DEFAULT_SCALE = 100
+
+_scale = 1.0
+
+
+def set_scale(percent) -> None:
+    """Запоминает масштаб. Слишком мелкое и слишком крупное подрезаем."""
+    global _scale
+    try:
+        value = int(percent)
+    except (TypeError, ValueError):
+        value = DEFAULT_SCALE
+    _scale = max(min(value, max(SCALE_STEPS)), min(SCALE_STEPS)) / 100
+
+
+def scale() -> float:
+    return _scale
+
+
+def scale_percent() -> int:
+    return round(_scale * 100)
+
+
+def px(value: float, minimum: int = 1) -> int:
+    """Размер в пикселях с учётом масштаба — но не меньше minimum."""
+    return max(minimum, round(value * _scale))
+
+
 _colors: dict[str, str] = dict(DARK)
 
 
@@ -252,7 +288,8 @@ def is_pixel() -> bool:
 
 
 def radius(kind: str = "card") -> int:
-    return RADII.get(_style, RADII[STYLE_SOFT]).get(kind, 0)
+    value = RADII.get(_style, RADII[STYLE_SOFT]).get(kind, 0)
+    return px(value, 0) if value else 0
 
 
 # Акцентный шрифт пиксельного стиля: им набраны заголовки, подписи разделов,
@@ -309,7 +346,7 @@ def mono_font(size: int = 9, bold: bool = False, spacing: float = 0.0) -> QFont:
     размер крупнее — у таких шрифтов маленькая высота строчных букв.
     """
     family = pixel_family() if is_pixel() else mono_family()
-    font = QFont(family, size + FONT_BUMP)
+    font = QFont(family, px(size + FONT_BUMP, 5))
     font.setBold(bold)
     if spacing:
         font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, spacing)
@@ -367,7 +404,7 @@ def accent_font(size: int = 9, bold: bool = False, spacing: float = 0.0) -> QFon
     В пиксельном стиле это самое заметное отличие: вывески набраны пиксельным
     шрифтом, а текст задач остаётся читаемым моноширинным.
     """
-    font = QFont(accent_family(), size + FONT_BUMP)
+    font = QFont(accent_family(), px(size + FONT_BUMP, 5))
     font.setBold(bold)
     if spacing:
         font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, spacing)
@@ -375,7 +412,7 @@ def accent_font(size: int = 9, bold: bool = False, spacing: float = 0.0) -> QFon
 
 
 def ui_font(size: int = 10, bold: bool = False) -> QFont:
-    font = QFont(pixel_family() if is_pixel() else ui_family(), size + FONT_BUMP)
+    font = QFont(pixel_family() if is_pixel() else ui_family(), px(size + FONT_BUMP, 5))
     font.setBold(bold)
     return font
 
@@ -388,7 +425,7 @@ def title_px() -> int:
     не совпадали, высота строки считалась по одному шрифту, а текст рисовался
     другим — и вторая строка названия не влезала.
     """
-    return 16 if is_pixel() else 17
+    return px(16 if is_pixel() else 17, 8)
 
 
 def title_font(bold: bool = False) -> QFont:
@@ -418,7 +455,7 @@ def title_css(bold: bool = False) -> str:
 
 def small_font_px() -> int:
     """Размер шрифта мелких меток в пикселях (не в пунктах — не зависит от DPI)."""
-    return 13 if is_pixel() else 12
+    return px(13 if is_pixel() else 12, 7)
 
 
 def small_font() -> QFont:
@@ -452,7 +489,7 @@ def nav_padding() -> tuple[int, int]:
     В мягком стиле меню плотное — списки «когда» и «состояние» занимают меньше
     места; в пиксельном воздуха больше, там строки крупнее.
     """
-    return (10, 8) if is_pixel() else (10, 4)
+    return (px(10), px(8)) if is_pixel() else (px(10), px(4))
 
 
 def nav_spacing() -> int:
@@ -463,12 +500,12 @@ def nav_spacing() -> int:
     """
     # Пиксельный шрифт крупный и плотный — ему нужен воздух; системный тоньше
     # и мельче, и при таком же шаге список выглядел разреженным.
-    return 5 if is_pixel() else 2
+    return px(5) if is_pixel() else px(2)
 
 
 def section_gap() -> int:
     """Отступ между разделами бокового меню."""
-    return 12 if is_pixel() else 9
+    return px(12) if is_pixel() else px(9)
 
 
 def line_height_percent() -> int:
@@ -481,7 +518,7 @@ def line_height_percent() -> int:
 
 def line_extra() -> int:
     """Дополнительный воздух между строками внутри карточек, в пикселях."""
-    return 4 if is_pixel() else 0
+    return px(4, 0) if is_pixel() else 0
 
 
 def multiline(text: str) -> str:
@@ -511,6 +548,80 @@ def apply_text_spacing(edit) -> None:
     cursor.mergeBlockFormat(block)
     cursor.clearSelection()
     edit.setTextCursor(cursor)
+
+
+# --- Символы, которых нет в пиксельных шрифтах --------------------------------
+# Пиксельные шрифты знают латиницу, кириллицу и знаки препинания — и всё. Рамок
+# и столбиков в них нет. Но шрифты можно смешивать: буквы остаются пиксельными,
+# а каждый недостающий знак рисуется тем системным шрифтом, где он есть.
+
+GLYPH_FALLBACKS = (
+    "Consolas",
+    "Cascadia Mono",
+    "Lucida Console",
+    "DejaVu Sans Mono",
+    "Courier New",
+    "Segoe UI Symbol",
+)
+
+# Для каждого знака — красивый вариант и запасной из чистого ASCII на случай,
+# если ни один шрифт в системе его не знает.
+GLYPHS = {
+    "full": ("\u2588", "#"),      # полная клетка столбика
+    "half": ("\u2584", ":"),      # половинка снизу
+    "base": ("\u2500", "_"),      # линия основания
+    "corner_tl": ("\u250c", "+"),
+    "corner_tr": ("\u2510", "+"),
+    "corner_bl": ("\u2514", "+"),
+    "corner_br": ("\u2518", "+"),
+    "line_h": ("\u2500", "-"),
+    "line_v": ("\u2502", "|"),
+    "dot": ("\u00b7", "."),
+    "arrow": ("\u203a", ">"),
+}
+
+_glyph_cache: dict[str, str] = {}
+_family_cache: dict[tuple[str, int], bool] = {}
+
+
+def _family_has(family: str, code: int) -> bool:
+    """Есть ли знак в шрифте. QRawFont не врёт, в отличие от QFontMetrics."""
+    key = (family, code)
+    if key not in _family_cache:
+        from PySide6.QtGui import QRawFont
+
+        font = QFont(family)
+        font.setPixelSize(14)
+        try:
+            _family_cache[key] = QRawFont.fromFont(font).supportsCharacter(code)
+        except Exception:
+            _family_cache[key] = False
+    return _family_cache[key]
+
+
+def glyph_family(char: str, base: str) -> str:
+    """Каким шрифтом рисовать этот знак: своим или одним из запасных."""
+    if not char:
+        return base
+    code = ord(char[0])
+    if code < 128 or _family_has(base, code):
+        return base
+    for family in GLYPH_FALLBACKS:
+        if _family_has(family, code):
+            return family
+    return base
+
+
+def glyph(name: str) -> str:
+    """Знак для рисунка: красивый, если его знает хоть один шрифт в системе."""
+    if name not in _glyph_cache:
+        nice, plain = GLYPHS.get(name, ("", ""))
+        code = ord(nice) if nice else 0
+        known = bool(nice) and any(
+            _family_has(family, code) for family in GLYPH_FALLBACKS
+        )
+        _glyph_cache[name] = nice if known else plain
+    return _glyph_cache[name]
 
 
 def mix(color: str, base: str, alpha: float) -> str:
@@ -605,6 +716,17 @@ def pattern_image(theme: str) -> str:
     return str(path).replace("\\", "/")
 
 
+def _scaled_css(css: str) -> str:
+    """Умножает все размеры в пикселях на масштаб интерфейса.
+
+    Так один множитель меняет и отступы, и шрифты, и толщину линий — вместо
+    второго комплекта размеров на каждый случай.
+    """
+    if abs(_scale - 1.0) < 0.001:
+        return css
+    return re.sub(r"(\d+)px", lambda found: "%dpx" % px(int(found.group(1)), 1), css)
+
+
 def stylesheet(theme: str, style: str | None = None) -> str:
     if style is not None:
         set_style(style)
@@ -630,7 +752,7 @@ def stylesheet(theme: str, style: str | None = None) -> str:
     c["letter_spacing"] = "letter-spacing: 0.4px;" if is_pixel() else ""
     icon = check_icon()
     c["check_rule"] = ('image: url("%s");' % icon) if icon else ""
-    return """
+    return _scaled_css("""
 * {
     outline: none;
 }
@@ -876,4 +998,4 @@ QMenu {
 QMenu::item { padding: 7px 22px 7px 14px; border-radius: %(r_small)dpx; }
 QMenu::item:selected { background: %(surface_hover)s; }
 QMenu::separator { height: 1px; background: %(border)s; margin: 4px 6px; }
-""" % c
+""" % c)
