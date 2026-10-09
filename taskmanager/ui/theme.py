@@ -364,6 +364,28 @@ def apply_text_spacing(edit) -> None:
     edit.setTextCursor(cursor)
 
 
+def mix(color: str, base: str, alpha: float) -> str:
+    """Смешивает цвет с фоном и отдаёт обычный #rrggbb.
+
+    В отличие от tint, годится и для QColor: тот понимает только настоящие
+    цвета, а строку rgba(...) молча превращает в чёрный.
+    """
+    def parts(value: str) -> tuple[int, int, int]:
+        value = (value or "").lstrip("#")
+        if len(value) == 3:
+            value = "".join(ch * 2 for ch in value)
+        return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))  # type: ignore[return-value]
+
+    try:
+        front, back = parts(color), parts(base)
+    except (ValueError, IndexError):
+        return base
+    alpha = max(0.0, min(1.0, alpha))
+    return "#%02x%02x%02x" % tuple(
+        round(back[i] + (front[i] - back[i]) * alpha) for i in range(3)
+    )
+
+
 def tint(color: str, alpha: float) -> str:
     """Полупрозрачная версия цвета для подложек «пилюль» и рамок.
 

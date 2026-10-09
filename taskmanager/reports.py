@@ -334,21 +334,18 @@ def task_week_summary(data: dict, task, facts: Optional[JiraFacts] = None) -> st
     return from_jira or NOTHING_DONE
 
 
-# Порядок разделов отчёта: сначала то, что доведено до конца, потом то, что
-# в работе. Внутри каждого раздела задачи одного продукта идут подряд.
+# В таблицу идёт только доведённое до конца: отчёт — о сделанном, а не о
+# планах. Сначала то, у чего есть задача в Jira, потом остальное; внутри
+# каждого раздела задачи одного продукта идут подряд.
 ROW_DONE_WITH_KEY = 0     # выполнено, есть задача в Jira
 ROW_DONE_NO_KEY = 1       # выполнено, задачи в Jira нет
-ROW_ACTIVE_NOTED = 2      # в работе, но что-то по ней отмечено
-ROW_ACTIVE_JIRA = 3       # просто висит в работе в Jira
 
 NO_PRODUCT = "\uffff"    # задачи без продукта уходят в конец раздела
 
 
-def _row_kind(task, done_ids: set, has_notes: bool, with_jira: bool) -> int:
-    """К какому разделу отчёта относится задача."""
-    if task.id in done_ids:
-        return ROW_DONE_WITH_KEY if (task.jira_key and with_jira) else ROW_DONE_NO_KEY
-    return ROW_ACTIVE_NOTED if has_notes else ROW_ACTIVE_JIRA
+def _row_kind(task, with_jira: bool) -> int:
+    """К какому разделу таблицы относится выполненная задача."""
+    return ROW_DONE_WITH_KEY if (task.jira_key and with_jira) else ROW_DONE_NO_KEY
 
 
 def _cell(text: str) -> str:
@@ -374,62 +371,47 @@ def render_week_table(
     facts: Optional[JiraFacts] = None,
     header: bool = True,
 ) -> list[str]:
-    """Таблица «номер — задача — что сделано» для вставки в Confluence.
+    """Таблица выполненного за неделю для вставки в Confluence.
+
+    Три колонки: задача (ссылкой на Jira), тема и результат за неделю. То, что
+    ещё в работе, сюда не идёт — отчёт о сделанном.
 
     ``header`` выключается, когда таблицу вставляют в уже готовую страницу:
     там своя шапка, и вторая только мешает.
     """
     lines = (
-        ["| Номер | Задача | Что сделано за неделю |", "|---|---|---|"]
+        ["| Задача | Тема | Результат за неделю |", "|---|---|---|"]
         if header
         else []
     )
 
-    # Задача попадает в отчёт и тогда, когда по ней не было ни одной отметки:
-    # выполнили на этой неделе — значит работа была.
-    tasks: list = list(data["touched"])
-    known = {t.id for t in tasks}
-    for task in data["completed"]:
-        if task.id not in known:
-            tasks.append(task)
-            known.add(task.id)
-
-    done_ids = {t.id for t in data["completed"]}
-    noted_ids = {log.task_id for log in data["logs"] if (log.comment or "").strip()}
-
     rows: list[tuple[tuple, str, str, str]] = []
-    seen_keys = {(t.jira_key or "").upper() for t in tasks if t.jira_key}
+    seen_keys = set()
 
-    for task in tasks:
-        kind = _row_kind(task, done_ids, task.id in noted_ids, with_jira)
+    for task in data["completed"]:
+        if task.jira_key:
+            seen_keys.add(task.jira_key.upper())
         rows.append((
-            (kind, (task.product or NO_PRODUCT).lower(), (task.title or "").lower()),
+            (_row_kind(task, with_jira),
+             (task.product or NO_PRODUCT).lower(),
+             (task.title or "").lower()),
             _key_cell(task.jira_key, jira_base, with_jira),
             facts.title(task) if facts else task.title,
             task_week_summary(data, task, facts),
         ))
 
-    # Задачи из Jira, которых у нас нет: закрытые — как выполненные, открытые —
-    # как оставшиеся в работе. Иначе половина недели в отчёт не попадёт.
-    from_jira = (
-        [(issue, True) for issue in facts.done] + [(issue, False) for issue in facts.active]
-        if facts
-        else []
-    )
-    for issue, closed in from_jira:
+    # Закрытое в Jira, но не отмеченное здесь: работа была, и потерять её
+    # обиднее всего.
+    for issue in (facts.done if facts else []):
         key = (issue.key or "").upper()
         if not key or key in seen_keys:
             continue
         seen_keys.add(key)
         rows.append((
-            (
-                ROW_DONE_WITH_KEY if closed else ROW_ACTIVE_JIRA,
-                NO_PRODUCT,
-                (issue.summary or "").lower(),
-            ),
+            (ROW_DONE_WITH_KEY, NO_PRODUCT, (issue.summary or "").lower()),
             _key_cell(issue.key, jira_base, with_jira),
             issue.summary or issue.key,
-            issue.comment or ("закрыта в Jira" if closed else "в работе в Jira"),
+            issue.comment or "закрыта в Jira",
         ))
 
     rows.sort(key=lambda row: row[0])
@@ -437,7 +419,7 @@ def render_week_table(
         lines.append("| %s | %s | %s |" % (_cell(key_cell), _cell(title), _cell(summary)))
 
     if len(lines) == (2 if header else 0):
-        lines.append("|  | — | за неделю отметок не было |")
+        lines.append("|  | — | за неделю ничего не выполнено |")
     lines.append("")
     return lines
 

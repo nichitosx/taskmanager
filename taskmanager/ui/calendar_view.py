@@ -87,12 +87,15 @@ class DayCell(Card):
         overdue = [t for t in tasks if t.due_date and t.due_date < today and not t.is_done]
         if day == today:
             self.set_card_colors(
-                bg=theme.tint(colors["accent"], 0.16), border=colors["accent"]
+                bg=theme.mix(colors["accent"], colors["surface"], 0.16),
+                border=colors["accent"],
             )
         elif not current_month:
             self.set_card_colors(bg=colors["bg"], border=colors["border_soft"])
         elif overdue:
-            self.set_card_colors(border=theme.tint(colors["danger"], 0.5))
+            self.set_card_colors(
+                border=theme.mix(colors["danger"], colors["border"], 0.5)
+            )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(7, 5, 7, 6)

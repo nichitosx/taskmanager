@@ -69,7 +69,7 @@ from ..models import (
     STATUS_DONE,
     Task,
 )
-from ..reports import fmt_date, week_bounds
+from ..reports import WeekRule, fmt_date, week_bounds
 from ..version import VERSION
 from ..scheduler import Scheduler
 from ..storage import Storage
@@ -659,6 +659,8 @@ class MainWindow(QMainWindow):
         self.filter = "active"
         self.selected_id: int | None = None
         self._jira_issues: dict[str, list] = {key: [] for key in JIRA_VIEWS}
+        # Задачи, по которым сегодня была работа: считаются раз на обновление.
+        self._worked_today: set | None = None
         # Что выбрано в разделах целей и напоминаний.
         self.selected_goal: int | None = None
         self.selected_reminder: int | None = None
@@ -1283,6 +1285,16 @@ class MainWindow(QMainWindow):
             )
         )
 
+    def worked_today(self) -> set:
+        """Задачи, по которым сегодня уже была отметка о работе."""
+        if getattr(self, "_worked_today", None) is None:
+            self._worked_today = {
+                log.task_id
+                for log in self.storage.logs_for_date(date.today())
+                if log.task_id is not None
+            }
+        return self._worked_today
+
     def _task_row(self, task: Task, stale_days: int, catalog, progress: dict) -> TaskRow:
         """Собирает строку задачи и подключает её к окну."""
         color = products_module.color_for(catalog, task.product, self.colors["info"])
@@ -1294,6 +1306,7 @@ class MainWindow(QMainWindow):
             bool(self.settings.get("jira.enabled", True)),
             progress.get(task.id, (0, 0)),
             self._warning_for(task),
+            task.id in self.worked_today(),
         )
         row.warning_clicked.connect(self._open_task_in_jira)
         row.toggled.connect(self._toggle_task)
@@ -1723,9 +1736,18 @@ class MainWindow(QMainWindow):
             # Здесь показываем именно выполненные — в том и суть раздела.
             return sort_tasks(self.out_of_sync())
         if self.filter == "done":
-            tasks = [t for t in self.storage.list_tasks(include_done=True) if t.is_done]
+            # Только текущая отчётная неделя: список выполненного нужен, чтобы
+            # собрать отчёт, а не чтобы листать историю. Прошлые недели лежат
+            # в «Истории отчётов».
+            rule = WeekRule.from_settings(self.settings)
+            week_start, _ = week_bounds()
+            tasks = [
+                task
+                for task in self.storage.list_tasks(include_done=True)
+                if task.is_done and rule.covers(task.done_at, week_start)
+            ]
             tasks.sort(key=lambda t: t.done_at or t.updated_at, reverse=True)
-            return tasks[:100]
+            return tasks
 
         tasks = self.storage.list_tasks(include_done=False)
         if self.filter.startswith(PRODUCT_PREFIX):
@@ -1747,6 +1769,8 @@ class MainWindow(QMainWindow):
     def refresh(self, keep_selection: bool = True) -> None:
         previous = self.selected_id if keep_selection else None
         self.forget_sync()
+        # Отметки за сегодня перечитываем заново: по ним подсвечиваются строки.
+        self._worked_today = None
         if self.filter != GOALS:
             self.selected_goal = None
         if self.filter != REMINDERS:
@@ -2052,7 +2076,7 @@ class MainWindow(QMainWindow):
             JIRA_SYNC: "Всё сходится: закрытое здесь закрыто и в Jira.",
             GOALS: "Целей на этот квартал пока нет.",
             REMINDERS: "Напоминаний нет.",
-            "done": "Выполненных задач пока нет.",
+            "done": "На этой неделе пока ничего не выполнено.",
         }.get(self.filter, "Пусто")
 
     def _sync_day_indicator(self, counters: dict[str, int]) -> None:

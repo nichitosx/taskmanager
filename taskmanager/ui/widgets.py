@@ -635,6 +635,7 @@ class TaskRow(Card):
         show_jira: bool = True,
         subtasks: tuple[int, int] = (0, 0),
         warning: str = "",
+        worked_today: bool = False,
         parent=None,
     ) -> None:
         super().__init__(colors, parent)
@@ -643,6 +644,8 @@ class TaskRow(Card):
         self.product_color = product_color
         self.show_jira = show_jira
         self.subtasks = subtasks
+        # Сегодня по задаче уже отмечали работу — такую строку видно сразу.
+        self.worked_today = worked_today
         # Короткая тревожная метка вроде «закрой в jira!»: её ставит тот, кто
         # знает о задаче больше самой строки.
         self.warning = warning
@@ -658,6 +661,8 @@ class TaskRow(Card):
         # Полоска приоритета рисуется самой карточкой, здесь только отступ под неё.
         if self.warning:
             self.set_bar(c["danger"])
+        elif self.worked_today and not task.is_done:
+            self.set_bar(c["success"])
         elif not task.is_done:
             if task.is_overdue:
                 self.set_bar(c["danger"])
@@ -772,6 +777,9 @@ class TaskRow(Card):
             alarm.clicked.connect(lambda: self.warning_clicked.emit(task.id))
             pills.append(alarm)
 
+        if self.worked_today and not task.is_done:
+            pills.append(Pill("сегодня", c["success"], strong=True))
+
         # Важность идёт первой: по ней глаз выбирает, за что браться.
         if not task.is_done:
             bars = self.priority_bars = PriorityBars(task.priority, c)
@@ -839,6 +847,11 @@ class TaskRow(Card):
         c = self.colors
         if selected:
             border, background = c["accent"], c["surface_hover"]
+        elif self.worked_today and not self.task.is_done:
+            # Зелёная подложка: по задаче сегодня уже что-то сделано, и это
+            # видно, не вчитываясь в метки.
+            border = theme.mix(c["success"], c["border"], 0.55)
+            background = theme.mix(c["success"], c["surface"], 0.14)
         elif self.task.is_overdue:
             border, background = c["danger"], c["surface"]
         else:
