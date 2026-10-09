@@ -352,11 +352,23 @@ def main() -> int:
     return 0
 
 
-if __name__ == "__main__":
-    code = main()
+def wait_if_broken(code: int) -> None:
+    """Держит окно открытым, только если обновиться не получилось.
+
+    Когда всё прошло хорошо, читать нечего: окно закрывается само, а программа
+    уже поднимается заново. А вот ошибку надо успеть прочитать — иначе она
+    мелькнёт и исчезнет вместе с окном.
+    """
+    if not code:
+        return
     try:
         if sys.stdin and sys.stdin.isatty():
             input("\nНажмите Enter, чтобы закрыть…")
     except (EOFError, KeyboardInterrupt):
         pass  # запустили без консоли — просто выходим
+
+
+if __name__ == "__main__":
+    code = main()
+    wait_if_broken(code)
     sys.exit(code)
