@@ -52,6 +52,138 @@ LIGHT = {
     "info": "#4A6C8A",
 }
 
+# --- Темы с одним акцентом ----------------------------------------------------
+# Ниже — приборные панели: почти чёрный фон, один цвет на всё и холодный синий
+# для «информации», чтобы шкала важности оставалась различимой. Семантику
+# (опасно, внимание, готово) не красим в цвет темы: красное должно быть
+# красным даже на зелёном экране.
+
+AMBER = {
+    "bg": "#0C0A06",
+    "surface": "#13100A",
+    "surface_alt": "#1B1710",
+    "surface_hover": "#241E14",
+    "border": "#453519",
+    "border_soft": "#2B2211",
+    "text": "#FFCE73",
+    "text_dim": "#BC8C3C",
+    "text_faint": "#7E5D24",
+    "accent": "#FFA51F",
+    "accent_soft": "#33210A",
+    "danger": "#FF5F4E",
+    "danger_soft": "#361410",
+    "warning": "#FFD166",
+    "warning_soft": "#33280F",
+    "success": "#9BD96B",
+    "success_soft": "#1B2A13",
+    "info": "#5FA8C7",
+}
+
+GREEN = {
+    "bg": "#050A06",
+    "surface": "#09110B",
+    "surface_alt": "#0F1A12",
+    "surface_hover": "#152318",
+    "border": "#22402B",
+    "border_soft": "#16291C",
+    "text": "#8CF5AE",
+    "text_dim": "#4FB375",
+    "text_faint": "#30774B",
+    "accent": "#3BFF8B",
+    "accent_soft": "#092716",
+    "danger": "#FF6B5B",
+    "danger_soft": "#301612",
+    "warning": "#E8D44D",
+    "warning_soft": "#2C2A10",
+    "success": "#5BE07F",
+    "success_soft": "#122A1A",
+    "info": "#58B8D6",
+}
+
+EMBER = {
+    "bg": "#080506",
+    "surface": "#110A08",
+    "surface_alt": "#1A100C",
+    "surface_hover": "#23160F",
+    "border": "#4A2512",
+    "border_soft": "#2F190D",
+    "text": "#FFE3CE",
+    "text_dim": "#C98A62",
+    "text_faint": "#8A5A3C",
+    "accent": "#FF5B1F",
+    "accent_soft": "#331106",
+    "danger": "#FF3B30",
+    "danger_soft": "#36100D",
+    "warning": "#FFA62B",
+    "warning_soft": "#33210B",
+    "success": "#7FD46A",
+    "success_soft": "#1A2A14",
+    "info": "#5A9FC4",
+}
+
+ICE = {
+    "bg": "#070B10",
+    "surface": "#0C1219",
+    "surface_alt": "#111A23",
+    "surface_hover": "#17222E",
+    "border": "#27394C",
+    "border_soft": "#1A2633",
+    "text": "#DCEAF5",
+    "text_dim": "#8AA6BE",
+    "text_faint": "#5B7186",
+    "accent": "#35C8E8",
+    "accent_soft": "#072630",
+    "danger": "#FF5A6E",
+    "danger_soft": "#2E1218",
+    "warning": "#FFC24D",
+    "warning_soft": "#30260F",
+    "success": "#56D39A",
+    "success_soft": "#102A21",
+    "info": "#6EA8FF",
+}
+
+MONO = {
+    "bg": "#000000",
+    "surface": "#060606",
+    "surface_alt": "#0E0E0E",
+    "surface_hover": "#171717",
+    "border": "#3C3C3C",
+    "border_soft": "#242424",
+    "text": "#FFFFFF",
+    "text_dim": "#9C9C9C",
+    "text_faint": "#5E5E5E",
+    "accent": "#E6E6E6",
+    "accent_soft": "#1C1C1C",
+    "danger": "#D96C6C",
+    "danger_soft": "#2A1515",
+    "warning": "#C9B682",
+    "warning_soft": "#262114",
+    "success": "#8FBF8F",
+    "success_soft": "#152015",
+    "info": "#8FA8BF",
+}
+
+# Порядок важен: в таком виде темы и показываются в настройках.
+PALETTES = {
+    "dark": DARK,
+    "light": LIGHT,
+    "amber": AMBER,
+    "green": GREEN,
+    "ember": EMBER,
+    "ice": ICE,
+    "mono": MONO,
+}
+
+PALETTE_LABELS = {
+    "dark": "Тёплая тёмная",
+    "light": "Светлая",
+    "amber": "Янтарный терминал",
+    "green": "Зелёный люминофор",
+    "ember": "Угольный оранжевый",
+    "ice": "Холодная синь",
+    "mono": "Монохром",
+}
+
 # Пять ступеней — пять разных цветов: от спокойного серого к тревожному
 # красному. Одинаковых быть не должно, иначе шкала перестаёт читаться.
 PRIORITY_COLOR_KEYS = {
@@ -76,9 +208,9 @@ STYLE_LABELS = {
 # Скругления по типам элементов для каждого стиля.
 RADII = {
     STYLE_SOFT: {"card": 10, "input": 8, "button": 8, "pill": 9, "small": 6, "nav": 7},
-    # Пиксельный стиль: у полей и кнопок скругление крошечное (на глаз — фаска
-    # в пару пикселей), а карточки рисуются вручную «лесенкой», см. widgets.py.
-    STYLE_PIXEL: {"card": 6, "input": 3, "button": 3, "pill": 3, "small": 2, "nav": 3},
+    # Пиксельный стиль — приборная панель: ни одного скругления. Углы рамок
+    # отмечены скобками, см. paint_brackets в widgets.py.
+    STYLE_PIXEL: {"card": 0, "input": 0, "button": 0, "pill": 0, "small": 0, "nav": 0},
 }
 
 # Ступенчатое скругление карточек: радиус и высота одной «ступеньки».
@@ -96,6 +228,23 @@ def set_style(name: str) -> None:
 
 def current_style() -> str:
     return _style
+
+
+_colors: dict[str, str] = dict(DARK)
+
+
+def set_colors(values: dict[str, str]) -> None:
+    """Запоминает цвета применённой темы.
+
+    Их спрашивают виджеты, которые рисуют себя сами и не получают палитру
+    через конструктор, — например, подпись раздела со своей линейкой.
+    """
+    global _colors
+    _colors = dict(values)
+
+
+def colors() -> dict[str, str]:
+    return dict(_colors)
 
 
 def is_pixel() -> bool:
@@ -403,7 +552,25 @@ def tint(color: str, alpha: float) -> str:
 
 
 def palette(theme: str) -> dict[str, str]:
-    return dict(LIGHT if theme == "light" else DARK)
+    """Цвета темы. Незнакомое имя — тёплая тёмная: она была всегда."""
+    return dict(PALETTES.get(theme, DARK))
+
+
+def luminance(color: str) -> float:
+    """Светлота цвета от 0 до 1 — по ней отличаем светлую тему от тёмной."""
+    value = (color or "").lstrip("#")
+    if len(value) == 3:
+        value = "".join(ch * 2 for ch in value)
+    try:
+        red, green, blue = (int(value[i:i + 2], 16) for i in (0, 2, 4))
+    except (ValueError, IndexError):
+        return 0.0
+    return (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255
+
+
+def is_light(theme: str) -> bool:
+    """Светлая ли тема. Спрашиваем у фона, а не у названия: тем стало много."""
+    return luminance(palette(theme)["bg"]) > 0.5
 
 
 def check_icon() -> str:
@@ -430,7 +597,9 @@ def pattern_image(theme: str) -> str:
     path = data_dir() / ("stripes-%s.png" % theme)
     try:
         if not path.exists():
-            write_pattern(path, colors["bg"], colors["text"], 11 if theme == "dark" else 14)
+            write_pattern(
+            path, colors["bg"], colors["text"], 14 if is_light(theme) else 11
+        )
     except Exception:
         return ""
     return str(path).replace("\\", "/")
@@ -440,6 +609,7 @@ def stylesheet(theme: str, style: str | None = None) -> str:
     if style is not None:
         set_style(style)
     c = palette(theme)
+    set_colors(c)
     c["ui"] = pixel_family() if is_pixel() else ui_family()
     c["mono"] = pixel_family() if is_pixel() else mono_family()
     c["accent_family"] = accent_family()

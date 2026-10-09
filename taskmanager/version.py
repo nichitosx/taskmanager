@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from datetime import date
 
-VERSION = "1.9.2"
+VERSION = "1.10.0"
 RELEASED = "2026-10-09"
 
 

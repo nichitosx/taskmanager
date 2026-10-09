@@ -13,6 +13,7 @@ from PySide6.QtCore import (
     QPoint,
     QPropertyAnimation,
     QRect,
+    QPointF,
     QRectF,
     QSize,
     Property,
@@ -176,12 +177,38 @@ def pixel_corner_path(rect: QRectF, radius: int = 6, step: int = 2) -> QPainterP
 
 
 def card_path(rect: QRectF) -> QPainterPath:
-    """Контур карточки: гладкий в мягком стиле, ступенчатый в пиксельном."""
-    if theme.is_pixel():
-        return pixel_corner_path(rect, theme.PIXEL_CORNER, theme.PIXEL_STEP)
+    """Контур карточки: гладкий в мягком стиле, прямоугольный в пиксельном."""
     path = QPainterPath()
+    if theme.is_pixel():
+        # Приборная панель: честный прямоугольник, а углы отмечают скобки.
+        path.addRect(rect)
+        return path
     path.addRoundedRect(rect, theme.radius("card"), theme.radius("card"))
     return path
+
+
+# Длина уголка-скобки и его толщина: короткий штрих, который читается как
+# «здесь угол панели» и не превращается во вторую рамку.
+BRACKET_LENGTH = 9
+BRACKET_WIDTH = 2
+
+
+def paint_brackets(painter: QPainter, rect: QRectF, color: str) -> None:
+    """Рисует по уголку в каждом углу — как на приборных панелях."""
+    length = min(float(BRACKET_LENGTH), rect.width() / 3, rect.height() / 3)
+    if length < 3:
+        return
+    pen = QPen(QColor(color), BRACKET_WIDTH)
+    pen.setCapStyle(Qt.PenCapStyle.FlatCap)
+    painter.setPen(pen)
+    for x, y, dx, dy in (
+        (rect.left(), rect.top(), 1, 1),
+        (rect.right(), rect.top(), -1, 1),
+        (rect.left(), rect.bottom(), 1, -1),
+        (rect.right(), rect.bottom(), -1, -1),
+    ):
+        painter.drawLine(QPointF(x, y), QPointF(x + dx * length, y))
+        painter.drawLine(QPointF(x, y), QPointF(x, y + dy * length))
 
 
 class Card(QFrame):
@@ -199,12 +226,18 @@ class Card(QFrame):
         self._hover_bg = colors["surface_hover"]
         self._bar = ""
         self._hover = False
+        # Уголки на углах панели: обычно чуть ярче рамки, у выделенного —
+        # акцентные. По ним видно границы блока даже там, где рамка едва видна.
+        self._corner = colors["text_faint"]
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
 
-    def set_card_colors(self, bg: str = "", border: str = "", hover_bg: str = "") -> None:
+    def set_card_colors(
+        self, bg: str = "", border: str = "", hover_bg: str = "", corner: str = ""
+    ) -> None:
         self._bg = bg or self._bg
         self._border = border or self._border
         self._hover_bg = hover_bg or self._hover_bg
+        self._corner = corner or self._corner
         self.update()
 
     def set_bar(self, color: str) -> None:
@@ -236,6 +269,8 @@ class Card(QFrame):
             painter.fillRect(QRectF(rect.x(), rect.y(), 3.0, rect.height()), QColor(self._bar))
             painter.restore()
         painter.strokePath(path, QPen(QColor(self._border), 1))
+        if theme.is_pixel():
+            paint_brackets(painter, rect, self._corner)
         painter.end()
 
 
@@ -332,8 +367,31 @@ def manage_window(window, settings, key: str, width: int, height: int) -> None:
     window._geometry_keeper = keeper  # держим ссылку, иначе фильтр соберёт сборщик
 
 
+class SectionLabel(QLabel):
+    """Подпись раздела. В пиксельном стиле — с линейкой до правого края.
+
+    Так раздел читается как строка приборной панели, а не как случайное слово
+    над списком: взгляд цепляется за линию и понимает, где кончается группа.
+    """
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        super().paintEvent(event)
+        if not theme.is_pixel():
+            return
+        start = text_width(self, self.text()) + 8
+        if start + 6 > self.width():
+            return
+        painter = QPainter(self)
+        painter.setPen(QPen(QColor(theme.colors()["border"]), 1))
+        middle = round(self.height() / 2) + 0.5
+        painter.drawLine(
+            QPointF(float(start), middle), QPointF(float(self.width()) - 1, middle)
+        )
+        painter.end()
+
+
 def section_label(text: str) -> QLabel:
-    label = QLabel(text.upper())
+    label = SectionLabel(text.upper())
     label.setProperty("section", "true")
     return label
 
@@ -534,13 +592,17 @@ class Pill(QLabel):
         self.setFont(theme.small_font())
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setFixedHeight(PILL_HEIGHT)
+        # В пиксельном стиле метка — рамка в нитку почти без заливки: так она
+        # читается как подпись на приборе, а не как цветная наклейка.
+        pixel = theme.is_pixel()
         self.setStyleSheet(
             "color: %s; background: %s; border: 1px solid %s;"
             "border-radius: %dpx; padding-left: %dpx; padding-right: %dpx; %s"
             % (
                 color,
-                theme.tint(color, 0.20 if strong else 0.12),
-                theme.tint(color, 0.34),
+                theme.tint(color, (0.10 if strong else 0.04) if pixel
+                           else (0.20 if strong else 0.12)),
+                theme.tint(color, 0.70 if pixel else 0.34),
                 theme.radius("pill"),
                 left_padding,
                 PILL_PADDING,
@@ -845,20 +907,28 @@ class TaskRow(Card):
 
     def _apply_style(self, selected: bool = False) -> None:
         c = self.colors
+        # В пиксельном стиле строка — рамка на общем фоне: заливка тут только
+        # мешала бы, панель и так очерчена линией и уголками.
+        pixel = theme.is_pixel()
+        plain = c["bg"] if pixel else c["surface"]
+        corner = c["text_faint"]
         if selected:
             border, background = c["accent"], c["surface_hover"]
+            corner = c["accent"]
         elif self.worked_today and not self.task.is_done:
             # Зелёная подложка: по задаче сегодня уже что-то сделано, и это
             # видно, не вчитываясь в метки.
             border = theme.mix(c["success"], c["border"], 0.55)
-            background = theme.mix(c["success"], c["surface"], 0.14)
+            background = theme.mix(c["success"], plain, 0.14)
+            corner = c["success"]
         elif self.task.is_overdue:
-            border, background = c["danger"], c["surface"]
+            border, background = c["danger"], plain
+            corner = c["danger"]
         else:
             # В пиксельном стиле рамка заметнее: карточка должна читаться коробкой.
-            border = c["border"] if theme.is_pixel() else c["border_soft"]
-            background = c["surface"]
-        self.set_card_colors(background, border, c["surface_hover"])
+            border = c["border"] if pixel else c["border_soft"]
+            background = plain
+        self.set_card_colors(background, border, c["surface_hover"], corner)
 
     def set_selected(self, selected: bool) -> None:
         self._apply_style(selected)

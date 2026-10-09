@@ -127,8 +127,8 @@ class SettingsDialog(QDialog):
         form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
 
         self.theme_box = QComboBox()
-        self.theme_box.addItem("Тёмная", "dark")
-        self.theme_box.addItem("Светлая", "light")
+        for key, title in theme.PALETTE_LABELS.items():
+            self.theme_box.addItem(title, key)
         form.addRow("Оформление", self.theme_box)
 
         self.style_box = QComboBox()
