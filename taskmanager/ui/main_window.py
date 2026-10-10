@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import random
+import re
 from datetime import date, datetime, timedelta
 
 from PySide6.QtCore import (
@@ -86,18 +88,30 @@ from .dialogs import (
 )
 from .reports_ui import HistoryDialog, WeeklyReportDialog
 from .settings_dialog import SettingsDialog
+from .terminal import (
+    NOISE_LEVELS,
+    BlockBar,
+    FKeyBar,
+    LeaderRow,
+    MenuStrip,
+    PromptLine,
+    ScanlineOverlay,
+    TableHeader,
+    TerminalCanvas,
+    Ticker,
+    TitledPanel,
+    cell_width,
+    prompt_path,
+)
 from .widgets import (
     clear_background,
-    ascii_chart,
     ascii_frame,
-    ascii_readout,
-    chart_glyphs,
     GridText,
     Card,
-    DayIndicator,
+    FlowLayout,
     fit_to_screen,
     move_onto_screen,
-    HintTrigger,
+    HintPopup,
     SubtaskList,
     elide_text,
     headline,
@@ -111,8 +125,23 @@ from .widgets import (
     section_label,
 )
 
-# Ширина боковой панели: в неё помещается самый длинный пункт меню.
-SIDEBAR_WIDTH = 216
+# Ширина левой колонки: в неё помещаются диаграмма за две недели и самый
+# длинный пункт меню.
+SIDEBAR_WIDTH = 312
+
+# Полоса F-клавиш: подпись и метод окна.
+F_KEYS = (
+    ("Справка", "show_help"),
+    ("Отметка", "_log_selected"),
+    ("Новая", "focus_quick_add"),
+    ("Правка", "edit_selected"),
+    ("Готово", "toggle_selected"),
+    ("Jira", "jira_selected"),
+    ("Поиск", "focus_search"),
+    ("Удалить", "delete_selected"),
+    ("Меню", "menu_selected"),
+    ("Выход", "close"),
+)
 
 # Боковое меню делится на две части: «когда» — то, чем занят день,
 # «состояние» — то, что требует внимания независимо от сроков.
@@ -217,8 +246,42 @@ class CalendarFetch(QThread):
             self.failed.emit("Не удалось прочитать календарь: %s" % exc)
 
 
+class _CaptionLabel(QLabel):
+    """Подпись списка («все активные: 7»), которая показывается в заголовке
+    центральной панели: «[ Все активные · 7 ]»."""
+
+    def __init__(self, panel: TitledPanel) -> None:
+        # Родитель — сама панель: виджет без родителя пережил бы приложение
+        # и уронил бы процесс на выходе.
+        super().__init__(panel)
+        self.hide()
+        self._panel = panel
+
+    def setText(self, text: str) -> None:  # noqa: N802 (Qt naming)
+        super().setText(text)
+        caption = re.sub(r": (\d)", r" · \1", text, count=1)
+        self._panel.set_title(caption[:1].upper() + caption[1:])
+
+
 class TaskDetail(QWidget):
     """Правая панель: подробности выбранной задачи."""
+
+    # Заголовок панели: «Задача SEC-335», «Цель», «Напоминание».
+    title_changed = Signal(str)
+
+    # Поля карточки: ключ и подпись слева от отточия.
+    FIELDS = (
+        ("status", "Статус"),
+        ("today", "Сегодня"),
+        ("due", "Срок"),
+        ("product", "Продукт"),
+        ("jira", "Jira"),
+        ("prio", "Важность"),
+        ("quiet", "Тишина"),
+        ("tags", "Теги"),
+    )
+    # Сколько записей журнала показывать: дальше — «и ещё N».
+    JOURNAL_LIMIT = 8
 
     def __init__(self, storage: Storage, settings: Settings, parent=None) -> None:
         super().__init__(parent)
@@ -233,34 +296,31 @@ class TaskDetail(QWidget):
 
     def _build(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 16, 4, 12)
-        layout.setSpacing(10)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(theme.px(10))
 
         colors = theme.palette(self.settings.get("theme", theme.DEFAULT_THEME))
+        self.colors = colors
         self.placeholder = QWidget()
         clear_background(self.placeholder)
         hint_layout = QVBoxLayout(self.placeholder)
         hint_layout.setContentsMargins(0, 30, 0, 0)
         hint_layout.setSpacing(14)
 
-        # Заставка набрана знаками в любом стиле: пиксельный шрифт — лишь один
-        # из вариантов, а рамки и стрелки найдутся в любом системном.
         arrow, dot = theme.glyph("arrow"), theme.glyph("dot")
         art = GridText(colors)
         art.set_ink({
-            theme.glyph("line_h"): colors["border"],
-            theme.glyph("line_v"): colors["border"],
-            theme.glyph("corner_tl"): colors["border"],
-            theme.glyph("corner_tr"): colors["border"],
-            theme.glyph("corner_bl"): colors["border"],
-            theme.glyph("corner_br"): colors["border"],
-            dot: colors["text_faint"],
-            arrow: colors["accent"],
+            theme.glyph("line_h"): colors["faint"],
+            theme.glyph("line_v"): colors["faint"],
+            theme.glyph("corner_tl"): colors["faint"],
+            theme.glyph("corner_tr"): colors["faint"],
+            theme.glyph("corner_bl"): colors["faint"],
+            theme.glyph("corner_br"): colors["faint"],
+            dot: colors["faint"],
+            arrow: colors["bright"],
         })
         art.set_lines([
             (line, colors["text_dim"])
-            # Строки короткие: рисунок должен влезать и в системный шрифт,
-            # у которого клетка заметно шире пиксельной.
             for line in ascii_frame([
                 "ЗАДАЧА НЕ ВЫБРАНА",
                 dot * 17,
@@ -279,7 +339,7 @@ class TaskDetail(QWidget):
         layout.addWidget(self.placeholder, 1)
 
         # Содержимое панели прокручивается целиком: у задачи может быть длинный
-        # чек-лист, и раньше он выдавливал историю работы.
+        # чек-лист и журнал.
         self.body_scroll = QScrollArea()
         self.body_scroll.setWidgetResizable(True)
         self.body_scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -292,71 +352,76 @@ class TaskDetail(QWidget):
         self.body = QWidget()
         clear_background(self.body)
         body_layout = QVBoxLayout(self.body)
-        body_layout.setContentsMargins(0, 0, 10, 0)
-        body_layout.setSpacing(10)
+        body_layout.setContentsMargins(0, 0, theme.px(8), 0)
+        body_layout.setSpacing(theme.px(14))
         self.body_scroll.setWidget(self.body)
 
         self.title = QLabel()
         self.title.setWordWrap(True)
-        self.title.setFont(theme.ui_font(13, bold=True))
+        self.title.setProperty("heading", "true")
         body_layout.addWidget(self.title)
 
-        self.meta = QLabel()
-        self.meta.setWordWrap(True)
-        self.meta.setFont(theme.mono_font(8))
-        self.meta.setProperty("dim", "true")
-        body_layout.addWidget(self.meta)
+        # Поля — по строке на каждое: «Срок ........ СЕГОДНЯ, сб 10.10».
+        fields = QVBoxLayout()
+        fields.setContentsMargins(0, 0, 0, 0)
+        fields.setSpacing(0)
+        self.fields: dict[str, LeaderRow] = {}
+        for key, caption in self.FIELDS:
+            row = LeaderRow(caption, colors)
+            self.fields[key] = row
+            fields.addWidget(row)
+        body_layout.addLayout(fields)
 
-        body_layout.addWidget(hline())
-
-        body_layout.addWidget(section_label("заметки"))
-        self.notes = QPlainTextEdit()
-        self.notes.setPlaceholderText("Детали, ссылки, договорённости")
-        self.notes.setFixedHeight(120)
-        self.notes.focusOutEvent = self._notes_focus_out  # type: ignore[assignment]
-        body_layout.addWidget(self.notes)
-
-        self.subtasks = SubtaskList(
-            self.storage,
-            theme.palette(self.settings.get("theme", theme.DEFAULT_THEME)),
-            compact=True,
-        )
+        self.subtasks = SubtaskList(self.storage, colors, compact=True)
         self.subtasks.changed.connect(self._subtasks_changed)
         body_layout.addWidget(self.subtasks)
 
-        body_layout.addWidget(section_label("история работы"))
-        self.history = QListWidget()
-        self.history.setFont(theme.mono_font(9))
-        self.history.setFixedHeight(120)
-        self.history.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.history.setTextElideMode(Qt.TextElideMode.ElideRight)
-        body_layout.addWidget(self.history)
+        notes_box = QVBoxLayout()
+        notes_box.setSpacing(theme.px(4))
+        notes_box.addWidget(section_label("заметки"))
+        self.notes = QPlainTextEdit()
+        self.notes.setPlaceholderText("Детали, ссылки, договорённости")
+        self.notes.setFixedHeight(theme.px(96))
+        self.notes.focusOutEvent = self._notes_focus_out  # type: ignore[assignment]
+        notes_box.addWidget(self.notes)
+        body_layout.addLayout(notes_box)
 
-        buttons = QVBoxLayout()
-        buttons.setSpacing(6)
-        row1 = QHBoxLayout()
-        row1.setSpacing(6)
-        self.log_button = QPushButton("Отметить работу")
+        journal_box = QVBoxLayout()
+        journal_box.setSpacing(theme.px(4))
+        journal_box.addWidget(section_label("журнал"))
+        self.journal_host = QWidget()
+        clear_background(self.journal_host)
+        self.journal = QVBoxLayout(self.journal_host)
+        self.journal.setContentsMargins(0, 0, 0, 0)
+        self.journal.setSpacing(theme.px(6))
+        journal_box.addWidget(self.journal_host)
+        body_layout.addLayout(journal_box)
+
+        buttons = FlowLayout(spacing=theme.px(8))
+        self.log_button = QPushButton("[ Отметить работу ]")
         self.log_button.setProperty("accent", "true")
         self.log_button.clicked.connect(self._log_work)
-        row1.addWidget(self.log_button)
-        self.edit_button = QPushButton("Изменить")
+        buttons.addWidget(self.log_button)
+        self.done_button = QPushButton("[ Готово ]")
+        self.done_button.setProperty("flat", "true")
+        self.done_button.clicked.connect(self._toggle_done)
+        buttons.addWidget(self.done_button)
+        self.edit_button = QPushButton("[ Правка ]")
+        self.edit_button.setProperty("flat", "true")
         self.edit_button.clicked.connect(self._edit)
-        row1.addWidget(self.edit_button)
-        buttons.addLayout(row1)
-
-        row2 = QHBoxLayout()
-        row2.setSpacing(6)
-        self.jira_button = QPushButton("Открыть в Jira")
+        buttons.addWidget(self.edit_button)
+        self.jira_button = QPushButton("[ В Jira ]")
         self.jira_button.setProperty("flat", "true")
         self.jira_button.clicked.connect(self._open_jira)
-        row2.addWidget(self.jira_button)
-        self.no_jira_button = QPushButton("Jira не нужна")
+        buttons.addWidget(self.jira_button)
+        self.no_jira_button = QPushButton("[ Без Jira ]")
         self.no_jira_button.setProperty("flat", "true")
+        self.no_jira_button.setToolTip("Отметить, что в Jira эту задачу заводить не нужно")
         self.no_jira_button.clicked.connect(self._mark_no_jira)
-        row2.addWidget(self.no_jira_button)
-        row2.addStretch(1)
-        buttons.addLayout(row2)
+        buttons.addWidget(self.no_jira_button)
+        for button in (self.log_button, self.done_button, self.edit_button,
+                       self.jira_button, self.no_jira_button):
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
         body_layout.addLayout(buttons)
         body_layout.addStretch(1)
 
@@ -401,10 +466,7 @@ class TaskDetail(QWidget):
 
         self.goal_title = QLabel()
         self.goal_title.setWordWrap(True)
-        self.goal_title.setFont(theme.ui_font(13, bold=True))
-        self.goal_title.setStyleSheet(
-            "color: %s; background: transparent;" % colors["warning"]
-        )
+        self.goal_title.setProperty("heading", "true")
         column.addWidget(self.goal_title)
 
         self.goal_meta = QLabel()
@@ -457,6 +519,7 @@ class TaskDetail(QWidget):
         self.reminder_page.hide()
         self.placeholder.hide()
         self.goal_page.show()
+        self.title_changed.emit("Цель")
 
         self.goal_title.setText(goal.title)
         done, total = self.storage.goal_progress(goal.id)
@@ -513,7 +576,7 @@ class TaskDetail(QWidget):
 
         self.reminder_title = QLabel()
         self.reminder_title.setWordWrap(True)
-        self.reminder_title.setFont(theme.ui_font(13, bold=True))
+        self.reminder_title.setProperty("heading", "true")
         column.addWidget(self.reminder_title)
 
         self.reminder_meta = QLabel()
@@ -557,6 +620,7 @@ class TaskDetail(QWidget):
         self.goal_page.hide()
         self.placeholder.hide()
         self.reminder_page.show()
+        self.title_changed.emit("Напоминание")
 
         self.reminder_title.setText(reminder.title)
         parts = [describe_when(reminder.at)]
@@ -589,49 +653,144 @@ class TaskDetail(QWidget):
         if task is None:
             self.body_scroll.hide()
             self.placeholder.show()
+            self.title_changed.emit("Задача")
             return
         self.placeholder.hide()
         self.body_scroll.show()
+        self.title_changed.emit("Задача %s" % task.jira_key if task.jira_key else "Задача")
 
+        c = self.colors
         self.title.setText(task.title)
-        parts = [PRIORITY_LABELS.get(task.priority, "обычный")]
-        if task.product:
-            parts.append(task.product)
-        if task.is_planned:
-            parts.append(start_text(task))
-        if task.is_asap:
-            parts.append("ASAP — как можно скорее")
-        elif task.due_date:
-            parts.append("срок %s" % fmt_date(task.due_date))
-        if self.settings.get("jira.enabled", True):
-            if task.jira_key:
-                parts.append(task.jira_key)
-            else:
-                parts.append("jira: %s" % JIRA_STATE_LABELS.get(task.jira_state, "не решено"))
-        parts.append("без движения %d дн." % task.days_since_activity)
-        if task.tags:
-            parts.append(" ".join("#" + t for t in task.tags))
-        self.meta.setText("  ·  ".join(parts))
+        fields = self.fields
+        fields["status"].set_value(self._status_text(task))
+
+        worked = task.id in self._worked_today()
+        if task.is_done:
+            fields["today"].set_value("\u2014", c["text_dim"])
+        elif worked:
+            fields["today"].set_value("была работа", c["bright"])
+        else:
+            fields["today"].set_value("ещё не отмечено", c["text_dim"])
+
+        fields["due"].set_value(*self._due_value(task))
+        fields["product"].set_value(
+            task.product.upper() if task.product else "\u2014",
+            c["text"] if task.product else c["text_dim"],
+        )
+
+        jira_on = bool(self.settings.get("jira.enabled", True))
+        fields["jira"].setVisible(jira_on)
+        if task.jira_key:
+            fields["jira"].set_value(task.jira_key)
+        else:
+            state = JIRA_STATE_LABELS.get(task.jira_state, "не решено")
+            fields["jira"].set_value(state, c["text_dim"])
+
+        level = max(0, min(len(PRIORITY_LABELS) - 1, task.priority))
+        blocks = "\u2588" * (level + 1) + "\u2591" * (len(PRIORITY_LABELS) - level - 1)
+        fields["prio"].set_value(
+            "%s %s" % (blocks, PRIORITY_LABELS.get(level, "")),
+            c[theme.PRIORITY_COLOR_KEYS.get(level, "text")],
+        )
+
+        stale_days = self.settings.get_int("stale_days", 5)
+        quiet = not task.is_done and task.is_stale(stale_days)
+        fields["quiet"].setVisible(quiet)
+        if quiet:
+            fields["quiet"].set_value("%d дн. без движения" % task.days_since_activity,
+                                      c["text_dim"])
+        fields["tags"].setVisible(bool(task.tags))
+        fields["tags"].set_value(" ".join("#" + t for t in task.tags), c["text_dim"])
 
         self.notes.blockSignals(True)
         self.notes.setPlainText(task.notes)
         self.notes.blockSignals(False)
 
         self.subtasks.set_task(task.id)
+        self._fill_journal(task)
 
-        self.history.clear()
-        logs = self.storage.logs_for_task(task.id)
-        if not logs:
-            self.history.addItem("Отметок пока нет")
-        for log in logs:
-            self.history.addItem(
-                "%s  %s" % (log.log_date.strftime("%d.%m"), log.comment or "работа по задаче")
-            )
-
-        jira_on = bool(self.settings.get("jira.enabled", True))
+        self.done_button.setText("[ Вернуть ]" if task.is_done else "[ Готово ]")
+        self.done_button.setToolTip(
+            "Вернуть задачу в работу" if task.is_done else "Отметить задачу выполненной"
+        )
         self.jira_button.setVisible(jira_on)
         self.jira_button.setEnabled(bool(task.jira_key))
-        self.no_jira_button.setVisible(jira_on and task.jira_state != JIRA_NOT_NEEDED)
+        self.no_jira_button.setVisible(jira_on and task.jira_state != JIRA_NOT_NEEDED
+                                       and not task.jira_key)
+
+    def _worked_today(self) -> set:
+        if self.owner is not None and hasattr(self.owner, "worked_today"):
+            return self.owner.worked_today()
+        return {
+            log.task_id
+            for log in self.storage.logs_for_date(date.today())
+            if log.task_id is not None
+        }
+
+    @staticmethod
+    def _status_text(task: Task) -> str:
+        if task.is_done:
+            return "выполнена %s" % task.done_at.strftime("%d.%m") if task.done_at else "выполнена"
+        if task.is_planned:
+            return start_text(task)
+        since = task.created_at.date() if task.created_at else date.today()
+        return "в работе, %d-й день" % ((date.today() - since).days + 1)
+
+    def _due_value(self, task: Task) -> tuple[str, str]:
+        """Срок словами и его цвет: горящее — ярко, просроченное — тревогой."""
+        c = self.colors
+        weekday = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+        if task.is_asap:
+            return "ASAP — как можно скорее", c["bright"]
+        if task.due_date is None:
+            return "без срока", c["text_dim"]
+        stamp = "%s %s" % (weekday[task.due_date.weekday()], task.due_date.strftime("%d.%m"))
+        days = task.days_to_due or 0
+        if task.is_done:
+            return stamp, c["text_dim"]
+        if days < 0:
+            return "просрочено на %d дн., %s" % (-days, stamp), c["danger"]
+        if days == 0:
+            return "СЕГОДНЯ, %s" % stamp, c["bright"]
+        if days == 1:
+            return "завтра, %s" % stamp, c["text"]
+        return stamp, c["text"]
+
+    def _fill_journal(self, task: Task) -> None:
+        """Журнал работы: дата слева, запись справа — последние сверху."""
+        c = self.colors
+        while self.journal.count():
+            item = self.journal.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+
+        logs = self.storage.logs_for_task(task.id)
+        if not logs:
+            empty = QLabel("Отметок пока нет")
+            empty.setStyleSheet("color: %s; background: transparent;" % c["text_dim"])
+            self.journal.addWidget(empty)
+            return
+        date_width = cell_width() * 6
+        for log in logs[: self.JOURNAL_LIMIT]:
+            line = QWidget()
+            clear_background(line)
+            row = QHBoxLayout(line)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(cell_width())
+            when = QLabel(log.log_date.strftime("%d.%m"))
+            when.setFixedWidth(date_width)
+            when.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            when.setStyleSheet("color: %s; background: transparent;" % c["text_dim"])
+            row.addWidget(when)
+            text = QLabel(log.comment or "работа по задаче")
+            text.setWordWrap(True)
+            text.setStyleSheet("color: %s; background: transparent;" % c["text"])
+            row.addWidget(text, 1)
+            self.journal.addWidget(line)
+        if len(logs) > self.JOURNAL_LIMIT:
+            more = QLabel("и ещё %d" % (len(logs) - self.JOURNAL_LIMIT))
+            more.setStyleSheet("color: %s; background: transparent;" % c["text_dim"])
+            self.journal.addWidget(more)
 
     def _subtasks_changed(self) -> None:
         """Отметили подпункт — обновляем счётчик в списке слева."""
@@ -663,6 +822,10 @@ class TaskDetail(QWidget):
     def _edit(self) -> None:
         if self.task is not None and self.owner is not None:
             self.owner.open_task(self.task.id)
+
+    def _toggle_done(self) -> None:
+        if self.task is not None and self.owner is not None:
+            self.owner._toggle_task(self.task.id, not self.task.is_done)
 
     def _open_jira(self) -> None:
         if self.task is None:
@@ -719,7 +882,7 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(self._icon())
         # Размер подбирается под экран: на ноутбуке окно не должно вылезать
         # за край, иначе часть интерфейса недостижима.
-        fit_to_screen(self, 1180, 760)
+        fit_to_screen(self, 1440, 900)
 
         self._build()
         self._build_tray()
@@ -741,34 +904,39 @@ class MainWindow(QMainWindow):
     # --- Интерфейс ------------------------------------------------------------
 
     def _build(self) -> None:
-        central = QWidget()
-        central.setObjectName("canvas")
-        self.setCentralWidget(central)
-        root = QVBoxLayout(central)
+        """Собирает экран: шапка, меню, три колонки, строка ввода и F-клавиши.
+
+        Вызывается и при смене темы: виджеты терминала помнят свои цвета,
+        поэтому проще собрать экран заново, чем перекрашивать каждый.
+        """
+        c = self.colors
+        self.canvas = TerminalCanvas(c)
+        self.setCentralWidget(self.canvas)
+        root = QVBoxLayout(self.canvas)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
         root.addWidget(self._header())
-        root.addWidget(headline())
+        root.addWidget(self._menu_strip())
 
         body = QWidget()
-        body.setObjectName("bodyArea")
+        clear_background(body)
         body_layout = QHBoxLayout(body)
-        body_layout.setContentsMargins(20, 16, 20, 16)
-        body_layout.setSpacing(0)
+        body_layout.setContentsMargins(theme.px(16), theme.px(14), theme.px(16), theme.px(12))
+        body_layout.setSpacing(theme.px(12))
         root.addWidget(body, 1)
 
         body_layout.addWidget(self._sidebar_scroll())
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setHandleWidth(theme.px(12))
         body_layout.addWidget(splitter, 1)
 
-        center = QWidget()
-        center.setObjectName("centerArea")
-        center_layout = QVBoxLayout(center)
-        center_layout.setContentsMargins(18, 0, 4, 0)
-        center_layout.setSpacing(12)
-        splitter.addWidget(center)
+        self.center_panel = TitledPanel("Все активные", c)
+        self.canvas.add_panel(self.center_panel)
+        center_layout = self.center_panel.box
+        center_layout.setSpacing(theme.px(6))
+        splitter.addWidget(self.center_panel)
 
         self.update_bar = self._update_bar()
         center_layout.addWidget(self.update_bar)
@@ -776,22 +944,14 @@ class MainWindow(QMainWindow):
         self.demo_bar = self._demo_bar()
         center_layout.addWidget(self.demo_bar)
 
-        self.quick_add = QLineEdit()
-        # Подсказки по синтаксису живут в шпаргалке слева, здесь только суть.
-        self.quick_add.setPlaceholderText("Новая задача — нажмите Enter, чтобы добавить")
-        self.quick_add.setFont(theme.ui_font(11))
-        self.quick_add.setMinimumHeight(42)
-        self.quick_add.returnPressed.connect(self._quick_add)
-        center_layout.addWidget(self.quick_add)
-
         search_row = QHBoxLayout()
-        search_row.setSpacing(8)
+        search_row.setSpacing(theme.px(8))
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Поиск по задачам")
+        self.search.setPlaceholderText("поиск по задачам · F7")
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(lambda: self.refresh())
         search_row.addWidget(self.search, 1)
-        self.new_goal_button = QPushButton("Новая цель")
+        self.new_goal_button = QPushButton("[ Новая цель ]")
         self.new_goal_button.setProperty("flat", "true")
         self.new_goal_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.new_goal_button.setToolTip("Поставить цель на квартал")
@@ -799,7 +959,7 @@ class MainWindow(QMainWindow):
         self.new_goal_button.hide()
         search_row.addWidget(self.new_goal_button)
 
-        self.add_result_button = QPushButton("Добавить КР")
+        self.add_result_button = QPushButton("[ Добавить КР ]")
         self.add_result_button.setProperty("flat", "true")
         self.add_result_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.add_result_button.setToolTip(
@@ -809,25 +969,29 @@ class MainWindow(QMainWindow):
         self.add_result_button.hide()
         search_row.addWidget(self.add_result_button)
 
-        self.new_reminder_button = QPushButton("Новое напоминание")
+        self.new_reminder_button = QPushButton("[ Новое напоминание ]")
         self.new_reminder_button.setProperty("flat", "true")
         self.new_reminder_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.new_reminder_button.setToolTip("Не забыть о чём-то в нужное время")
         self.new_reminder_button.clicked.connect(lambda: self.open_reminder())
         self.new_reminder_button.hide()
         search_row.addWidget(self.new_reminder_button)
-
-        self.filter_label = QLabel()
-        self.filter_label.setFont(theme.mono_font(8))
-        self.filter_label.setProperty("faint", "true")
-        search_row.addWidget(self.filter_label)
         center_layout.addLayout(search_row)
+
+        # Подпись списка («все активные: 7») живёт в заголовке панели.
+        self.filter_label = _CaptionLabel(self.center_panel)
+
+        self.table_header = TableHeader(c)
+        center_layout.addWidget(self.table_header)
 
         self.list = QListWidget()
         self.list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.list.customContextMenuRequested.connect(self._context_menu)
         self.list.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
+        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.list.currentItemChanged.connect(self._on_current_item)
+        self.list.itemActivated.connect(self._on_item_activated)
         # Ширина списка меняется не только вместе с окном — следим за ней самой.
         self.list.viewport().installEventFilter(self)
         center_layout.addWidget(self.list, 1)
@@ -839,14 +1003,19 @@ class MainWindow(QMainWindow):
         empty_layout.setSpacing(16)
         empty_layout.addStretch(1)
 
-        self.empty_art = QLabel()
-        self.empty_art.setPixmap(make_watermark(112, self.colors["text_faint"], 40))
-        self.empty_art.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        clear_background(self.empty_art)
-        empty_layout.addWidget(self.empty_art)
+        self.empty_art = GridText(c)
+        self.empty_art.set_lines([
+            (line, c["text_dim"])
+            for line in ascii_frame(["C:\\TASKS> DIR", "0 ФАЙЛОВ"], 14)
+        ])
+        empty_holder = QHBoxLayout()
+        empty_holder.addStretch(1)
+        empty_holder.addWidget(self.empty_art)
+        empty_holder.addStretch(1)
+        empty_layout.addLayout(empty_holder)
 
         self.empty_label = QLabel()
-        self.empty_label.setProperty("faint", "true")
+        self.empty_label.setProperty("dim", "true")
         self.empty_label.setWordWrap(True)
         self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         empty_layout.addWidget(self.empty_label)
@@ -855,14 +1024,62 @@ class MainWindow(QMainWindow):
         self.empty_box.hide()
         center_layout.addWidget(self.empty_box, 1)
 
+        self.detail_panel = TitledPanel("Задача", c)
+        self.canvas.add_panel(self.detail_panel)
         self.detail = TaskDetail(self.storage, self.settings, self)
         self.detail.setObjectName("detailPanel")
-        # Пиксельный шрифт шире, поэтому панели деталей нужно больше места.
-        detail_width = 430 if theme.is_pixel() else 360
-        self.detail.setMinimumWidth(detail_width)
-        splitter.addWidget(self.detail)
-        splitter.setSizes([700, detail_width])
+        self.detail.title_changed.connect(self.detail_panel.set_title)
+        self.detail_panel.box.addWidget(self.detail)
+        self.detail_panel.setMinimumWidth(theme.px(380))
+        splitter.addWidget(self.detail_panel)
+        splitter.setSizes([theme.px(660), theme.px(440)])
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
         splitter.setCollapsible(0, False)
+        splitter.setCollapsible(1, False)
+
+        self.prompt = PromptLine(c)
+        self.quick_add = self.prompt.input
+        self.quick_add.setPlaceholderText("новая задача  !!  @завтра  #продукт  KEY-123")
+        self.quick_add.returnPressed.connect(self._quick_add)
+        root.addWidget(self.prompt)
+
+        self.fkeys = FKeyBar(c, [
+            (label, (lambda name=name: getattr(self, name)())) for label, name in F_KEYS
+        ])
+        root.addWidget(self.fkeys)
+
+        self.overlay = None
+        self._help_popup = None
+        self._apply_background()
+
+        # Строку состояния окно не показывает: сообщения выводятся справа в
+        # строке ввода, как ответ командной строки.
+        bar = self.statusBar()
+        bar.hide()
+        if not getattr(self, "_status_wired", False):
+            bar.messageChanged.connect(lambda text: self.prompt.set_status(text))
+            self._status_wired = True
+
+    def _apply_background(self) -> None:
+        """Шум, движение и развёртка — из настроек и темы."""
+        name = self.settings.get("theme", theme.DEFAULT_THEME)
+        noise = self.settings.get("ui.noise", "quiet")
+        if noise not in NOISE_LEVELS:
+            noise = "quiet"
+        motion = bool(self.settings.get("ui.motion", True))
+        self.canvas.configure(self.colors, noise, motion)
+        self.ticker.set_motion(motion)
+
+        mode = self.settings.get("ui.scanlines", "theme")
+        scanlines = theme.has_scanlines(name) if mode not in ("on", "off") else mode == "on"
+        if scanlines and self.overlay is None:
+            self.overlay = ScanlineOverlay(self.canvas)
+            self.overlay.show()
+            self.overlay.raise_()
+        elif not scanlines and self.overlay is not None:
+            self.overlay.deleteLater()
+            self.overlay = None
 
     def _update_bar(self) -> QWidget:
         """Полоса «вышла новая версия» с кнопкой обновления."""
@@ -966,88 +1183,94 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Примеры убраны (%d шт.)" % removed, 3000)
 
     def _header(self) -> QWidget:
+        """Шапка: название, бегущая строка телеметрии, дата и время."""
         c = self.colors
         header = QWidget()
         header.setObjectName("appHeader")
+        clear_background(header)
         layout = QHBoxLayout(header)
-        layout.setContentsMargins(20, 14, 20, 10)
-        layout.setSpacing(22)
+        layout.setContentsMargins(theme.px(16), theme.px(18), theme.px(16), theme.px(4))
+        layout.setSpacing(theme.px(16))
 
         logo = QLabel("TASKMANAGER")
-        logo.setFont(theme.accent_font(12, bold=True, spacing=2.5))
-        logo.setStyleSheet("color: %s;" % c["text"])
-        layout.addWidget(logo)
+        logo.setProperty("heading", "true")
+        layout.addWidget(logo, 0, Qt.AlignmentFlag.AlignBottom)
 
-        dot = QLabel("•")
-        dot.setStyleSheet("color: %s; font-size: 18px;" % c["accent"])
-        layout.addWidget(dot)
+        self.ticker = Ticker(c)
+        layout.addWidget(self.ticker, 1, Qt.AlignmentFlag.AlignBottom)
 
-        # Счётчики по спискам показывает боковая панель, состояние дня —
-        # индикатор справа; в шапке остаются только действия.
-        layout.addStretch(1)
+        self.date_label = QLabel()
+        self.date_label.setStyleSheet("color: %s; background: transparent;" % c["text"])
+        layout.addWidget(self.date_label, 0, Qt.AlignmentFlag.AlignBottom)
 
-        self.day_indicator = DayIndicator(c)
-        self.day_indicator.clicked.connect(self.open_daily)
-        layout.addWidget(self.day_indicator)
-        layout.addSpacing(18)
-
-        daily = QPushButton("Отчёт за день")
-        daily.setProperty("flat", "true")
-        daily.clicked.connect(self.open_daily)
-        layout.addWidget(daily)
-
-        calendar_button = QPushButton("Календарь")
-        calendar_button.setProperty("flat", "true")
-        calendar_button.clicked.connect(self.open_calendar)
-        layout.addWidget(calendar_button)
-
-        weekly = QPushButton("Неделя")
-        weekly.setProperty("flat", "true")
-        weekly.clicked.connect(lambda: self.open_weekly())
-        layout.addWidget(weekly)
-
-        history = QPushButton("История")
-        history.setProperty("flat", "true")
-        history.clicked.connect(self.open_history)
-        layout.addWidget(history)
-
-        settings_button = QPushButton("Настройки")
-        settings_button.setProperty("flat", "true")
-        settings_button.clicked.connect(self.open_settings)
-        layout.addWidget(settings_button)
-
+        self.time_label = QLabel()
+        self.time_label.setStyleSheet("color: %s; background: transparent;" % c["bright"])
+        layout.addWidget(self.time_label, 0, Qt.AlignmentFlag.AlignBottom)
+        self._update_clock()
         return header
 
-    def _sidebar_scroll(self) -> QWidget:
-        """Панель в прокрутке: с Jira, продуктами и сводкой она не всегда влезает.
+    def _menu_strip(self) -> QWidget:
+        holder = QWidget()
+        clear_background(holder)
+        layout = QHBoxLayout(holder)
+        layout.setContentsMargins(theme.px(16), theme.px(4), theme.px(16), theme.px(6))
+        self.menu_strip = MenuStrip(self.colors, [
+            ("Отчёт за день", self.open_daily),
+            ("Неделя", lambda: self.open_weekly()),
+            ("Календарь", self.open_calendar),
+            ("История", self.open_history),
+            ("Настройки", self.open_settings),
+        ])
+        layout.addWidget(self.menu_strip)
+        return holder
 
-        Без этого нижние окошки — сводка активности и ближайшие планы —
-        сжимались до обрезанных строк, стоило добавить пару разделов.
-        """
+    def _update_clock(self) -> None:
+        now = datetime.now()
+        weekday = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"][now.weekday()]
+        self.date_label.setText("%s %s" % (weekday, now.strftime("%d.%m.%Y")))
+        self.time_label.setText(now.strftime("%H:%M"))
+
+    def _sidebar_scroll(self) -> QWidget:
+        """Левая колонка в прокрутке: с Jira и продуктами она не всегда влезает."""
         area = QScrollArea()
         area.setObjectName("sidebarScroll")
         area.setWidgetResizable(True)
         area.setFrameShape(QFrame.Shape.NoFrame)
         area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        clear_background(area)
         area.setWidget(self._sidebar())
-        area.setFixedWidth(theme.px(SIDEBAR_WIDTH) + 8)
+        area.setFixedWidth(theme.px(SIDEBAR_WIDTH) + theme.px(8))
         self.sidebar_scroll = area
         return area
 
     def _sidebar(self) -> QWidget:
-        panel = QWidget()
-        panel.setObjectName("sidebarPanel")
-        panel.setFixedWidth(theme.px(SIDEBAR_WIDTH))
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 4, 0, 0)
+        """Три панели: «Сегодня», «Разделы» и отметки за две недели."""
+        c = self.colors
+        column = QWidget()
+        column.setObjectName("sidebarPanel")
+        clear_background(column)
+        column.setFixedWidth(theme.px(SIDEBAR_WIDTH))
+        outer = QVBoxLayout(column)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(theme.px(14))
+
+        outer.addWidget(self._today_panel())
+
+        nav_panel = TitledPanel("Разделы", c)
+        self.canvas.add_panel(nav_panel)
+        self.nav_panel = nav_panel
+        layout = nav_panel.box
         layout.setSpacing(theme.nav_spacing())
         self.sidebar_layout = layout
         self.nav_items: dict[str, NavItem] = {}
 
+        def group(title: str) -> None:
+            caption = section_label(title)
+            layout.addWidget(caption)
+
+        group("квартал")
         # Цели — выше всего: они про квартал, а не про сегодня.
-        self.goals_item = self._nav_item(
-            GOALS, "Цели квартала", STATE_HINTS[GOALS], self.colors["warning"]
-        )
+        self.goals_item = self._nav_item(GOALS, "Цели квартала", STATE_HINTS[GOALS])
         layout.addWidget(self.goals_item)
         self.reminders_item = self._nav_item(
             REMINDERS, "Напоминания", STATE_HINTS[REMINDERS]
@@ -1055,8 +1278,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.reminders_item)
         layout.addSpacing(theme.section_gap())
 
-        layout.addWidget(section_label("когда"))
-        layout.addSpacing(2)
+        group("когда")
         for key, title in HORIZON_FILTERS:
             layout.addWidget(self._nav_item(key, title, HORIZON_HINTS.get(key, "")))
         layout.addWidget(
@@ -1082,8 +1304,7 @@ class MainWindow(QMainWindow):
         )
 
         layout.addSpacing(theme.section_gap())
-        layout.addWidget(section_label("состояние"))
-        layout.addSpacing(2)
+        group("состояние")
         for key, title in STATE_FILTERS:
             layout.addWidget(
                 self._nav_item(key, title, STATE_HINTS.get(key, ""))
@@ -1092,16 +1313,18 @@ class MainWindow(QMainWindow):
         # Продуктов может быть много, поэтому раздел сворачивается и прокручивается.
         layout.addSpacing(theme.section_gap())
         self.products_header = QWidget()
+        clear_background(self.products_header)
         self.products_header.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.products_header.setToolTip("Свернуть или развернуть продукты")
         header_row = QHBoxLayout(self.products_header)
-        header_row.setContentsMargins(0, 0, 4, 0)
-        header_row.setSpacing(6)
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(theme.px(6))
         self.products_caption = section_label("продукты")
-        header_row.addWidget(self.products_caption)
-        header_row.addStretch(1)
+        header_row.addWidget(self.products_caption, 1)
         self.products_arrow = QLabel()
-        self.products_arrow.setFont(theme.mono_font(8))
-        self.products_arrow.setProperty("faint", "true")
+        self.products_arrow.setStyleSheet(
+            "color: %s; background: transparent;" % c["text_dim"]
+        )
         header_row.addWidget(self.products_arrow)
         self.products_header.mousePressEvent = (  # type: ignore[assignment]
             lambda _event: self._toggle_products()
@@ -1120,162 +1343,157 @@ class MainWindow(QMainWindow):
         self.products_box = QWidget()
         self.products_box.setObjectName("productsBox")
         self.products_layout = QVBoxLayout(self.products_box)
-        self.products_layout.setContentsMargins(0, 2, 0, 0)
+        self.products_layout.setContentsMargins(0, 0, 0, 0)
         self.products_layout.setSpacing(theme.nav_spacing())
         self.products_scroll.setWidget(self.products_box)
         self.products_scroll.hide()
         layout.addWidget(self.products_scroll)
-
-        layout.addStretch(1)
-        layout.addSpacing(4)
+        outer.addWidget(nav_panel)
 
         self.activity_box = self._activity_box()
-        layout.addWidget(self.activity_box)
-        layout.addSpacing(6)
+        outer.addWidget(self.activity_box)
+        outer.addStretch(1)
+        return column
 
-        self.plans_box = self._plans_box()
-        layout.addWidget(self.plans_box)
-
-        # Шпаргалка занимает одну строку: подробности всплывают при наведении.
-        layout.addSpacing(6)
-        self.hint_trigger = HintTrigger(self.colors)
-        layout.addWidget(self.hint_trigger)
+    def _today_panel(self) -> QWidget:
+        """«Сегодня»: сколько задач отмечено и заполнен ли отчёт за день."""
+        c = self.colors
+        panel = TitledPanel("Сегодня", c)
+        panel.set_clickable("Открыть отчёт за день")
+        panel.clicked.connect(self.open_daily)
+        self.canvas.add_panel(panel)
+        self.today_panel = panel
+        self.today_caption = QLabel()
+        self.today_caption.setStyleSheet("color: %s; background: transparent;" % c["text"])
+        panel.box.addWidget(self.today_caption)
+        self.today_bar = BlockBar(c)
+        panel.box.addWidget(self.today_bar)
+        self.today_note = QLabel()
+        self.today_note.setWordWrap(True)
+        self.today_note.setStyleSheet("color: %s; background: transparent;" % c["text_dim"])
+        panel.box.addWidget(self.today_note)
         return panel
 
     # Сколько дней показывает диаграмма активности. Две недели — столько же,
     # сколько «без движения» считает задачу залежавшейся.
     ACTIVITY_DAYS = 14
+    ACTIVITY_ROWS = 6
 
     def _activity_box(self) -> QWidget:
-        """Окошко сводки: ASCII-диаграмма работы и два счётчика."""
+        """Панель отметок: диаграмма из полублоков и строка итогов."""
         c = self.colors
-        box = Card(c)
-        box.setCursor(Qt.CursorShape.PointingHandCursor)
-        box.setToolTip("Открыть отчёт за неделю")
-        box.mousePressEvent = lambda _event: self.open_weekly()  # type: ignore[assignment]
-
-        layout = QVBoxLayout(box)
-        layout.setContentsMargins(11, 9, 11, 9)
-        layout.setSpacing(6)
-        # Подпись короткая: в узкой панели длинная обрезается на полуслове.
-        layout.addWidget(section_label("активность // %dд" % self.ACTIVITY_DAYS))
+        box = TitledPanel("Отметки \u00b7 %d дней" % self.ACTIVITY_DAYS, c)
+        box.set_clickable("Открыть отчёт за неделю")
+        box.clicked.connect(lambda: self.open_weekly())
+        self.canvas.add_panel(box)
 
         self.activity_grid = GridText(c)
-        full, half, base = chart_glyphs()
-        self.activity_grid.set_ink({
-            full: c["accent"],
-            half: c["accent"],
-            base: c["border"],
-            theme.glyph("dot"): c["text_faint"],
-        })
-        layout.addWidget(self.activity_grid)
+        box.box.addWidget(self.activity_grid)
+        self.activity_stats = QLabel()
+        self.activity_stats.setWordWrap(True)
+        self.activity_stats.setTextFormat(Qt.TextFormat.RichText)
+        self.activity_stats.setStyleSheet("color: %s; background: transparent;" % c["text_dim"])
+        box.box.addWidget(self.activity_stats)
         return box
 
+    def activity_lines(self, counts: list[int], days: list[date]) -> list:
+        """Диаграмма отметок построчно: (текст, цвет каждой клетки).
+
+        Каждая строка — две ступени высоты: полный блок и половинка. Выходные
+        тише, сегодня ярче, пунктир — на высоте среднего за две недели.
+        """
+        c = self.colors
+        rows = self.ACTIVITY_ROWS
+        top = max(counts) if counts else 0
+        scale = max(top, 1)
+        today = date.today()
+        average = sum(counts) / len(counts) if counts else 0
+        average_row = max(1, round(average / scale * rows)) if average > 0 else 0
+        lines = []
+        for row in range(rows, 0, -1):
+            if row == rows and top:
+                label = str(top)
+            elif row == round(rows / 2) and top > 1:
+                label = str(round(top / 2))
+            else:
+                label = ""
+            text = ("%2s \u2524" % label) if label else "   \u2502"
+            inks = [c["text_dim"]] * len(text)
+            for index, value in enumerate(counts):
+                height = value / scale * rows * 2
+                if height >= 2 * row:
+                    char = "\u2588"
+                elif height >= 2 * row - 1:
+                    char = "\u2584"
+                else:
+                    char = " "
+                day = days[index]
+                if day == today:
+                    ink = c["bright"]
+                elif day.weekday() >= 5:
+                    ink = c["text_dim"]
+                else:
+                    ink = c["text"]
+                if char == " " and row == average_row:
+                    char, ink = "\u00b7", c["faint"]
+                text += char
+                inks.append(ink)
+                if index < len(counts) - 1:
+                    text += "\u00b7" if row == average_row else " "
+                    inks.append(c["faint"])
+            lines.append((text, inks))
+        width = len(counts) * 2 - 1
+        lines.append((" 0 \u253c" + "\u2500" * width, c["text_dim"]))
+
+        axis = [" "] * (4 + width + 3)
+        inks = [c["text_dim"]] * len(axis)
+        marks = [(0, days[0].strftime("%d.%m"))]
+        if len(days) > 8:
+            marks.append((7, days[7].strftime("%d.%m")))
+        for index, stamp in marks:
+            for shift, char in enumerate(stamp):
+                axis[4 + index * 2 + shift] = char
+        today_at = 4 + (len(days) - 1) * 2
+        for shift, char in enumerate("\u25b2сег"):
+            if today_at + shift < len(axis):
+                axis[today_at + shift] = char
+                inks[today_at + shift] = c["bright"]
+        lines.append(("".join(axis).rstrip().ljust(len(axis)), inks))
+        return lines
+
     def _sync_activity_box(self, stale_days: int) -> None:
-        """Пересчитывает диаграмму: по дню на столбик, снизу — два итога."""
+        """Пересчитывает диаграмму: по дню на столбик, снизу — итоги."""
         c = self.colors
         today = date.today()
         start = today - timedelta(days=self.ACTIVITY_DAYS - 1)
-
-        per_day = {start + timedelta(days=i): 0 for i in range(self.ACTIVITY_DAYS)}
-        marks = 0
+        days = [start + timedelta(days=i) for i in range(self.ACTIVITY_DAYS)]
+        per_day = {day: 0 for day in days}
         for log in self.storage.logs_in_range(start, today):
             if log.log_date in per_day:
                 per_day[log.log_date] += 1
-                marks += 1
+        counts = [per_day[day] for day in days]
+        self._activity_counts = counts
 
         closed = 0
         for task in self.storage.list_tasks(include_done=True):
             if task.is_done and task.done_at and start <= task.done_at.date() <= today:
                 closed += 1
 
-        chart = ascii_chart([per_day[day] for day in sorted(per_day)], rows=4)
-        width = max(len(line) for line in chart) if chart else self.ACTIVITY_DAYS
-        lines = [(line, c["accent"]) for line in chart[:-1]]
-        # Цвета знаков могли устареть: тема сменилась, а то и шрифт.
-        full, half, base = chart_glyphs()
-        self.activity_grid.set_ink({
-            full: c["accent"],
-            half: c["accent"],
-            base: c["border"],
-            theme.glyph("dot"): c["text_faint"],
-        })
-        lines.append((chart[-1], c["border"]))
-        lines.append((ascii_readout("отметок", marks, width), c["text_dim"]))
-        lines.append((ascii_readout("закрыто", closed, width), c["text_dim"]))
-        self.activity_grid.set_lines(lines)
+        self.activity_grid.set_lines(self.activity_lines(counts, days))
+        weekday = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+        average = sum(counts) / len(counts)
+        peak = max(counts)
 
-    def _plans_box(self) -> QWidget:
-        """Минималистичное окошко: что и через сколько дней начнётся."""
-        c = self.colors
-        box = Card(c)
-        box.setCursor(Qt.CursorShape.PointingHandCursor)
-        box.setToolTip("Показать все активные задачи — плановые в конце списка")
-        box.mousePressEvent = lambda _event: self.set_filter("active")  # type: ignore[assignment]
+        def number(value) -> str:
+            return '<span style="color: %s">%s</span>' % (c["text"], value)
 
-        layout = QVBoxLayout(box)
-        layout.setContentsMargins(11, 9, 11, 9)
-        layout.setSpacing(6)
-        layout.addWidget(section_label("ближайшие планы"))
-
-        self.plans_lines = QVBoxLayout()
-        self.plans_lines.setContentsMargins(0, 0, 0, 0)
-        self.plans_lines.setSpacing(5)
-        layout.addLayout(self.plans_lines)
-        box.hide()
-        return box
-
-    def _sync_plans_box(self, tasks: list[Task]) -> None:
-        """Показывает ближайшие плановые задачи: название и через сколько дней."""
-        c = self.colors
-        while self.plans_lines.count():
-            item = self.plans_lines.takeAt(0)
-            if item.widget() is not None:
-                item.widget().deleteLater()
-
-        planned = sorted(
-            (t for t in tasks if t.is_planned), key=lambda t: (t.start_date, -t.priority)
-        )
-        self.plans_box.setVisible(bool(planned))
-        if not planned:
-            return
-
-        for task in planned[:4]:
-            line = QWidget()
-            # Без этого строка красится общим фоном окна и на подложке окошка
-            # получаются тёмные полосы.
-            clear_background(line)
-            row = QHBoxLayout(line)
-            row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(8)
-
-            days = task.days_to_start or 0
-            left = QLabel("%d дн." % days if days > 1 else "завтра")
-            left.setFont(theme.accent_font(8))
-
-            title = QLabel(task.title)
-            title.setFont(theme.ui_font(9))
-            title.setStyleSheet("color: %s; background: transparent;" % c["text_dim"])
-            # Сколько места осталось под название: ширина панели минус отступы
-            # окошка и место под «через сколько дней».
-            available = (
-                self.plans_box.parentWidget().width() or 216
-            ) - 24 - 10 - left.fontMetrics().horizontalAdvance(left.text())
-            title.setText(
-                elide_text(title.fontMetrics(), task.title, max(70, available))
-            )
-            title.setToolTip(task.title)
-            row.addWidget(title)
-            row.addStretch(1)
-            left.setStyleSheet("color: %s; background: transparent;" % c["accent"])
-            row.addWidget(left)
-            self.plans_lines.addWidget(line)
-
-        if len(planned) > 4:
-            more = QLabel("и ещё %d" % (len(planned) - 4))
-            more.setFont(theme.mono_font(8))
-            more.setStyleSheet("color: %s; background: transparent;" % c["text_faint"])
-            self.plans_lines.addWidget(more)
+        parts = ["в среднем %s/день" % number(("%.1f" % average).replace(".", ","))]
+        if peak:
+            peak_day = days[len(counts) - 1 - counts[::-1].index(peak)]
+            parts.append("пик %s · %s %s" % (
+                number(peak), weekday[peak_day.weekday()], peak_day.strftime("%d.%m")))
+        parts.append("закрыто %s" % number(closed))
+        self.activity_stats.setText("&nbsp;&nbsp;".join(parts))
 
     def _toggle_products(self) -> None:
         opened = not bool(self.settings.get("sidebar.products_open", True))
@@ -1616,13 +1834,98 @@ class MainWindow(QMainWindow):
             self.tray.show()
 
     def _build_shortcuts(self) -> None:
-        QShortcut(QKeySequence("Ctrl+N"), self, activated=self.quick_add.setFocus)
-        QShortcut(QKeySequence("Ctrl+F"), self, activated=self.search.setFocus)
+        # Ссылки на поля берём в момент нажатия: при смене темы экран
+        # собирается заново, и поля уже другие.
+        QShortcut(QKeySequence("Ctrl+N"), self, activated=self.focus_quick_add)
+        QShortcut(QKeySequence("Ctrl+F"), self, activated=self.focus_search)
         QShortcut(QKeySequence("Ctrl+D"), self, activated=self.open_daily)
         QShortcut(QKeySequence("Ctrl+R"), self, activated=lambda: self.open_weekly())
         QShortcut(QKeySequence("Ctrl+K"), self, activated=self.open_calendar)
         QShortcut(QKeySequence("Ctrl+E"), self, activated=self._log_selected)
         QShortcut(QKeySequence("Ctrl+,"), self, activated=self.open_settings)
+        for index, (_label, name) in enumerate(F_KEYS):
+            QShortcut(
+                QKeySequence("F%d" % (index + 1)), self,
+                activated=lambda name=name: getattr(self, name)(),
+            )
+
+    # --- F-клавиши --------------------------------------------------------------
+
+    def focus_quick_add(self) -> None:
+        if self.quick_add.isVisible():
+            self.quick_add.setFocus()
+
+    def focus_search(self) -> None:
+        if self.search.isVisible():
+            self.search.setFocus()
+            self.search.selectAll()
+
+    def _selected_task(self) -> Task | None:
+        if self.selected_id is None:
+            return None
+        return self.storage.get_task(self.selected_id)
+
+    def edit_selected(self) -> None:
+        if self.selected_id is not None:
+            self.open_task(self.selected_id)
+
+    def toggle_selected(self) -> None:
+        task = self._selected_task()
+        if task is not None:
+            self._toggle_task(task.id, not task.is_done)
+
+    def jira_selected(self) -> None:
+        task = self._selected_task()
+        if task is None:
+            return
+        if task.jira_key:
+            self._open_task_in_jira(task.id)
+        elif self.settings.get("jira.enabled", True):
+            self._ask_jira_key(task.id)
+
+    def delete_selected(self) -> None:
+        task = self._selected_task()
+        if task is not None:
+            self._delete_task(task)
+
+    def menu_selected(self) -> None:
+        """Меню задачи — у её строки, как по правой кнопке."""
+        if self.selected_id is None:
+            return
+        for index in range(self.list.count()):
+            item = self.list.item(index)
+            if item.data(Qt.ItemDataRole.UserRole) == self.selected_id:
+                rect = self.list.visualItemRect(item)
+                self._context_menu(rect.center())
+                return
+
+    def show_help(self) -> None:
+        """Шпаргалка быстрой записи над строкой ввода; второе нажатие прячет."""
+        popup = self._help_popup
+        if popup is not None and popup.isVisible():
+            popup.hide()
+            return
+        if popup is None:
+            popup = self._help_popup = HintPopup(self.colors, self)
+        popup.adjustSize()
+        corner = self.prompt.mapToGlobal(self.prompt.rect().topLeft())
+        popup.move(corner.x() + theme.px(16), corner.y() - popup.height() - theme.px(6))
+        popup.show()
+        popup.raise_()
+        QTimer.singleShot(12000, popup.hide)
+
+    def _on_current_item(self, current, _previous) -> None:
+        """Стрелки в списке выбирают задачу — как курсор в файловом менеджере."""
+        if current is None:
+            return
+        task_id = current.data(Qt.ItemDataRole.UserRole)
+        if task_id is not None and task_id != self.selected_id and task_id in self.rows:
+            self._select_task(task_id)
+
+    def _on_item_activated(self, item) -> None:
+        task_id = item.data(Qt.ItemDataRole.UserRole)
+        if task_id is not None:
+            self.open_task(task_id)
 
     # --- Данные ---------------------------------------------------------------
 
@@ -1994,7 +2297,6 @@ class MainWindow(QMainWindow):
 
         active_tasks = self.storage.list_tasks(include_done=False)
         self._sync_products_nav(active_tasks)
-        self._sync_plans_box(active_tasks)
         self._sync_activity_box(stale_days)
         for key in JIRA_VIEWS:
             if key in self.nav_items:
@@ -2022,8 +2324,13 @@ class MainWindow(QMainWindow):
                 self.filter = "active"
         for key, item in self.nav_items.items():
             item.set_active(key == self.filter and not searching)
-            item.set_count(self._nav_count(key, active_tasks, stale_days, counters))
+            count = self._nav_count(key, active_tasks, stale_days, counters)
+            item.set_count(count)
+            if key == "overdue":
+                item.set_alert(count > 0)
 
+        self.prompt.set_path("ПОИСК" if searching else prompt_path(self._filter_title()))
+        self.ticker.set_text(self.ticker_text(counters))
         self._update_tray_tooltip(counters)
 
     def _filter_title(self) -> str:
@@ -2104,11 +2411,22 @@ class MainWindow(QMainWindow):
         height = row.heightForWidth(width) if row.hasHeightForWidth() else -1
         if height <= 0:
             height = row.sizeHint().height()
-        return height + 4
+        # Строки таблицы стоят вплотную, как строки экрана; карточки — с зазором.
+        return height + (0 if isinstance(row, TaskRow) else 4)
 
     def _remember_rows_width(self) -> None:
         """Запоминает ширину, под которую посчитаны нынешние высоты строк."""
         self._rows_width = self._row_width()
+        self._sync_table_header()
+
+    def _sync_table_header(self) -> None:
+        """Колонки шапки — по ширине строк, иначе срок уезжает от своей подписи."""
+        header = getattr(self, "table_header", None)
+        if header is None:
+            return
+        header.set_row_width(self.list.viewport().width())
+        tasks_shown = any(isinstance(row, TaskRow) for row in getattr(self, "rows", {}).values())
+        header.setVisible(tasks_shown and self.list.isVisible())
 
     def _resize_rows(self) -> None:
         """Пересчитывает высоты строк под нынешнюю ширину списка.
@@ -2148,6 +2466,7 @@ class MainWindow(QMainWindow):
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt naming)
         if watched is self.list.viewport() and event.type() == QEvent.Type.Resize:
             self._queue_row_resize()
+            self._sync_table_header()
         return super().eventFilter(watched, event)
 
     def resizeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
@@ -2162,12 +2481,9 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(2, 8, 2, 4)
         layout.setSpacing(9)
 
+        clear_background(holder)
         caption = section_label("плановые · %d" % count)
-        layout.addWidget(caption)
-        line = QFrame()
-        line.setFixedHeight(1)
-        line.setStyleSheet("background: %s;" % c["border_soft"])
-        layout.addWidget(line, 1)
+        layout.addWidget(caption, 1)
 
         item = QListWidgetItem()
         # В пиксельном стиле строки выше — черта тоже должна занять больше места.
@@ -2195,22 +2511,76 @@ class MainWindow(QMainWindow):
 
     def _sync_day_indicator(self, counters: dict[str, int]) -> None:
         """Сколько задач сегодня уже отмечено и заполнен ли отчёт."""
+        c = self.colors
         today = date.today()
         logs = self.storage.logs_for_date(today)
         done = len({log.task_id for log in logs if log.task_id is not None})
         # За «план на день» считаем задачи со сроком на сегодня и раньше.
         total = max(counters.get("today", 0), done)
-        self.day_indicator.set_clock(datetime.now())
-        self.day_indicator.set_day(done, total, self.storage.has_saved_report(today))
+        saved = self.storage.has_saved_report(today)
+        self._day_numbers = (done, total, saved)
+
+        if done:
+            self.today_caption.setText("Отмечено %d из %d" % (done, max(total, done)))
+        else:
+            self.today_caption.setText("Пока ни одной отметки")
+        if saved:
+            self.today_bar.set_share(1.0, c["bright"])
+            self.today_note.setText("Отчёт за день сохранён")
+        else:
+            self.today_bar.set_share(done / total if total else 0.0)
+            note = "Отчёт за день не заполнен"
+            if self.settings.get("eod.enabled", True):
+                note += " \u00b7 напомню в %s" % self.settings.get("eod.time", "18:00")
+            self.today_note.setText(note)
 
     def _start_clock(self) -> None:
-        """Часы в шапке: раз в полминуты обновляем только текст, без перечитывания."""
+        """Часы в шапке и редкие проверки: напоминания, календарь."""
         self._clock = QTimer(self)
         self._clock.setInterval(30_000)
-        self._clock.timeout.connect(lambda: self.day_indicator.set_clock(datetime.now()))
+        self._clock.timeout.connect(self._update_clock)
         self._clock.timeout.connect(self._check_reminders)
         self._clock.timeout.connect(lambda: self.load_calendar())
         self._clock.start()
+        # Минуты на часах не должны отставать на полминуты: подправляем их
+        # к началу следующей минуты.
+        QTimer.singleShot(
+            (60 - datetime.now().second) * 1000 + 50, self._update_clock
+        )
+
+    def ticker_text(self, counters: dict[str, int]) -> str:
+        """Телеметрия для бегущей строки: синхронизация, счётчики, ближайшее."""
+        parts = []
+        if self._jira_ready():
+            if self._jira_error:
+                parts.append("SYNC JIRA: ОШИБКА")
+            elif self._jira_loaded_at is not None:
+                parts.append("SYNC JIRA %s OK" % self._jira_loaded_at.strftime("%H:%M"))
+            else:
+                parts.append("SYNC JIRA: ЖДУ")
+        done, total, saved = getattr(self, "_day_numbers", (0, 0, False))
+        parts.append("ОТМЕЧЕНО %d/%d" % (done, max(done, total)))
+        parts.append("АКТИВНЫХ %d \u00b7 ПРОСР %d \u00b7 ТИШИНА %d" % (
+            counters.get("active", 0), counters.get("overdue", 0), counters.get("stale", 0)))
+        counts = getattr(self, "_activity_counts", [])
+        if counts:
+            top = max(counts) or 1
+            parts.append("".join(
+                "\u2581" if value == 0 else ("\u2584" if value * 2 <= top else "\u2588")
+                for value in counts
+            ))
+        rng = random.Random(date.today().toordinal())
+        parts.append(" ".join("%04X" % rng.randrange(0x10000) for _ in range(4)))
+        parts.append("ОТЧЁТ ДНЯ: %s" % ("ГОТОВ" if saved else "НЕ ЗАПОЛНЕН"))
+        week = date.today().isocalendar()[1]
+        start = date.today() - timedelta(days=date.today().weekday())
+        marks = len(self.storage.logs_in_range(start, date.today()))
+        parts.append("НЕД %d \u00b7 %d ОТМЕТОК" % (week, marks))
+        upcoming = self.next_event()
+        if upcoming is not None:
+            when, title = upcoming
+            parts.append("БЛИЖАЙШЕЕ: %s %s" % (title.upper()[:40], when.strftime("%H:%M")))
+        return "\u2592\u2591 " + " \u2591 ".join(parts) + " \u2591 "
 
     def _update_tray_tooltip(self, counters: dict[str, int]) -> None:
         self.tray.setToolTip(
@@ -2264,6 +2634,14 @@ class MainWindow(QMainWindow):
         self.selected_id = task_id
         for other_id, row in self.rows.items():
             row.set_selected(other_id == task_id)
+        for index in range(self.list.count()):
+            item = self.list.item(index)
+            if item.data(Qt.ItemDataRole.UserRole) == task_id:
+                if self.list.currentItem() is not item:
+                    self.list.blockSignals(True)
+                    self.list.setCurrentItem(item)
+                    self.list.blockSignals(False)
+                break
         self.detail.show_task(self.storage.get_task(task_id))
 
     def _toggle_task(self, task_id: int, done: bool) -> None:
@@ -2676,7 +3054,7 @@ class MainWindow(QMainWindow):
         return make_icon(self.colors["accent"], self.colors["bg"], theme.is_pixel())
 
     def apply_theme(self) -> None:
-        """Перекрашивает приложение после смены темы или стиля в настройках."""
+        """Перекрашивает приложение после смены темы, масштаба или фона."""
         name = self.settings.get("theme", theme.DEFAULT_THEME)
         theme.set_scale(self.settings.get("ui_scale", theme.DEFAULT_SCALE))
         theme.set_preferred_pixel(self.settings.get("pixel_font", ""))
@@ -2687,16 +3065,14 @@ class MainWindow(QMainWindow):
         icon = self._icon()
         self.setWindowIcon(icon)
         self.tray.setIcon(icon)
-        # Шаг между пунктами меню зависит от стиля — обновляем, не пересобирая
-        # панель: иначе новый интервал появился бы только после перезапуска.
-        for sidebar_layout in (
-            getattr(self, "sidebar_layout", None), getattr(self, "products_layout", None)
-        ):
-            if sidebar_layout is not None:
-                sidebar_layout.setSpacing(theme.nav_spacing())
-        # Виджеты, которые красятся кодом, а не таблицей стилей.
-        for widget in self.nav_items.values():
-            widget.colors = self.colors
+        # Виджеты терминала помнят цвета и размеры — собираем экран заново.
+        query = self.search.text()
+        self._shown_filter = ""
+        self._build()
+        self.search.blockSignals(True)
+        self.search.setText(query)
+        self.search.blockSignals(False)
+        self.refresh(keep_selection=True)
 
     # --- Напоминания ----------------------------------------------------------
 

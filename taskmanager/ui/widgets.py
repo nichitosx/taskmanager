@@ -46,6 +46,13 @@ from ..models import (
     Task,
 )
 from . import theme
+from .terminal import (
+    ROW_PAD,
+    ElidedLabel,
+    FillGlyph,
+    cell_width,
+    column_widths,
+)
 
 
 def wrapped_height(label: QLabel, width: int) -> int:
@@ -221,7 +228,7 @@ class Card(QFrame):
     def __init__(self, colors: dict[str, str], parent=None) -> None:
         super().__init__(parent)
         self.colors = colors
-        self._bg = colors["surface"]
+        self._bg = colors["bg"]
         self._border = colors["border_soft"]
         self._hover_bg = colors["surface_hover"]
         self._bar = ""
@@ -256,21 +263,19 @@ class Card(QFrame):
         super().leaveEvent(event)
 
     def paintEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        # Терминал: прямоугольник в линию толщиной в пиксель шрифта, без
+        # скруглений и уголков. Полоса слева — клетка цвета состояния.
         painter = QPainter(self)
-        pixel = theme.is_pixel()
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, not pixel)
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        path = card_path(rect)
-
-        painter.fillPath(path, QColor(self._hover_bg if self._hover else self._bg))
+        rect = self.rect()
+        painter.fillRect(rect, theme.qcolor(self._hover_bg if self._hover else self._bg))
         if self._bar:
-            painter.save()
-            painter.setClipPath(path)
-            painter.fillRect(QRectF(rect.x(), rect.y(), 3.0, rect.height()), QColor(self._bar))
-            painter.restore()
-        painter.strokePath(path, QPen(QColor(self._border), 1))
-        if theme.is_pixel():
-            paint_brackets(painter, rect, self._corner)
+            painter.fillRect(0, 0, theme.px(3), rect.height(), theme.qcolor(self._bar))
+        line = max(1, theme.px(2))
+        border = theme.qcolor(self._border)
+        painter.fillRect(0, 0, rect.width(), line, border)
+        painter.fillRect(0, rect.height() - line, rect.width(), line, border)
+        painter.fillRect(0, 0, line, rect.height(), border)
+        painter.fillRect(rect.width() - line, 0, line, rect.height(), border)
         painter.end()
 
 
@@ -368,25 +373,43 @@ def manage_window(window, settings, key: str, width: int, height: int) -> None:
 
 
 class SectionLabel(QLabel):
-    """Подпись раздела. В пиксельном стиле — с линейкой до правого края.
+    """Подпись раздела: «── Когда ──────» — линия до правого края.
 
-    Так раздел читается как строка приборной панели, а не как случайное слово
-    над списком: взгляд цепляется за линию и понимает, где кончается группа.
+    Так раздел читается как строка текстового экрана, а не как случайное
+    слово над списком: взгляд цепляется за линию и понимает, где кончается
+    группа. Линии набраны тем же знаком «─», что и рамки, — они ложатся в сетку.
     """
+
+    LEAD = "\u2500\u2500 "
+
+    def __init__(self, text: str = "", parent=None) -> None:
+        super().__init__(text, parent)
+        self.setFont(theme.mono_font())
+        self.setMinimumWidth(0)
+        self._sync_margin()
+
+    def _sync_margin(self) -> None:
+        self.setContentsMargins(self.fontMetrics().horizontalAdvance(self.LEAD), 0, 0, 0)
+
+    def changeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        if event.type() == QEvent.Type.FontChange:
+            self._sync_margin()
+        super().changeEvent(event)
 
     def paintEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         super().paintEvent(event)
-        if not theme.is_pixel():
-            return
-        start = text_width(self, self.text()) + 8
-        if start + 6 > self.width():
-            return
+        metrics = self.fontMetrics()
+        dash = "\u2500"
+        step = max(1, metrics.horizontalAdvance(dash))
+        baseline = (self.height() - metrics.height()) // 2 + metrics.ascent()
         painter = QPainter(self)
-        painter.setPen(QPen(QColor(theme.colors()["border"]), 1))
-        middle = round(self.height() / 2) + 0.5
-        painter.drawLine(
-            QPointF(float(start), middle), QPointF(float(self.width()) - 1, middle)
-        )
+        painter.setFont(self.font())
+        painter.setPen(theme.qcolor(theme.colors()["faint"]))
+        painter.drawText(0, baseline, dash * 2)
+        start = self.contentsMargins().left() + text_width(self, self.text()) + step
+        count = (self.width() - start) // step
+        if count > 0:
+            painter.drawText(start, baseline, dash * count)
         painter.end()
 
 
@@ -404,7 +427,8 @@ def clear_background(widget: QWidget) -> QWidget:
 
 
 def section_label(text: str) -> QLabel:
-    label = SectionLabel(text.upper())
+    """Подпись раздела с заглавной буквы: «── Подпункты ───»."""
+    label = SectionLabel(text[:1].upper() + text[1:])
     label.setProperty("section", "true")
     return label
 
@@ -491,61 +515,41 @@ class CheckCircle(QAbstractButton):
         self.update()
         super().leaveEvent(event)
 
+    def set_ink(self, color: str) -> None:
+        """Цвет отметки поверх инверсной строки — там обычный тусклый не виден."""
+        self._ink = color
+        self.update()
+
     def paintEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        # Квадрат терминала: рамка в два пикселя, отметка — сплошная клетка
+        # с галочкой из тех же квадратных пикселей. Сглаживания нет нарочно.
         c = self.colors
-        pixel = theme.is_pixel()
+        ink = getattr(self, "_ink", "")
         painter = QPainter(self)
-        # В пиксельном стиле сглаживание выключено намеренно: ступеньки на краях
-        # и есть та самая «пиксельность».
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, not pixel)
-        # Рисуем в системе координат 16×16 — размер меняется одной константой.
-        painter.scale(self.SIZE / 16.0, self.SIZE / 16.0)
-        box = QRectF(1.4, 1.4, 13.2, 13.2)
-
-        def draw_shape() -> None:
-            if pixel:
-                painter.drawRect(box)
-            else:
-                painter.drawEllipse(box)
-
-        # Контур рисуем всегда, заливка «вырастает» из центра по ходу анимации.
-        ring = QColor(c["accent"])
-        if not self._hover:
-            ring = QColor(c["text_faint"])
-            ring.setAlphaF(0.55)  # видно, но не спорит с названием задачи
-        painter.setBrush(QColor(c["surface"]))
-        painter.setPen(QPen(ring, 1.3))
-        draw_shape()
+        unit = self.SIZE / 16.0
+        line = max(1, round(2 * unit))
+        frame = QColor(ink or (c["bright"] if self._hover else c["text_dim"]))
+        size = self.SIZE
+        painter.fillRect(0, 0, size, line, frame)
+        painter.fillRect(0, size - line, size, line, frame)
+        painter.fillRect(0, 0, line, size, frame)
+        painter.fillRect(size - line, 0, line, size, frame)
 
         grown = max(0.0, min(1.0, self._fill))
         if grown > 0.01:
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(c["success"]))
-            inset = (1.0 - grown) * 6.6
-            box = QRectF(1.4 + inset, 1.4 + inset, 13.2 - inset * 2, 13.2 - inset * 2)
-            draw_shape()
-
-        if grown > 0.35:
-            tick = QColor("#FFFFFF")
-            tick.setAlphaF(min(1.0, (grown - 0.35) / 0.5))
-        elif self._hover:
-            tick = QColor(c["text_faint"])
-        else:
-            tick = None
-
-        if tick is not None:
-            path = QPainterPath()
-            path.moveTo(4.6, 8.1)
-            path.lineTo(6.9, 10.5)
-            path.lineTo(11.4, 5.3)
-            pen = QPen(tick, 1.9 if pixel else 1.7)
-            cap = Qt.PenCapStyle.SquareCap if pixel else Qt.PenCapStyle.RoundCap
-            join = Qt.PenJoinStyle.MiterJoin if pixel else Qt.PenJoinStyle.RoundJoin
-            pen.setCapStyle(cap)
-            pen.setJoinStyle(join)
-            painter.setPen(pen)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawPath(path)
+            inset = line + round((1.0 - grown) * (size / 2 - line))
+            painter.fillRect(inset, inset, size - inset * 2, size - inset * 2,
+                             QColor(ink or c["accent"]))
+        if grown > 0.6 or (self._hover and grown <= 0.01):
+            if grown > 0.6:
+                tick = QColor(c["accent"] if ink else c["slab_ink"])
+            else:
+                tick = QColor(c["text_dim"])
+            # Галочка из квадратиков: ступень вниз, три вверх.
+            step = max(1, round(2 * unit))
+            for x, y in ((4, 8), (6, 10), (8, 8), (10, 6), (12, 4)):
+                painter.fillRect(round(x * unit) - step // 2, round(y * unit) - step // 2,
+                                 step, step, tick)
         painter.end()
 
 
@@ -849,21 +853,66 @@ def _due_text(task: Task) -> str:
     return "до %s" % task.due_date.strftime("%d.%m")
 
 
-class TaskRow(Card):
-    """Строка списка задач.
+def table_due(task: Task) -> str:
+    """Срок в колонке таблицы — коротко и капслоком там, где горит."""
+    if task.is_done:
+        return ("вып %s" % task.done_at.strftime("%d.%m")) if task.done_at else "выполнена"
+    if task.is_planned:
+        return "старт %s" % task.start_date.strftime("%d.%m")
+    if task.is_asap:
+        return "ASAP"
+    days = task.days_to_due
+    if days is None:
+        return "\u2014"
+    if days < 0:
+        return "!ПРОСР %d ДН" % (-days)
+    if days == 0:
+        return "СЕГОДНЯ"
+    if days == 1:
+        return "завтра"
+    return "%s %s" % (WEEKDAYS_SHORT[task.due_date.weekday()], task.due_date.strftime("%d.%m"))
 
-    Слева — полоска цвета приоритета и круглая отметка, дальше заголовок и
-    строка меток. Двойной клик открывает карточку задачи.
+
+class ClickLabel(ElidedLabel):
+    """Ячейка таблицы, по которой можно щёлкнуть: «jira?», продукт, тревога."""
+
+    clicked = Signal()
+
+    def __init__(self, text: str = "", parent=None) -> None:
+        super().__init__(text, parent)
+        self._active = False
+
+    def make_clickable(self, tooltip: str = "") -> "ClickLabel":
+        self._active = True
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        if tooltip:
+            self.setToolTip(tooltip)
+        return self
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        if self._active and event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
+class TaskRow(QFrame):
+    """Строка таблицы задач: [ ] · ключ · задача · продукт · срок · важность.
+
+    Одна строка — одна задача, как в списке файлов старых оболочек. Выбранная
+    строка — инверсия: тёмный текст на светлой плашке. Просроченное горит
+    тревожным цветом, ASAP — ярким. Двойной клик открывает карточку задачи.
     """
 
     toggled = Signal(int, bool)
     activated = Signal(int)
     clicked = Signal(int)
     log_requested = Signal(int)
-    jira_requested = Signal(int)      # кликнули по метке «jira?»
-    product_requested = Signal(int)   # кликнули по метке продукта
+    jira_requested = Signal(int)      # кликнули по «jira?»
+    product_requested = Signal(int)   # кликнули по продукту
     priority_requested = Signal(int, int)  # задача и уровень, выбранный на шкале
-    warning_clicked = Signal(int)     # кликнули по метке-предупреждению
+    warning_clicked = Signal(int)     # кликнули по тревожной метке
 
     def __init__(
         self,
@@ -877,7 +926,8 @@ class TaskRow(Card):
         worked_today: bool = False,
         parent=None,
     ) -> None:
-        super().__init__(colors, parent)
+        super().__init__(parent)
+        self.colors = colors
         self.task = task
         self.stale_days = stale_days
         self.product_color = product_color
@@ -888,6 +938,10 @@ class TaskRow(Card):
         # Короткая тревожная метка вроде «закрой в jira!»: её ставит тот, кто
         # знает о задаче больше самой строки.
         self.warning = warning
+        self._hover = False
+        self._selected = False
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        self.setFont(theme.mono_font())
         self._build()
         self._apply_style()
 
@@ -896,224 +950,238 @@ class TaskRow(Card):
     def _build(self) -> None:
         c = self.colors
         task = self.task
+        cell = cell_width(self.font())
 
-        # Полоска приоритета рисуется самой карточкой, здесь только отступ под неё.
-        if self.warning:
-            self.set_bar(c["danger"])
-        elif self.worked_today and not task.is_done:
-            self.set_bar(c["success"])
-        elif not task.is_done:
-            if task.is_overdue:
-                self.set_bar(c["danger"])
-            elif task.is_asap:
-                self.set_bar(c["warning"])
-            elif task.priority >= 2:
-                self.set_bar(c[theme.PRIORITY_COLOR_KEYS[task.priority]])
-
-        inner = QHBoxLayout(self)
-        gap = theme.line_extra()
-        inner.setContentsMargins(16, 11 + gap // 2, 14, 11 + gap // 2)
-        inner.setSpacing(12)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(theme.px(6), theme.px(ROW_PAD), theme.px(6), theme.px(ROW_PAD))
+        layout.setSpacing(cell)
 
         self.check = CheckCircle(task.is_done, c)
         self.check.toggled.connect(lambda state: self.toggled.emit(task.id, state))
-        inner.addWidget(self.check, 0, Qt.AlignmentFlag.AlignTop)
+        self.check_cell = QWidget()
+        self.check_cell.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        holder = QHBoxLayout(self.check_cell)
+        holder.setContentsMargins(0, 0, 0, 0)
+        holder.addWidget(self.check, 0, Qt.AlignmentFlag.AlignVCenter)
+        holder.addStretch(1)
+        layout.addWidget(self.check_cell)
 
-        text_col = QVBoxLayout()
-        text_col.setContentsMargins(0, 0, 0, 0)
-        text_col.setSpacing(7 + theme.line_extra())
-        inner.addLayout(text_col, 1)
+        self.mark = QLabel(self._mark_text())
+        self.mark.setFont(theme.mono_font())
+        if self.worked_today and not task.is_done:
+            self.mark.setToolTip("Сегодня по задаче уже была работа")
+        layout.addWidget(self.mark)
 
-        self.title = QLabel(task.title)
-        self.title.setWordWrap(True)
-        strong = task.priority >= 2 and not task.is_done
-        title_font = theme.title_font(bold=strong)
+        self.key = ClickLabel(self._key_text())
+        self.key.setFont(theme.mono_font())
+        if self._asks_jira():
+            self.key.make_clickable("Указать ключ Jira")
+            self.key.clicked.connect(lambda: self.jira_requested.emit(task.id))
+        layout.addWidget(self.key)
+
+        self.title_cell = QWidget()
+        self.title_cell.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        title_row = QHBoxLayout(self.title_cell)
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(cell)
+        self.title = ElidedLabel(task.title)
+        title_font = theme.title_font()
         title_font.setStrikeOut(task.is_done)
         self.title.setFont(title_font)
-        if task.is_done:
-            color = c["text_faint"]
-        elif task.is_planned:
-            color = c["text_dim"]  # работа ещё не началась — строка тише остальных
-        else:
-            color = c["text"]
-        # Шрифт прописан и в стилях метки: иначе общая таблица стилей нарисует
-        # текст шире, чем посчитала высоту строки, и вторая строка обрежется.
-        self.title.setStyleSheet(
-            "color: %s; background: transparent; %s%s"
-            % (
-                color,
-                theme.title_css(bold=strong),
-                " text-decoration: line-through;" if task.is_done else "",
-            )
-        )
-        text_col.addWidget(self.title)
+        title_row.addWidget(self.title, 1)
+        self.extras = QLabel(self._extras_text())
+        self.extras.setFont(theme.mono_font())
+        self.extras.setVisible(bool(self.extras.text()))
+        title_row.addWidget(self.extras)
+        layout.addWidget(self.title_cell, 1)
+        self.setToolTip(self._tooltip())
 
-        self.meta = None
-        pills = self._meta_pills()
-        if pills:
-            self.meta = FlowLayout(spacing=6)
-            text_col.addLayout(self.meta)
-            for pill in pills:
-                self.meta.addWidget(pill)
+        self.product = ClickLabel(task.product.upper() if task.product else "\u2014")
+        self.product.setFont(theme.mono_font())
+        self.product.make_clickable("Сменить продукт")
+        self.product.clicked.connect(lambda: self.product_requested.emit(task.id))
+        layout.addWidget(self.product)
 
-    # --- Размеры --------------------------------------------------------------
-
-    def hasHeightForWidth(self) -> bool:  # noqa: N802 (Qt naming)
-        return True
-
-    def _text_width(self, width: int) -> int:
-        """Сколько места остаётся тексту: без полей, отметки и отступа."""
-        layout = self.layout()
-        if layout is None:
-            return 0
-        margins = layout.contentsMargins()
-        return (
-            width
-            - margins.left()
-            - margins.right()
-            - self.check.width()
-            - layout.spacing()
-        )
-
-    def _title_height(self, text_width: int) -> int:
-        return wrapped_height(self.title, text_width)
-
-    def heightForWidth(self, width: int) -> int:  # noqa: N802 (Qt naming)
-        """Высота строки при заданной ширине.
-
-        Считаем сами, а не полагаемся на вложенные раскладки: горизонтальная
-        раскладка Qt отдаёт вложенной всю ширину, не вычитая отметку, и высота
-        длинного названия выходила заниженной.
-        """
-        text_width = self._text_width(width)
-        if text_width <= 0:
-            return super().heightForWidth(width)
-
-        column = self._title_height(text_width)
-        if self.meta is not None:
-            column += self.meta.spacing() + self.meta.heightForWidth(text_width)
-        margins = self.layout().contentsMargins()
-        body = max(column, self.check.height())
-        return margins.top() + body + margins.bottom()
-
-    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
-        super().resizeEvent(event)
-        fit_title(self.title, self._text_width(self.width()))
-
-    def reset_priority(self) -> None:
-        """Возвращает шкалу к уровню задачи: выбор не подтвердили."""
-        bars = getattr(self, "priority_bars", None)
-        if bars is not None:
-            bars.set_level(self.task.priority)
-
-    def _meta_pills(self) -> list[QWidget]:
-        c = self.colors
-        task = self.task
-        pills: list[QWidget] = []
-
-        # Предупреждение — впереди всего: ради него строку и оставили в списке.
+        self.due = ClickLabel(self.warning.upper() if self.warning else table_due(task))
+        self.due.setFont(theme.mono_font())
         if self.warning:
-            alarm = Pill(self.warning, c["danger"], strong=True)
-            alarm.make_clickable("Открыть задачу в Jira")
-            alarm.clicked.connect(lambda: self.warning_clicked.emit(task.id))
-            pills.append(alarm)
+            self.due.setText("!ЗАКРОЙ JIRA")
+            self.due.make_clickable("Открыть задачу в Jira")
+            self.due.clicked.connect(lambda: self.warning_clicked.emit(task.id))
+        layout.addWidget(self.due)
 
-        if self.worked_today and not task.is_done:
-            pills.append(Pill("сегодня", c["success"], strong=True))
-
-        # Важность идёт первой: по ней глаз выбирает, за что браться.
+        self.priority_bars = None
         if not task.is_done:
             bars = self.priority_bars = PriorityBars(task.priority, c)
             bars.picked.connect(
                 lambda level, task_id=task.id: self.priority_requested.emit(task_id, level)
             )
-            pills.append(bars)
+            self.prio_cell = bars
+        else:
+            self.prio_cell = QLabel("")
+        layout.addWidget(self.prio_cell)
+        self._fit_columns()
 
-        if task.product:
-            product = ProductPill(task.product, self.product_color or c["info"])
-            product.make_clickable("Сменить продукт")
-            product.clicked.connect(lambda: self.product_requested.emit(task.id))
-            pills.append(product)
+    def _asks_jira(self) -> bool:
+        task = self.task
+        return (
+            self.show_jira and not task.jira_key and not task.is_done
+            and task.jira_state != JIRA_NOT_NEEDED
+        )
 
+    def _key_text(self) -> str:
+        if self.task.jira_key:
+            return self.task.jira_key
+        if self._asks_jira():
+            return "jira?"
+        return "\u00b7" * 8
 
-        if task.is_planned:
-            pills.append(Pill(start_text(task), c["info"]))
+    def _mark_text(self) -> str:
+        if self.warning:
+            return "!"
+        if self.worked_today and not self.task.is_done:
+            return "\u221a"
+        return ""
 
+    def _extras_text(self) -> str:
+        """То, что раньше было метками: подпункты, повтор, тишина."""
+        task = self.task
+        parts = []
         done, total = self.subtasks
         if total:
-            complete = done >= total
-            pills.append(
-                Pill(
-                    "%d/%d" % (done, total),
-                    c["success"] if complete else c["text_dim"],
-                    strong=complete,
-                )
-            )
+            parts.append("%d/%d" % (done, total))
+        if task.repeat and not task.is_done and describe_repeat(task.repeat):
+            parts.append("\u21bb")
+        if not task.is_done and task.is_stale(self.stale_days):
+            parts.append("тишина %dд" % task.days_since_activity)
+        # Теги в таблицу не идут: место нужнее названию, а теги видны в карточке.
+        return " ".join(parts)
 
-        repeat = describe_repeat(task.repeat)
-        if repeat and not task.is_done:
-            pills.append(Pill("↻ " + repeat, c["text_dim"]))
-
-        if task.is_asap:
-            pills.append(Pill("ASAP", c["warning"], strong=True))
-
+    def _tooltip(self) -> str:
+        task = self.task
+        lines = [task.title]
+        details = []
+        if self.worked_today and not task.is_done:
+            details.append("сегодня была работа")
         due = _due_text(task)
         if due and not task.is_done:
-            if task.is_overdue:
-                pills.append(Pill(due, c["danger"], strong=True))
-            elif (task.days_to_due or 0) <= 1:
-                pills.append(Pill(due, c["accent"]))
+            details.append(due)
+        if task.is_asap:
+            details.append("ASAP — как можно скорее")
+        repeat = describe_repeat(task.repeat)
+        if repeat:
+            details.append("повтор: " + repeat)
+        if task.tags:
+            details.append(" ".join("#" + tag for tag in task.tags))
+        if details:
+            lines.append(" · ".join(details))
+        return "\n".join(lines)
+
+    # --- Размеры --------------------------------------------------------------
+
+    def _fit_columns(self) -> None:
+        """Ширины колонок — по ширине строки, как у шапки таблицы."""
+        layout = self.layout()
+        margins = layout.contentsMargins()
+        width = self.width() if self.width() > 0 else theme.px(640)
+        widths = column_widths(
+            width - margins.left() - margins.right(), cell_width(self.font())
+        )
+        for name, widget in (
+            ("check", self.check_cell), ("mark", self.mark), ("key", self.key),
+            ("product", self.product), ("due", self.due), ("prio", self.prio_cell),
+        ):
+            if widths[name] <= 0:
+                widget.hide()
             else:
-                pills.append(Pill(due, c["text_dim"]))
+                widget.setFixedWidth(widths[name])
+                widget.show()
 
-        if self.show_jira:
-            if task.jira_key:
-                pills.append(Pill(task.jira_key, c["info"]))
-            elif task.jira_state == JIRA_NOT_NEEDED:
-                pills.append(Pill("без jira", c["text_faint"]))
-            elif not task.is_done:
-                ask_jira = Pill("jira?", c["warning"])
-                ask_jira.make_clickable("Указать ключ Jira")
-                ask_jira.clicked.connect(lambda: self.jira_requested.emit(task.id))
-                pills.append(ask_jira)
+    def line_height(self) -> int:
+        return max(self.fontMetrics().height(), self.check.SIZE)
 
-        if task.is_stale(self.stale_days):
-            pills.append(Pill("тишина %d дн." % task.days_since_activity, c["text_faint"]))
+    def sizeHint(self) -> QSize:  # noqa: N802 (Qt naming)
+        return QSize(theme.px(320), self.line_height() + theme.px(ROW_PAD) * 2)
 
-        for tag in task.tags[:3]:
-            pills.append(Pill("#" + tag, c["text_faint"]))
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 (Qt naming)
+        return False
 
-        return pills
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 (Qt naming)
+        return self.sizeHint().height()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        super().resizeEvent(event)
+        self._fit_columns()
+
+    def reset_priority(self) -> None:
+        """Возвращает шкалу к уровню задачи: выбор не подтвердили."""
+        if self.priority_bars is not None:
+            self.priority_bars.set_level(self.task.priority)
 
     # --- Оформление и события -------------------------------------------------
 
+    def base_color(self) -> str:
+        """Цвет строки: тревога, яркий ASAP, тусклые плановые и выполненные."""
+        c = self.colors
+        task = self.task
+        if self.warning:
+            return c["danger"]
+        if task.is_done:
+            return c["text_faint"]
+        if task.is_overdue:
+            return c["danger"]
+        if task.is_planned:
+            return c["text_dim"]
+        if task.is_asap:
+            return c["bright"]
+        return c["text"]
+
     def _apply_style(self, selected: bool = False) -> None:
         c = self.colors
-        # В пиксельном стиле строка — рамка на общем фоне: заливка тут только
-        # мешала бы, панель и так очерчена линией и уголками.
-        pixel = theme.is_pixel()
-        plain = c["bg"] if pixel else c["surface"]
-        corner = c["text_faint"]
+        self._selected = selected
+        base = self.base_color()
         if selected:
-            border, background = c["accent"], c["surface_hover"]
-            corner = c["accent"]
-        elif self.worked_today and not self.task.is_done:
-            # Зелёная подложка: по задаче сегодня уже что-то сделано, и это
-            # видно, не вчитываясь в метки.
-            border = theme.mix(c["success"], c["border"], 0.55)
-            background = theme.mix(c["success"], plain, 0.14)
-            corner = c["success"]
-        elif self.task.is_overdue:
-            border, background = c["danger"], plain
-            corner = c["danger"]
+            ink = c["slab_ink"]
+            colors = {name: ink for name in ("mark", "key", "title", "extras", "product", "due")}
         else:
-            # В пиксельном стиле рамка заметнее: карточка должна читаться коробкой.
-            border = c["border"] if pixel else c["border_soft"]
-            background = plain
-        self.set_card_colors(background, border, c["surface_hover"], corner)
+            colors = {
+                "mark": c["danger"] if self.warning else c["bright"],
+                "key": (c["bright"] if self._asks_jira()
+                        else (base if self.task.jira_key else c["faint"])),
+                "title": base,
+                "extras": c["text_dim"] if not self.task.is_done else c["text_faint"],
+                "product": base if self.task.product else c["faint"],
+                "due": (c["bright"] if (self.task.days_to_due == 0 and not self.task.is_done
+                                        and not self.task.is_overdue) else base),
+            }
+        for name in colors:
+            widget = getattr(self, name)
+            widget.setStyleSheet("color: %s; background: transparent;" % colors[name])
+        self.check.set_ink(c["slab_ink"] if selected else "")
+        if self.priority_bars is not None:
+            self.priority_bars.set_ink(c["slab_ink"] if selected else "")
+        self.update()
 
     def set_selected(self, selected: bool) -> None:
         self._apply_style(selected)
+
+    def enterEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        self._hover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        self._hover = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        if not (self._selected or self._hover):
+            return
+        painter = QPainter(self)
+        color = self.colors["accent"] if self._selected else self.colors["ghost"]
+        painter.fillRect(self.rect(), theme.qcolor(color))
+        painter.end()
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         self.clicked.emit(self.task.id)
@@ -1501,7 +1569,11 @@ class SubtaskList(QWidget):
 
 
 class NavItem(QFrame):
-    """Пункт бокового меню: название слева, счётчик справа."""
+    """Пункт меню разделов: «► Все активные ........ 19».
+
+    Выбранный пункт — инверсия во всю ширину, как подсвеченная строка в
+    текстовом меню; просроченное горит тревожным цветом.
+    """
 
     clicked = Signal()
 
@@ -1512,21 +1584,33 @@ class NavItem(QFrame):
         self.accent = accent
         # Свой цвет названия: им выделены разделы, которые важнее прочих.
         self.tint = tint
+        self._active = False
+        self._alert = False
+        self._hover = False
         self.setObjectName("navItem")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         horizontal, vertical = theme.nav_padding()
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(horizontal + 1, vertical, horizontal, vertical)
-        layout.setSpacing(8)
+        layout.setContentsMargins(horizontal, vertical, horizontal, vertical)
+        layout.setSpacing(theme.px(6))
 
-        self.title = QLabel(title)
-        self.title.setFont(theme.ui_font(10))
-        layout.addWidget(self.title)
-        layout.addStretch(1)
+        self.mark = QLabel(" ")
+        self.mark.setFont(theme.mono_font())
+        self.mark.setFixedWidth(cell_width(self.mark.font()))
+        layout.addWidget(self.mark)
+
+        self.title = ElidedLabel(title)
+        self.title.setFont(theme.mono_font())
+        self.title.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        layout.addWidget(self.title, 0)
+
+        self.leader = FillGlyph(".", colors["faint"], 0.45)
+        layout.addWidget(self.leader, 1)
 
         self.count = QLabel("")
-        self.count.setFont(theme.accent_font(9))
+        self.count.setFont(theme.mono_font())
         layout.addWidget(self.count)
 
         self.set_active(False)
@@ -1534,22 +1618,50 @@ class NavItem(QFrame):
     def set_count(self, value: int) -> None:
         self.count.setText(str(value) if value else "")
 
+    def set_alert(self, alert: bool) -> None:
+        """Тревожный цвет — у раздела, где что-то горит (просрочка)."""
+        if alert != self._alert:
+            self._alert = alert
+            self._restyle()
+
     def set_active(self, active: bool) -> None:
+        self._active = active
+        self._restyle()
+
+    def is_active(self) -> bool:
+        return self._active
+
+    def _restyle(self) -> None:
         c = self.colors
-        background = c["surface_alt"] if active else "transparent"
-        text = self.tint or (c["text"] if active else c["text_dim"])
-        self.setStyleSheet(
-            "#navItem { background: %s; border-radius: %dpx; }"
-            "#navItem:hover { background: %s; }"
-            % (background, theme.radius("nav"), c["surface_alt"])
-        )
-        font = theme.ui_font(10, bold=active)
-        self.title.setFont(font)
-        self.title.setStyleSheet("color: %s; background: transparent;" % text)
-        self.count.setStyleSheet(
-            "color: %s; background: transparent;"
-            % (self.tint or ((self.accent or c["text_dim"]) if active else c["text_faint"]))
-        )
+        if self._active:
+            ink = c["slab_ink"]
+        elif self._alert:
+            ink = c["danger"]
+        else:
+            ink = self.tint or c["text"]
+        self.mark.setText("\u25ba" if self._active else " ")
+        for label in (self.mark, self.title, self.count):
+            label.setStyleSheet("color: %s; background: transparent;" % ink)
+        self.leader.set_color(ink)
+        self.update()
+
+    def enterEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        self._hover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        self._hover = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        if not (self._active or self._hover):
+            return
+        painter = QPainter(self)
+        color = self.colors["accent"] if self._active else self.colors["ghost"]
+        painter.fillRect(self.rect(), theme.qcolor(color))
+        painter.end()
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         self.clicked.emit()
@@ -2094,25 +2206,18 @@ class JiraIssueRow(Card):
 
 
 class PriorityBars(QWidget):
-    """Важность задачи пятью полосками — как шкала выполненного за день.
+    """Важность задачи пятью клетками: «███░░» — заполнено столько, сколько горит.
 
-    Читается без подписи: одна полоска — можно не спешить, пять — горит.
-    Клик по полоске задаёт уровень, но саму задачу не меняет: строка лишь
-    сообщает о желании, а спрашивает и сохраняет уже окно.
+    Полные блоки читаются издалека; пустые клетки только намечены, чтобы было
+    видно, докуда можно дотянуть. Клик по клетке задаёт уровень, но саму
+    задачу не меняет: строка лишь сообщает о желании, а спрашивает и
+    сохраняет уже окно.
     """
 
     picked = Signal(int)   # выбранный уровень, 0..PRIORITY_LEVELS - 1
 
-    BLOCK = 4
-    GAP = 3
-    # Высота у шкалы та же, что у меток рядом, иначе она висела бы выше их
-    # строки. Сами полоски ниже и стоят на общей с ними нижней линии.
-    HEIGHT = PILL_HEIGHT
-    TALLEST = 13
-    BOTTOM = 4
-    # Самая низкая полоска — чуть выше трети шкалы: лесенка читается как
-    # нарастание, но крайние полоски не выглядят обрубками.
-    LOWEST = 0.38
+    FULL = "\u2588"
+    EMPTY = "\u2591"
 
     def __init__(self, level: int, colors: dict[str, str], editable: bool = True,
                  parent=None) -> None:
@@ -2121,62 +2226,61 @@ class PriorityBars(QWidget):
         self.level = max(0, min(PRIORITY_LEVELS - 1, int(level)))
         self.editable = editable
         self._hover = -1
-        self.setFixedSize(
-            PRIORITY_LEVELS * self.BLOCK + (PRIORITY_LEVELS - 1) * self.GAP, self.HEIGHT
-        )
+        self._ink = ""
+        self.setFont(theme.mono_font())
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setFixedSize(PRIORITY_LEVELS * self.cell(), self.fontMetrics().height())
         marks = "%d из %d" % (self.level + 1, PRIORITY_LEVELS)
         name = PRIORITY_LABELS.get(self.level, "")
         if editable:
             self.setCursor(Qt.CursorShape.PointingHandCursor)
             self.setMouseTracking(True)
             self.setToolTip(
-                "Важность: %s (%s). Кликните по полоске, чтобы изменить" % (name, marks)
+                "Важность: %s (%s). Кликните по клетке, чтобы изменить" % (name, marks)
             )
         else:
             self.setToolTip("Важность: %s (%s)" % (name, marks))
+
+    def cell(self) -> int:
+        return max(1, self.fontMetrics().horizontalAdvance(self.FULL))
 
     def set_level(self, level: int) -> None:
         self.level = max(0, min(PRIORITY_LEVELS - 1, int(level)))
         self.update()
 
-    def _index_at(self, x: int) -> int:
-        step = self.BLOCK + self.GAP
-        return max(0, min(PRIORITY_LEVELS - 1, int(x) // step if step else 0))
+    def set_ink(self, color: str) -> None:
+        """Один цвет для всех клеток — поверх инверсной строки."""
+        self._ink = color
+        self.update()
 
-    def _bar_height(self, index: int) -> int:
-        """Высота полоски: лесенка слева направо."""
-        if PRIORITY_LEVELS < 2:
-            return self.TALLEST
-        share = self.LOWEST + (1.0 - self.LOWEST) * index / (PRIORITY_LEVELS - 1)
-        return max(2, round(self.TALLEST * share))
+    def filled(self) -> int:
+        """Сколько клеток закрашено сейчас (с учётом наведения)."""
+        shown = self._hover if self._hover >= 0 else self.level
+        return shown + 1
+
+    def text(self) -> str:
+        """Шкала знаками — так её удобно проверять."""
+        filled = self.filled()
+        return self.FULL * filled + self.EMPTY * (PRIORITY_LEVELS - filled)
+
+    def _index_at(self, x: int) -> int:
+        return max(0, min(PRIORITY_LEVELS - 1, int(x) // self.cell()))
 
     def paintEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         c = self.colors
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, not theme.is_pixel())
-        painter.setPen(Qt.PenStyle.NoPen)
-
-        # Под курсором показываем будущий выбор, а не текущий уровень.
         shown = self._hover if self._hover >= 0 else self.level
-        filled = QColor(c[theme.PRIORITY_COLOR_KEYS.get(shown, "info")])
-        # Непройденные ступени только намечены: так видно, докуда можно дотянуть.
-        empty = QColor(c["border"])
-        empty.setAlpha(120)
-        # В пиксельном стиле углы прямые — скругление там смотрится чужеродно.
-        radius = 0 if theme.is_pixel() else 1.5
-
-        for index in range(PRIORITY_LEVELS):
-            x = index * (self.BLOCK + self.GAP)
-            height = self._bar_height(index)
-            top = self.HEIGHT - self.BOTTOM - height
-            if index <= shown:
-                painter.setBrush(filled)
-            else:
-                painter.setBrush(empty)
-            if radius:
-                painter.drawRoundedRect(x, top, self.BLOCK, height, radius, radius)
-            else:
-                painter.drawRect(x, top, self.BLOCK, height)
+        color = theme.qcolor(self._ink or c[theme.PRIORITY_COLOR_KEYS.get(shown, "text")])
+        metrics = self.fontMetrics()
+        baseline = (self.height() - metrics.height()) // 2 + metrics.ascent()
+        filled = shown + 1
+        painter = QPainter(self)
+        painter.setFont(self.font())
+        painter.setPen(color)
+        painter.drawText(0, baseline, self.FULL * filled)
+        empty = QColor(color)
+        empty.setAlphaF(0.35)
+        painter.setPen(empty)
+        painter.drawText(filled * self.cell(), baseline, self.EMPTY * (PRIORITY_LEVELS - filled))
         painter.end()
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
@@ -2366,7 +2470,12 @@ class GridText(QWidget):
                     continue
                 font = self._font_for(char)
                 painter.setFont(font)
-                painter.setPen(QColor(self._ink.get(char, color)))
+                # Цвет строки может быть списком — тогда у каждой клетки свой.
+                if isinstance(color, (list, tuple)):
+                    ink = color[column] if column < len(color) else color[-1]
+                else:
+                    ink = self._ink.get(char, color)
+                painter.setPen(theme.qcolor(ink))
                 shift = (cell - QFontMetrics(font).horizontalAdvance(char)) // 2
                 painter.drawText(column * cell + shift, y, char)
         painter.end()

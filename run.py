@@ -59,6 +59,10 @@ def main() -> int:
         )
         return 1
 
+    # Масштаб и шрифт заголовков — до таблицы стилей: размеры в ней
+    # считаются сразу, и заголовки набираются выбранным шрифтом.
+    theme.set_scale(settings.get("ui_scale", theme.DEFAULT_SCALE))
+    theme.set_preferred_pixel(settings.get("pixel_font", ""))
     app.setStyleSheet(
         theme.stylesheet(settings.get("theme", theme.DEFAULT_THEME))
     )

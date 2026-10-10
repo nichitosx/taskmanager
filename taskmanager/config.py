@@ -19,6 +19,9 @@ APP_NAME = "TaskManager"
 DEFAULT_SETTINGS: dict[str, Any] = {
     # Цветовая тема терминала; имена старых тем понимаются и тоже работают.
     "theme": "amber",
+    # Фон экрана: шум из знаков (off/quiet/loud), движение и полосы развёртки
+    # (theme — как у темы, on, off).
+    "ui": {"noise": "quiet", "motion": True, "scanlines": "theme"},
     # Шрифт заголовков; пусто — тот же IBM VGA, что и весь текст.
     "pixel_font": "",
     "stale_days": 5,

@@ -1095,6 +1095,8 @@ class DailyReportDialog(QDialog):
         comment = QLineEdit()
         comment.setPlaceholderText("что сделано")
         comment.setText(existing.get(task.id, ""))
+        # Длинная запись иначе видна «с хвоста»: поле прокручено к курсору.
+        comment.setCursorPosition(0)
         comment.textEdited.connect(lambda text, box=check: box.setChecked(True) if text else None)
         grid.addWidget(comment, row, 4)
 

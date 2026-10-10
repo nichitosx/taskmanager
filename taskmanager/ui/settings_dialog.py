@@ -49,6 +49,7 @@ from ..integrations.jira import (
 )
 from ..reports import GROUPING_BY_DAYS, GROUPING_LABELS, WEEKDAY_NAMES
 from . import theme
+from .terminal import NOISE_LABELS, SCANLINE_MODES
 from .widgets import manage_window, hline, section_label
 
 
@@ -139,6 +140,27 @@ class SettingsDialog(QDialog):
             "за большим монитором — крупнее."
         )
         form.addRow("Масштаб", self.scale_box)
+
+        # Фон экрана: шум из знаков, его движение и полосы развёртки.
+        self.noise_box = QComboBox()
+        for key, title in NOISE_LABELS.items():
+            self.noise_box.addItem(title, key)
+        self.noise_box.setToolTip("Знаки · : ░ 0 1 на фоне, между панелями")
+        form.addRow("Шум на фоне", self.noise_box)
+
+        self.motion_check = QCheckBox("Фон мерцает, строка в шапке бежит")
+        self.motion_check.setToolTip(
+            "Выключите, если движение отвлекает: всё останется на месте"
+        )
+        form.addRow("Движение", self.motion_check)
+
+        self.scanlines_box = QComboBox()
+        for key, title in SCANLINE_MODES.items():
+            self.scanlines_box.addItem(title, key)
+        self.scanlines_box.setToolTip(
+            "Тонкие тёмные полосы, как на стекле старого монитора"
+        )
+        form.addRow("Полосы развёртки", self.scanlines_box)
 
         self.stale_spin = QSpinBox()
         self.stale_spin.setRange(1, 60)
@@ -934,6 +956,11 @@ class SettingsDialog(QDialog):
         self.theme_box.setCurrentIndex(max(index, 0))
         index = self.scale_box.findData(s.get_int("ui_scale", theme.DEFAULT_SCALE))
         self.scale_box.setCurrentIndex(max(index, 0))
+        index = self.noise_box.findData(s.get("ui.noise", "quiet"))
+        self.noise_box.setCurrentIndex(max(index, 0))
+        self.motion_check.setChecked(bool(s.get("ui.motion", True)))
+        index = self.scanlines_box.findData(s.get("ui.scanlines", "theme"))
+        self.scanlines_box.setCurrentIndex(max(index, 0))
         self._fill_fonts()
         self.stale_spin.setValue(s.get_int("stale_days", 5))
         self.confirm_check.setChecked(bool(s.get("confirm_done", True)))
@@ -1101,6 +1128,9 @@ class SettingsDialog(QDialog):
         s = self.settings
         s.set("theme", self.theme_box.currentData())
         s.set("ui_scale", self.scale_box.currentData())
+        s.set("ui.noise", self.noise_box.currentData())
+        s.set("ui.motion", self.motion_check.isChecked())
+        s.set("ui.scanlines", self.scanlines_box.currentData())
         s.set("pixel_font", self.pixel_font_box.currentData() or "")
         s.set("stale_days", self.stale_spin.value())
         s.set("updates.check_on_start", self.update_check_box.isChecked())

@@ -548,6 +548,25 @@ def tint(color: str, alpha: float) -> str:
     return "rgba(%d, %d, %d, %d)" % (red, green, blue, max(0, min(255, round(alpha * 255))))
 
 
+def qcolor(value: str):
+    """QColor из «#rrggbb» или «rgba(r, g, b, a)».
+
+    QColor сам понимает только первое, а строку rgba(...) молча делает чёрной.
+    """
+    from PySide6.QtGui import QColor
+
+    text = (value or "").strip()
+    if text.startswith("rgba(") and text.endswith(")"):
+        try:
+            red, green, blue, alpha = (int(float(part)) for part in text[5:-1].split(","))
+        except ValueError:
+            return QColor(0, 0, 0, 0)
+        return QColor(red, green, blue, alpha)
+    if text == "transparent":
+        return QColor(0, 0, 0, 0)
+    return QColor(text)
+
+
 def theme_name(theme: str) -> str:
     """Имя темы из нынешних: старые и незнакомые уходят в ближайшую."""
     theme = PALETTE_ALIASES.get(theme, theme)
@@ -730,6 +749,16 @@ QPushButton[tiny="true"] {
     min-width: 16px;
 }
 QPushButton[tiny="true"]:hover { color: %(bright)s; background: transparent; }
+
+/* Строка ввода внизу окна: голый текст после приглашения. */
+QLineEdit[prompt="true"] {
+    background: transparent;
+    border: none;
+    color: %(bright)s;
+    padding: 6px 0;
+}
+QLineEdit[prompt="true"]:focus { border: none; }
+QPushButton[menu="true"] { padding: 0 8px; }
 
 /* Поле, которое выглядит как текст: правка названия подпункта на месте. */
 QLineEdit[seamless="true"] {
