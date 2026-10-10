@@ -598,7 +598,9 @@ class TaskDetail(QWidget):
             parts.append(task.product)
         if task.is_planned:
             parts.append(start_text(task))
-        if task.due_date:
+        if task.is_asap:
+            parts.append("ASAP — как можно скорее")
+        elif task.due_date:
             parts.append("срок %s" % fmt_date(task.due_date))
         if self.settings.get("jira.enabled", True):
             if task.jira_key:
@@ -2233,7 +2235,7 @@ class MainWindow(QMainWindow):
             return
         task = quickadd.parse(text)
         # Срок из выбранного списка, если в самой строке его не указали.
-        if task.due_date is None and task.start_date is None:
+        if task.due_date is None and task.start_date is None and not task.asap:
             task.due_date = default_due(self.filter)
         products_module.apply_to_task(task, self.settings)
         created = self.storage.add_task(task)

@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     status           TEXT DEFAULT 'active',
     priority         INTEGER DEFAULT 1,
     due_date         TEXT,
+    asap             INTEGER DEFAULT 0,
     start_date       TEXT,
     product          TEXT DEFAULT '',
     repeat_rule      TEXT DEFAULT '',
@@ -148,6 +149,7 @@ class Storage:
             ("start_date", "ALTER TABLE tasks ADD COLUMN start_date TEXT"),
             ("product", "ALTER TABLE tasks ADD COLUMN product TEXT DEFAULT ''"),
             ("repeat_rule", "ALTER TABLE tasks ADD COLUMN repeat_rule TEXT DEFAULT ''"),
+            ("asap", "ALTER TABLE tasks ADD COLUMN asap INTEGER DEFAULT 0"),
         ):
             if name not in columns:
                 self.conn.execute(ddl)
@@ -160,16 +162,18 @@ class Storage:
     def add_task(self, task: Task) -> Task:
         now = _now()
         cur = self.conn.execute(
-            """INSERT INTO tasks (title, notes, status, priority, due_date, start_date,
-                                  product, repeat_rule, jira_key, jira_state, tags,
-                                  created_at, updated_at, last_activity_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            """INSERT INTO tasks (title, notes, status, priority, due_date, asap,
+                                  start_date, product, repeat_rule, jira_key,
+                                  jira_state, tags, created_at, updated_at,
+                                  last_activity_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 task.title.strip(),
                 task.notes,
                 task.status,
                 task.priority,
                 task.due_date.isoformat() if task.due_date else None,
+                1 if task.asap else 0,
                 task.start_date.isoformat() if task.start_date else None,
                 task.product,
                 task.repeat,
@@ -192,7 +196,7 @@ class Storage:
             activity = task.last_activity_at.isoformat(timespec="seconds")
         self.conn.execute(
             """UPDATE tasks SET title=?, notes=?, status=?, priority=?, due_date=?,
-                                start_date=?, product=?, repeat_rule=?, jira_key=?,
+                                asap=?, start_date=?, product=?, repeat_rule=?, jira_key=?,
                                 jira_state=?, tags=?, updated_at=?, done_at=?,
                                 last_activity_at=?
                WHERE id=?""",
@@ -202,6 +206,7 @@ class Storage:
                 task.status,
                 task.priority,
                 task.due_date.isoformat() if task.due_date else None,
+                1 if task.asap else 0,
                 task.start_date.isoformat() if task.start_date else None,
                 task.product,
                 task.repeat,

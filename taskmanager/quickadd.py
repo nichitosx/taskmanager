@@ -47,9 +47,13 @@ _WEEKDAYS = {
     "вс": 6, "воскресенье": 6, "sun": 6,
 }
 
+# «Как можно скорее» — и по-английски, как пишут в рабочих чатах, и по-русски.
+ASAP_WORDS = ("@asap", "@срочно", "@аsap")
+
 HELP_TEXT = (
     "Быстрый ввод: !! — высокий приоритет, !!! — критично, ! низкий;\n"
-    "@сегодня @завтра @пт @25.12 @+3 — срок; #тег — метка;\n"
+    "@сегодня @завтра @пт @25.12 @+3 — срок; @asap — как можно скорее;\n"
+    "#тег — метка; "
     "PROJ-142 — ключ Jira подхватится автоматически."
 )
 
@@ -134,6 +138,9 @@ def parse(text: str, today: date | None = None) -> Task:
         if low.startswith("!") and low[1:] in _PRIORITY_WORDS:
             task.priority = _PRIORITY_WORDS[low[1:]]
             continue
+        if low in ASAP_WORDS:
+            task.asap = True
+            continue
         if token.startswith("@") and len(token) > 1:
             due = parse_due(token, today)
             if due:
@@ -156,6 +163,9 @@ def parse(text: str, today: date | None = None) -> Task:
             continue
         rest.append(token)
 
+    # ASAP и дата друг друга исключают: «как можно скорее» сильнее любого срока.
+    if task.asap:
+        task.due_date = None
     task.title = " ".join(rest).strip()
     if not task.title:
         # Строка состояла только из модификаторов — оставим исходный текст.

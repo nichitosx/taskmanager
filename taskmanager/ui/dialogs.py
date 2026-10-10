@@ -48,6 +48,7 @@ from ..storage import Storage
 from . import theme
 from .widgets import (
     CheckCircle,
+    DueField,
     GoalResultList,
     PriorityBars,
     ProductPill,
@@ -499,9 +500,6 @@ class TaskDialog(QDialog):
         priority_col.addLayout(bars_row)
         row.addLayout(priority_col, 1)
 
-        due_col, self.due_check, self.due_edit = self._date_field("срок", "Задача со сроком")
-        row.addLayout(due_col, 1)
-
         start_col, self.start_check, self.start_edit = self._date_field(
             "начало", "Плановая задача: работа начнётся с этой даты"
         )
@@ -513,6 +511,11 @@ class TaskDialog(QDialog):
         self.start_hint.setProperty("faint", "true")
         self.start_hint.setFont(theme.mono_font(8))
         layout.addWidget(self.start_hint)
+
+        # Срок — отдельной строкой во всю ширину: дата, быстрые даты, ASAP.
+        layout.addWidget(section_label("срок"))
+        self.due_field = DueField(self.colors)
+        layout.addWidget(self.due_field)
 
         row2 = QHBoxLayout()
         row2.setSpacing(14)
@@ -700,8 +703,9 @@ class TaskDialog(QDialog):
 
     def _anchor_date(self):
         """Дата, от которой отсчитывается повторение: срок, иначе начало, иначе сегодня."""
-        if self.due_check.isChecked():
-            return self.due_edit.date().toPython()
+        due, _asap = self.due_field.value()
+        if due is not None:
+            return due
         if self.start_check.isChecked():
             return self.start_edit.date().toPython()
         return date.today()
@@ -744,10 +748,7 @@ class TaskDialog(QDialog):
         task = self.task
         self.title_edit.setText(task.title)
         self._pick_priority(task.priority)
-        self.due_check.setChecked(task.due_date is not None)
-        self.due_edit.setEnabled(task.due_date is not None)
-        if task.due_date:
-            self.due_edit.setDate(QDate(task.due_date.year, task.due_date.month, task.due_date.day))
+        self.due_field.set_value(task.due_date, task.asap)
         self.start_check.setChecked(task.start_date is not None)
         self.start_edit.setEnabled(task.start_date is not None)
         if task.start_date:
@@ -829,7 +830,7 @@ class TaskDialog(QDialog):
         task = self.task
         task.title = title
         task.priority = self.priority_bars.level
-        task.due_date = self.due_edit.date().toPython() if self.due_check.isChecked() else None
+        task.due_date, task.asap = self.due_field.value()
         task.start_date = (
             self.start_edit.date().toPython() if self.start_check.isChecked() else None
         )

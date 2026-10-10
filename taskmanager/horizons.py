@@ -97,6 +97,9 @@ def in_horizon(task: Task, horizon: str, today: date | None = None) -> bool:
     # кроме случая, когда старт наступает внутри самого горизонта.
     if task.is_planned:
         return task.start_date is not None and task.start_date <= bound
+    if task.is_asap:
+        # «Как можно скорее» — это заведомо сегодняшняя работа.
+        return True
     if task.due_date is None:
         # Без срока задача никуда по времени не относится: её место — в общем
         # списке, иначе горизонты превратятся в свалку.
@@ -123,15 +126,17 @@ def horizon_counts(tasks: list[Task], today: date | None = None) -> dict[str, in
 def order_key(task: Task, today: date | None = None) -> tuple:
     """Ключ сортировки списка задач.
 
-    Сначала важность: критичное всегда выше обычного. Внутри одной важности —
-    срочность: просроченное, потом сегодняшнее, потом по возрастанию срока, а
-    задачи без срока в самом конце. Плановые уезжают ниже всех: работать по ним
-    ещё рано.
+    Просроченное — всегда наверху, какой бы ни была важность: срок уже сорван.
+    Сразу за ним — ASAP, «как можно скорее». Дальше важность: критичное выше
+    обычного, а внутри одной важности — по сроку, ближайший выше, задачи без
+    срока в конце. Плановые уезжают ниже всех: работать по ним ещё рано.
     """
     today = today or date.today()
     days_left = (task.due_date - today).days if task.due_date else None
     return (
         1 if task.is_planned else 0,      # плановые — в конец
+        0 if task.is_overdue else 1,      # просроченное — наверх
+        0 if task.is_asap else 1,         # за ним — «как можно скорее»
         -task.priority,                   # важность: критичное выше
         0 if days_left is not None else 1,  # без срока — после сроковых
         days_left if days_left is not None else 0,  # ближайший срок выше

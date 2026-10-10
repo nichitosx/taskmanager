@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 from PySide6.QtCore import (
     QAbstractAnimation,
@@ -659,6 +659,170 @@ class ProductPill(Pill):
         painter.end()
 
 
+WEEKDAYS_SHORT = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+
+
+class DueField(QWidget):
+    """Срок задачи: дата из календаря, «как можно скорее» или без срока.
+
+    Раньше срок задавался безымянной галочкой и полем даты, а календарь
+    открывался только по крошечной стрелке. Теперь дата — кнопка, по которой
+    сразу всплывает календарь; рядом быстрые даты, а под ними две подписанные
+    галочки: ASAP и «без срока». Три режима друг друга исключают.
+    """
+
+    changed = Signal()
+
+    # Быстрые даты: подпись и сдвиг от сегодня; «пт» — ближайшая пятница.
+    QUICK = (("сегодня", 0), ("завтра", 1), ("пт", "friday"), ("+неделя", 7))
+
+    def __init__(self, colors: dict[str, str], parent=None) -> None:
+        super().__init__(parent)
+        from PySide6.QtWidgets import QCheckBox, QPushButton
+
+        self.colors = colors
+        self._date = date.today()
+        self._popup = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        top = QHBoxLayout()
+        top.setSpacing(6)
+        self.date_button = QPushButton()
+        self.date_button.setToolTip("Выбрать дату в календаре")
+        self.date_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.date_button.clicked.connect(self.open_calendar)
+        top.addWidget(self.date_button, 1)
+        self.quick_buttons = []
+        for caption, shift in self.QUICK:
+            button = QPushButton(caption)
+            button.setProperty("flat", "true")
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.clicked.connect(lambda _=False, s=shift: self.set_date(self.quick_date(s)))
+            self.quick_buttons.append(button)
+            top.addWidget(button)
+        layout.addLayout(top)
+
+        modes = QHBoxLayout()
+        modes.setSpacing(18)
+        self.asap_check = QCheckBox("ASAP — как можно скорее")
+        self.asap_check.setToolTip("Без даты, но срочнее любой задачи со сроком")
+        self.none_check = QCheckBox("Без срока")
+        modes.addWidget(self.asap_check)
+        modes.addWidget(self.none_check)
+        modes.addStretch(1)
+        layout.addLayout(modes)
+
+        self.asap_check.toggled.connect(self._asap_toggled)
+        self.none_check.toggled.connect(self._none_toggled)
+        self._sync()
+
+    # --- Значение ------------------------------------------------------------------
+
+    @staticmethod
+    def quick_date(shift, today: date | None = None) -> date:
+        today = today or date.today()
+        if shift == "friday":
+            return today + timedelta(days=(4 - today.weekday()) % 7)
+        return today + timedelta(days=int(shift))
+
+    def mode(self) -> str:
+        if self.asap_check.isChecked():
+            return "asap"
+        if self.none_check.isChecked():
+            return "none"
+        return "date"
+
+    def value(self) -> tuple[date | None, bool]:
+        """Срок и признак ASAP — ровно то, что ляжет в задачу."""
+        mode = self.mode()
+        return (self._date if mode == "date" else None), mode == "asap"
+
+    def set_value(self, due: date | None, asap: bool = False) -> None:
+        if due is not None:
+            self._date = due
+        for check, state in ((self.asap_check, asap), (self.none_check, not asap and due is None)):
+            check.blockSignals(True)
+            check.setChecked(state)
+            check.blockSignals(False)
+        self._sync()
+
+    def set_date(self, day: date) -> None:
+        """Выбрали дату — значит, режим «дата»: галочки снимаются."""
+        self._date = day
+        for check in (self.asap_check, self.none_check):
+            check.blockSignals(True)
+            check.setChecked(False)
+            check.blockSignals(False)
+        self._sync()
+        self.changed.emit()
+
+    # --- Режимы --------------------------------------------------------------------
+
+    def _asap_toggled(self, on: bool) -> None:
+        if on:
+            self.none_check.blockSignals(True)
+            self.none_check.setChecked(False)
+            self.none_check.blockSignals(False)
+        self._sync()
+        self.changed.emit()
+
+    def _none_toggled(self, on: bool) -> None:
+        if on:
+            self.asap_check.blockSignals(True)
+            self.asap_check.setChecked(False)
+            self.asap_check.blockSignals(False)
+        self._sync()
+        self.changed.emit()
+
+    def _sync(self) -> None:
+        mode = self.mode()
+        if mode == "asap":
+            text = "ASAP"
+        elif mode == "none":
+            text = "без срока"
+        else:
+            text = "%s %s" % (WEEKDAYS_SHORT[self._date.weekday()], self._date.strftime("%d.%m.%Y"))
+        self.date_button.setText(text + "  ▾")
+
+    # --- Календарь -----------------------------------------------------------------
+
+    def open_calendar(self) -> None:
+        """Календарь всплывает прямо под кнопкой; выбор даты закрывает его."""
+        from PySide6.QtCore import QDate, QPoint
+        from PySide6.QtWidgets import QCalendarWidget
+
+        popup = QFrame(self, Qt.WindowType.Popup)
+        popup.setObjectName("duePopup")
+        popup.setStyleSheet(
+            "#duePopup { background: %s; border: 1px solid %s; }"
+            % (self.colors["surface"], self.colors["border"])
+        )
+        box = QVBoxLayout(popup)
+        box.setContentsMargins(6, 6, 6, 6)
+        calendar = QCalendarWidget(popup)
+        calendar.setFirstDayOfWeek(Qt.DayOfWeek.Monday)
+        calendar.setGridVisible(False)
+        calendar.setVerticalHeaderFormat(QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader)
+        calendar.setSelectedDate(QDate(self._date.year, self._date.month, self._date.day))
+
+        def picked(day) -> None:
+            self.set_date(day.toPython())
+            popup.close()
+
+        calendar.clicked.connect(picked)
+        calendar.activated.connect(picked)
+        box.addWidget(calendar)
+        popup.adjustSize()
+        popup.move(self.date_button.mapToGlobal(QPoint(0, self.date_button.height() + 2)))
+        popup.show()
+        calendar.setFocus()
+        self._popup = popup
+        self._calendar = calendar
+
+
 def _due_text(task: Task) -> str:
     days = task.days_to_due
     if days is None:
@@ -728,6 +892,8 @@ class TaskRow(Card):
         elif not task.is_done:
             if task.is_overdue:
                 self.set_bar(c["danger"])
+            elif task.is_asap:
+                self.set_bar(c["warning"])
             elif task.priority >= 2:
                 self.set_bar(c[theme.PRIORITY_COLOR_KEYS[task.priority]])
 
@@ -875,6 +1041,9 @@ class TaskRow(Card):
         if repeat and not task.is_done:
             pills.append(Pill("↻ " + repeat, c["text_dim"]))
 
+        if task.is_asap:
+            pills.append(Pill("ASAP", c["warning"], strong=True))
+
         due = _due_text(task)
         if due and not task.is_done:
             if task.is_overdue:
@@ -948,6 +1117,7 @@ QUICK_HELP = [
     ("!!!", "критично"),
     ("@завтра  @пт  @25.12", "срок"),
     ("@кмес", "конец месяца"),
+    ("@asap", "как можно скорее"),
     (">15.10  >+14", "начать позже"),
     ("#тег", "метка"),
     ("PROJ-142", "ключ Jira"),

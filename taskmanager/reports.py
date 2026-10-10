@@ -572,7 +572,9 @@ def _render_tasks_body(data: dict, with_jira: bool = True) -> list[str]:
         if task.product:
             meta.append("продукт: %s" % task.product)
         meta.append("приоритет: %s" % PRIORITY_LABELS.get(task.priority, "обычный"))
-        if task.due_date:
+        if task.is_asap:
+            meta.append("ASAP")
+        elif task.due_date:
             meta.append("срок %s" % fmt_date(task.due_date))
         if task.status == STATUS_DONE:
             meta.append("завершена")
