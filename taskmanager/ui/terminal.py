@@ -270,6 +270,7 @@ class TitledPanel(QFrame):
         self.colors = colors
         self._title = title
         self._clickable = False
+        self._corner: QWidget | None = None
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
         self.box = QVBoxLayout(self)
         self.box.setSpacing(theme.px(6))
@@ -295,6 +296,28 @@ class TitledPanel(QFrame):
         if title != self._title:
             self._title = title
             self.update()
+
+    def set_corner(self, widget: QWidget) -> None:
+        """Виджет на правом краю верхней рамки — например, листание «◄ назад │ вперёд ►»."""
+        self._corner = widget
+        widget.setParent(self)
+        widget.show()
+        self._place_corner()
+
+    def _place_corner(self) -> None:
+        if self._corner is None:
+            return
+        hint = self._corner.sizeHint()
+        height = max(hint.height(), self._title_height())
+        top = self._border_top() + theme.px(self.BORDER) // 2 - height // 2
+        self._corner.setGeometry(
+            self.width() - hint.width() - theme.px(16), max(0, top), hint.width(), height
+        )
+        self._corner.raise_()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        super().resizeEvent(event)
+        self._place_corner()
 
     def set_clickable(self, tooltip: str = "") -> None:
         self._clickable = True
@@ -331,6 +354,8 @@ class TitledPanel(QFrame):
             text = "[ %s ]" % self._title
             width = metrics.horizontalAdvance(text)
             available = self.width() - theme.px(14) * 2 - theme.px(12)
+            if self._corner is not None:
+                available -= self._corner.width() + theme.px(16)
             if width > available > 0:
                 text = metrics.elidedText(text, Qt.TextElideMode.ElideRight, available)
                 width = metrics.horizontalAdvance(text)
@@ -865,3 +890,22 @@ class TableHeader(QWidget):
         line = theme.px(2)
         painter.fillRect(0, self.height() - line, width, line, _qcolor(c["faint"]))
         painter.end()
+
+
+def link_button(text: str, tooltip: str = ""):
+    """Кнопка без рамки — слово в строке, при наведении инверсия."""
+    from PySide6.QtWidgets import QPushButton
+
+    button = QPushButton(text)
+    button.setProperty("link", "true")
+    button.setCursor(Qt.CursorShape.PointingHandCursor)
+    if tooltip:
+        button.setToolTip(tooltip)
+    return button
+
+
+def glyph_label(char: str, color: str) -> QLabel:
+    """Одиночный знак рамки: «│», «>»."""
+    label = QLabel(char)
+    label.setStyleSheet("color: %s; background: transparent;" % color)
+    return label

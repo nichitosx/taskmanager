@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import html
+import re
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -21,6 +23,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSplitter,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
@@ -32,6 +35,7 @@ from ..integrations.confluence import (
     ConfluenceClient,
     ConfluenceConfig,
     ConfluenceError,
+    _first_column_spans,
     markdown_to_storage,
 )
 from ..models import JIRA_CREATED, JIRA_NOT_NEEDED, PRIORITY_LABELS
@@ -55,7 +59,126 @@ from ..reports import (
 )
 from ..storage import Storage
 from . import theme
-from .widgets import clear_background, manage_window, hline, section_label
+from .terminal import (
+    LeaderRow,
+    TitledPanel,
+    cell_width,
+    glyph_label,
+    link_button,
+)
+from .widgets import GridText, clear_background, manage_window, hline, section_label
+
+
+TABLE_HEADER = ["Статус", "Задача", "Тема", "Результат за неделю"]
+
+
+def week_table_html(markdown: str, colors: dict) -> str:
+    """Таблица отчёта для экрана: та же, что уйдёт в Confluence.
+
+    Статус группы — одна высокая клетка на все её строки, как и после
+    вставки; ключ и тема — ссылками на Jira.
+    """
+    rows = []
+    for line in markdown.splitlines():
+        text = line.strip()
+        if not text.startswith("|") or set(text) <= set("|-: "):
+            continue
+        rows.append([cell.strip() for cell in text.strip("|").split("|")])
+    if rows and rows[0] and rows[0][0] == TABLE_HEADER[0]:
+        header = rows.pop(0)
+    else:
+        header = TABLE_HEADER
+    if not rows:
+        return '<p style="color: %s">за неделю ничего не отмечено</p>' % colors["text_dim"]
+
+    def inline(text: str) -> str:
+        text = html.escape(text.replace("**", ""))
+        return re.sub(
+            r"\[(.+?)\]\((.+?)\)",
+            r'<a href="\2" style="color: %s; text-decoration: none">\1</a>' % colors["text"],
+            text,
+        )
+
+    # Статус и ключ — по ширине их слов, чтобы ключ не рвался на две строки.
+    cell = cell_width()
+    widths = [str(cell * 12), str(cell * 10), "32%", ""]
+    style = 'style="color: %s; border-color: %s"'
+    parts = [
+        '<table width="100%%" cellspacing="0" cellpadding="6" border="1" '
+        'style="border-collapse: collapse; border-color: %s; border-style: solid">'
+        % colors["dim"],
+        "<tr>",
+    ]
+    for index, caption in enumerate(header):
+        width = ' width="%s"' % widths[index] if index < len(widths) and widths[index] else ""
+        parts.append('<th align="left"%s %s><span style="font-weight: 400">%s</span></th>'
+                     % (width, style % (colors["text_dim"], colors["dim"]), html.escape(caption)))
+    parts.append("</tr>")
+
+    spans = _first_column_spans(rows, 0)
+    quiet = ("выполнено", "за неделю ничего не отмечено")
+    for number, row in enumerate(rows):
+        parts.append("<tr>")
+        for column, value in enumerate(row):
+            if column == 0:
+                if number not in spans:
+                    continue
+                ink = colors["bright"] if value.lower().startswith("выполн") else colors["text"]
+                parts.append('<td rowspan="%d" valign="top" %s>%s</td>'
+                             % (spans[number], style % (ink, colors["dim"]), inline(value)))
+                continue
+            ink = colors["text"]
+            text = inline(value)
+            if column == 1 and not value:
+                ink, text = colors["faint"], "\u00b7" * 8
+            elif value.lower() in quiet:
+                ink = colors["text_dim"]
+            parts.append('<td valign="top" %s>%s</td>' % (style % (ink, colors["dim"]), text))
+        parts.append("</tr>")
+    parts.append("</table>")
+    return "".join(parts)
+
+
+def week_chart_lines(counts: list[int], days: list[date], colors: dict) -> list:
+    """Отметки по дням недели: столбик в три клетки на день, подписи снизу."""
+    names = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+    rows = 5
+    top = max(counts) if counts else 0
+    scale = max(top, 1)
+    today = date.today()
+    lines = []
+    for row in range(rows, 0, -1):
+        if row == rows and top:
+            label = str(top)
+        elif row == 3 and top > 1:
+            label = str((top + 1) // 2)
+        else:
+            label = ""
+        text = ("%2s \u2524" % label) if label else "   \u2502"
+        inks = [colors["text_dim"]] * len(text)
+        for index, value in enumerate(counts):
+            height = value / scale * rows * 2
+            if height >= 2 * row:
+                block = "\u2588" * 3
+            elif height >= 2 * row - 1:
+                block = "\u2584" * 3
+            else:
+                block = "   "
+            day = days[index]
+            ink = colors["bright"] if day == today else (
+                colors["text_dim"] if day.weekday() >= 5 else colors["text"])
+            text += " " + block + " "
+            inks += [ink] * 5
+        lines.append((text, inks))
+    lines.append((" 0 \u253c" + "\u2500" * (5 * len(counts)), colors["text_dim"]))
+    axis = "    " + "".join(" %s  " % names[day.weekday()] for day in days)
+    inks = [colors["text_dim"]] * len(axis)
+    for index, day in enumerate(days):
+        if day == today:
+            for shift in range(5):
+                inks[4 + index * 5 + shift] = colors["bright"]
+    lines.append((axis, inks))
+    return lines
 
 
 def _button(text: str, kind: str = "") -> QPushButton:
@@ -151,132 +274,156 @@ class WeeklyReportDialog(QDialog):
         self._build()
         self.refresh()
         self.load_jira_done()
-        manage_window(self, settings, "weekly", 1000, 720)
+        manage_window(self, settings, "weekly", 1360, 860)
 
     def _build(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(22, 18, 22, 16)
-        layout.setSpacing(12)
+        c = self.colors
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(theme.px(18), theme.px(14), theme.px(18), theme.px(14))
+        self.panel = TitledPanel("Отчёт за неделю", c)
+        outer.addWidget(self.panel)
+        layout = self.panel.box
+        layout.setSpacing(theme.px(12))
 
-        header = QHBoxLayout()
-        self.header_label = QLabel()
-        self.header_label.setFont(theme.ui_font(13, bold=True))
-        header.addWidget(self.header_label)
-        header.addStretch(1)
-        self.prev_button = _button("← неделя назад", "flat")
-        self.prev_button.setToolTip("Предыдущая неделя, за которую что-то заполнено")
+        # Листание недель — на правом краю рамки.
+        corner = QWidget()
+        corner_row = QHBoxLayout(corner)
+        corner_row.setContentsMargins(theme.px(6), 0, theme.px(6), 0)
+        corner_row.setSpacing(theme.px(4))
+        self.prev_button = link_button(
+            "\u25c4 назад", "Предыдущая неделя, за которую что-то заполнено"
+        )
         self.prev_button.clicked.connect(lambda: self._step(-1))
-        self.next_button = _button("неделя вперёд →", "flat")
-        self.next_button.setToolTip("Следующая заполненная неделя")
+        corner_row.addWidget(self.prev_button)
+        corner_row.addWidget(glyph_label("\u2502", c["faint"]))
+        self.next_button = link_button("вперёд \u25ba", "Следующая заполненная неделя")
         self.next_button.clicked.connect(lambda: self._step(1))
-        header.addWidget(self.prev_button)
-        header.addWidget(self.next_button)
-        layout.addLayout(header)
-        layout.addWidget(hline())
+        corner_row.addWidget(self.next_button)
+        self.panel.set_corner(corner)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        layout.addWidget(splitter, 1)
-
-        left = QWidget()
-        left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(0, 8, 12, 0)
-        left_layout.setSpacing(8)
+        # Разрез: «по дням │ по задачам │ таблицей», выбранный — инверсией.
         head_row = QHBoxLayout()
-        head_row.setSpacing(6)
-        head_row.addWidget(section_label("текст отчёта"))
-        head_row.addStretch(1)
-        head_row.addWidget(section_label("разрез"))
+        head_row.setSpacing(theme.px(6))
+        head_row.addWidget(glyph_label("Разрез:", c["text_dim"]))
         self.grouping_buttons: dict[str, QPushButton] = {}
-        for key in (GROUPING_BY_DAYS, GROUPING_BY_TASKS, GROUPING_TABLE):
-            button = _button(GROUPING_LABELS[key].capitalize(), "nav")
-            button.setToolTip(
+        for index, key in enumerate((GROUPING_BY_DAYS, GROUPING_BY_TASKS, GROUPING_TABLE)):
+            if index:
+                head_row.addWidget(glyph_label("\u2502", c["faint"]))
+            button = link_button(
+                GROUPING_LABELS[key],
                 "Таблица «задача — что сделано», её удобно вставлять в Confluence"
-                if key == GROUPING_TABLE
-                else ""
+                if key == GROUPING_TABLE else "",
             )
             button.clicked.connect(lambda _=False, k=key: self.set_grouping(k))
             self.grouping_buttons[key] = button
             head_row.addWidget(button)
-        left_layout.addLayout(head_row)
-
-        self.jira_status = QLabel(self.jira_note)
-        self.jira_status.setProperty("faint", "true")
-        self.jira_status.setFont(theme.mono_font(8))
-        self.jira_status.setWordWrap(True)
-        left_layout.addWidget(self.jira_status)
-
+        head_row.addStretch(1)
         # Редактор Confluence вставляет таблицу в таблицу «поверх»: сколько
         # строк вставляем, столько снизу и затрётся. Поэтому говорим число
         # заранее — столько пустых строк нужно добавить перед вставкой.
         self.table_hint = QLabel("")
-        self.table_hint.setProperty("faint", "true")
-        self.table_hint.setFont(theme.mono_font(8))
-        self.table_hint.setWordWrap(True)
-        left_layout.addWidget(self.table_hint)
+        self.table_hint.setStyleSheet("color: %s; background: transparent;" % c["bright"])
+        self.table_hint.setToolTip(
+            "Confluence вставляет таблицу поверх существующих строк: добавьте "
+            "в неё столько же пустых строк перед вставкой — иначе написанное "
+            "ниже затрётся."
+        )
+        head_row.addWidget(self.table_hint)
+        layout.addLayout(head_row)
 
+        body = QHBoxLayout()
+        body.setSpacing(theme.px(22))
+        layout.addLayout(body, 1)
+
+        left = QVBoxLayout()
+        left.setSpacing(theme.px(8))
+        # Таблица — настоящей таблицей, как она встанет в Confluence; другие
+        # разрезы и правка — текстом.
+        self.table_view = QTextBrowser()
+        self.table_view.setProperty("plain", "true")
+        self.table_view.setOpenExternalLinks(True)
+        left.addWidget(self.table_view, 1)
         self.text_edit = QPlainTextEdit()
-        self.text_edit.setFont(theme.mono_font(9))
-        left_layout.addWidget(self.text_edit, 1)
+        left.addWidget(self.text_edit, 1)
+        body.addLayout(left, 1)
 
-        bottom_row = QHBoxLayout()
-        bottom_row.setSpacing(8)
-        regenerate = _button("Пересобрать из данных", "flat")
+        side = QWidget()
+        side.setFixedWidth(theme.px(360))
+        side_layout = QVBoxLayout(side)
+        side_layout.setContentsMargins(0, theme.px(4), 0, 0)
+        side_layout.setSpacing(theme.px(16))
+
+        stats = TitledPanel("Отметки по дням", c)
+        self.week_chart = GridText(c)
+        stats.box.addWidget(self.week_chart)
+        self.marks_row = LeaderRow("отметок", c)
+        self.closed_row = LeaderRow("закрыто", c)
+        self.overdue_row = LeaderRow("просрочено", c)
+        for row in (self.marks_row, self.closed_row, self.overdue_row):
+            stats.box.addWidget(row)
+        self.rule_label = QLabel()
+        self.rule_label.setStyleSheet("color: %s; background: transparent;" % c["text_dim"])
+        stats.box.addWidget(self.rule_label)
+        side_layout.addWidget(stats)
+
+        self.jira_panel = TitledPanel("Завести в Jira", c)
+        self.jira_hint = QLabel()
+        self.jira_hint.setWordWrap(True)
+        self.jira_hint.setStyleSheet("color: %s; background: transparent;" % c["text_dim"])
+        self.jira_panel.box.addWidget(self.jira_hint)
+        self.jira_area = QScrollArea()
+        self.jira_area.setWidgetResizable(True)
+        self.jira_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.jira_panel.box.addWidget(self.jira_area, 1)
+        self.jira_status = QLabel(self.jira_note)
+        self.jira_status.setWordWrap(True)
+        self.jira_status.setStyleSheet("color: %s; background: transparent;" % c["text_dim"])
+        self.jira_panel.box.addWidget(self.jira_status)
+        side_layout.addWidget(self.jira_panel, 1)
+        # Интеграция выключена — панель «Завести в Jira» не нужна.
+        self.jira_panel.setVisible(self.jira_enabled)
+        if not self.jira_enabled:
+            side_layout.addStretch(1)
+        body.addWidget(side)
+
+        self.status = QLabel("")
+        self.status.setWordWrap(True)
+        self.status.setStyleSheet("color: %s; background: transparent;" % c["text_dim"])
+        layout.addWidget(self.status)
+
+        rule = QFrame()
+        rule.setFixedHeight(theme.px(2))
+        rule.setStyleSheet("background: %s; border: none;" % c["faint"])
+        layout.addWidget(rule)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(theme.px(10))
+        self.copy_button = _button("[ Скопировать ]", "accent")
+        self.copy_button.clicked.connect(self._copy)
+        buttons.addWidget(self.copy_button)
+        self.confluence_button = _button("[ В Confluence ]", "flat")
+        self.confluence_button.clicked.connect(self._publish_confluence)
+        buttons.addWidget(self.confluence_button)
+        self.obsidian_button = _button("[ В Obsidian ]", "flat")
+        self.obsidian_button.clicked.connect(self._export_obsidian)
+        buttons.addWidget(self.obsidian_button)
+        regenerate = _button("[ Пересобрать ]", "flat")
+        regenerate.setToolTip("Собрать отчёт заново из отметок и спросить Jira")
         regenerate.clicked.connect(self._regenerate)
-        bottom_row.addWidget(regenerate)
-        self.edit_button = _button("Править текст", "flat")
+        buttons.addWidget(regenerate)
+        self.edit_button = _button("[ Править ]", "flat")
         self.edit_button.setToolTip(
             "Показать разметку и разрешить правку. Копируется отчёт и разметкой, "
             "и готовой таблицей — Confluence вставит таблицу."
         )
         self.edit_button.clicked.connect(self._toggle_edit)
-        bottom_row.addWidget(self.edit_button)
-        bottom_row.addStretch(1)
-        left_layout.addLayout(bottom_row)
-        splitter.addWidget(left)
-
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(12, 8, 0, 0)
-        right_layout.setSpacing(8)
-        right_layout.addWidget(section_label("нужно завести в jira"))
-        self.jira_hint = QLabel()
-        self.jira_hint.setProperty("dim", "true")
-        self.jira_hint.setWordWrap(True)
-        right_layout.addWidget(self.jira_hint)
-
-        self.jira_area = QScrollArea()
-        self.jira_area.setWidgetResizable(True)
-        self.jira_area.setFrameShape(QFrame.Shape.NoFrame)
-        right_layout.addWidget(self.jira_area, 1)
-        splitter.addWidget(right)
-        splitter.setSizes([620, 340])
-        # Интеграция выключена — панель «нужно завести в Jira» не нужна.
-        right.setVisible(self.jira_enabled)
-        if not self.jira_enabled:
-            splitter.setSizes([960, 0])
-
-        self.status = QLabel("")
-        self.status.setProperty("faint", "true")
-        self.status.setFont(theme.mono_font(8))
-        self.status.setWordWrap(True)
-        layout.addWidget(self.status)
-
-        buttons = QHBoxLayout()
-        copy_button = _button("Скопировать")
-        copy_button.clicked.connect(self._copy)
-        buttons.addWidget(copy_button)
-        self.obsidian_button = _button("В Obsidian")
-        self.obsidian_button.clicked.connect(self._export_obsidian)
-        buttons.addWidget(self.obsidian_button)
-        self.confluence_button = _button("В Confluence")
-        self.confluence_button.clicked.connect(self._publish_confluence)
-        buttons.addWidget(self.confluence_button)
-        all_weeks = _button("Все недели…", "flat")
+        buttons.addWidget(self.edit_button)
+        buttons.addStretch(1)
+        all_weeks = _button("все недели\u2026", "flat")
         all_weeks.setToolTip("Выгрузка по задачам за все заполненные недели")
         all_weeks.clicked.connect(self._open_all_weeks)
         buttons.addWidget(all_weeks)
-        buttons.addStretch(1)
-        close_button = _button("Готово", "accent")
+        close_button = _button("Готово", "flat")
         close_button.clicked.connect(self._save_and_close)
         buttons.addWidget(close_button)
         layout.addLayout(buttons)
@@ -350,20 +497,27 @@ class WeeklyReportDialog(QDialog):
         rows = self.table_rows()
         self.table_hint.setVisible(True)
         self.table_hint.setText(
-            "В таблице %d %s. Confluence вставляет таблицу поверх существующих "
-            "строк, поэтому добавьте в неё столько же пустых строк перед "
-            "вставкой — иначе написанное ниже затрётся."
+            "! в таблице %d %s — добавьте в Confluence столько же пустых строк"
             % (rows, _rows_word(rows))
         )
 
     def _render_view(self) -> None:
-        """Показывает отчёт: читаемым текстом или разметкой в режиме правки."""
-        self.text_edit.setPlainText(
-            self.content if self.editing else to_plain(self.content)
+        """Показывает отчёт: таблицей, читаемым текстом или разметкой при правке."""
+        as_table = self.grouping == GROUPING_TABLE and not self.editing
+        self.table_view.setVisible(as_table)
+        self.text_edit.setVisible(not as_table)
+        if as_table:
+            self.table_view.setHtml(week_table_html(self.content, self.colors))
+        else:
+            self.text_edit.setPlainText(
+                self.content if self.editing else to_plain(self.content)
+            )
+            self.text_edit.setReadOnly(not self.editing)
+            theme.apply_text_spacing(self.text_edit)
+        self.edit_button.setText("[ Готово ]" if self.editing else "[ Править ]")
+        self.copy_button.setText(
+            "[ Скопировать таблицу ]" if self.grouping == GROUPING_TABLE else "[ Скопировать ]"
         )
-        self.text_edit.setReadOnly(not self.editing)
-        theme.apply_text_spacing(self.text_edit)
-        self.edit_button.setText("Готово" if self.editing else "Править текст")
 
     def _toggle_edit(self) -> None:
         if self.editing:
@@ -437,8 +591,15 @@ class WeeklyReportDialog(QDialog):
 
     def refresh(self, regenerate: bool = False) -> None:
         """Перечитывает отчёт. ``regenerate`` игнорирует ранее сохранённый текст."""
-        self.header_label.setText(
-            "Неделя %s — %s" % (fmt_date(self.start), fmt_date(self.end))
+        self.panel.set_title(
+            "Отчёт за неделю \u00b7 НЕД %d \u00b7 %s \u2014 %s" % (
+                self.start.isocalendar()[1],
+                self.start.strftime("%d.%m"),
+                self.end.strftime("%d.%m"),
+            )
+        )
+        self.setWindowTitle(
+            "Недельный отчёт: %s — %s" % (fmt_date(self.start), fmt_date(self.end))
         )
         stale_days = self.settings.get_int("stale_days", 5)
         saved = None if regenerate else self.storage.get_weekly_report(self.start)
@@ -461,7 +622,35 @@ class WeeklyReportDialog(QDialog):
         self._sync_table_hint()
         self._sync_grouping_buttons()
         self._sync_navigation()
+        self._sync_week_stats()
         self._fill_jira_list()
+
+    def _sync_week_stats(self) -> None:
+        """Сводка справа: отметки по дням, закрытое и просроченное."""
+        c = self.colors
+        days = [self.start + timedelta(days=i) for i in range(7)]
+        per_day = {day: 0 for day in days}
+        for log in self.storage.logs_in_range(self.start, self.end):
+            if log.log_date in per_day:
+                per_day[log.log_date] += 1
+        # Выходные — только если в них работали: иначе это два пустых столбика.
+        shown = [day for day in days if day.weekday() < 5 or per_day[day]]
+        self.week_chart.set_lines(
+            week_chart_lines([per_day[day] for day in shown], shown, c)
+        )
+        rule = WeekRule.from_settings(self.settings)
+        data = collect_week(self.storage, self.start, self.end, rule)
+        self.marks_row.set_value(str(sum(per_day.values())), c["bright"])
+        self.closed_row.set_value(str(len(data["completed"])), c["bright"])
+        overdue = sum(1 for task in self.storage.list_tasks(include_done=False)
+                      if task.is_overdue)
+        self.overdue_row.set_value(str(overdue), c["danger"] if overdue else c["text_dim"])
+        self.overdue_row.key.setStyleSheet(
+            "color: %s; background: transparent;" % (c["danger"] if overdue else c["text_dim"])
+        )
+        self.rule_label.setText(
+            "рубеж недели \u2014 %s" % rule.describe() if rule.enabled else "без рубежа недели"
+        )
 
     def _fill_jira_list(self) -> None:
         if not self.jira_enabled:
@@ -472,17 +661,14 @@ class WeeklyReportDialog(QDialog):
         tasks = data["jira_todo"]
         container = QWidget()
         layout = QVBoxLayout(container)
-        layout.setContentsMargins(0, 0, 8, 0)
-        layout.setSpacing(8)
+        layout.setContentsMargins(0, 0, theme.px(8), 0)
+        layout.setSpacing(theme.px(10))
 
         if not tasks:
-            self.jira_hint.setText(
-                "По всем задачам недели вопрос с Jira закрыт. Ничего заводить не нужно."
-            )
+            self.jira_hint.setText("По всем задачам недели вопрос с Jira закрыт.")
         else:
             self.jira_hint.setText(
-                "По этим задачам была работа, но issue ещё не отмечена. "
-                "Заведите её в Jira и укажите ключ — задача исчезнет из списка."
+                "Была работа, а ключа нет. Укажите ключ — задача уйдёт из списка."
             )
             for task in tasks:
                 layout.addWidget(self._jira_card(task))
@@ -491,41 +677,31 @@ class WeeklyReportDialog(QDialog):
 
     def _jira_card(self, task) -> QWidget:
         c = self.colors
-        card = QFrame()
-        card.setObjectName("jiraCard")
-        card.setStyleSheet(
-            "#jiraCard { background: %s; border: 1px solid %s; border-radius: 8px; }"
-            % (c["surface"], c["border_soft"])
-        )
+        card = QWidget()
+        clear_background(card)
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(7)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(theme.px(2))
 
-        title = QLabel(task.title)
+        title = QLabel("\u25aa " + task.title)
         title.setWordWrap(True)
-        title.setFont(theme.ui_font(10, bold=True))
-        clear_background(title)
+        title.setStyleSheet("color: %s; background: transparent;" % c["text"])
         layout.addWidget(title)
 
-        meta_parts = [PRIORITY_LABELS.get(task.priority, "обычный")]
-        if task.due_date:
-            meta_parts.append("срок %s" % fmt_date(task.due_date))
-        meta = QLabel(" · ".join(meta_parts))
-        meta.setFont(theme.mono_font(8))
-        meta.setStyleSheet("color: %s; background: transparent;" % c["text_faint"])
-        layout.addWidget(meta)
-
         row = QHBoxLayout()
-        row.setSpacing(6)
-        created = _button("Указать ключ", "flat")
+        row.setContentsMargins(cell_width() * 2, 0, 0, 0)
+        row.setSpacing(theme.px(4))
+        created = link_button("ключ\u2026", "Указать ключ задачи в Jira")
         created.clicked.connect(lambda _=False, t=task: self._mark_created(t))
         row.addWidget(created)
-        not_needed = _button("Не нужна", "flat")
+        row.addWidget(glyph_label("\u2502", c["faint"]))
+        not_needed = link_button("не нужна", "Эту задачу в Jira заводить не нужно")
         not_needed.clicked.connect(lambda _=False, t=task: self._mark_not_needed(t))
         row.addWidget(not_needed)
         base = self.settings.get("jira.base_url", "")
         if base:
-            open_jira = _button("Создать в Jira", "flat")
+            row.addWidget(glyph_label("\u2502", c["faint"]))
+            open_jira = link_button("создать", "Открыть форму новой задачи в Jira")
             open_jira.clicked.connect(lambda _=False: self._open_create_form())
             row.addWidget(open_jira)
         row.addStretch(1)

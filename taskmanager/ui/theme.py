@@ -760,6 +760,33 @@ QLineEdit[prompt="true"] {
 QLineEdit[prompt="true"]:focus { border: none; }
 QPushButton[menu="true"] { padding: 0 8px; }
 
+/* Слово-кнопка: «◄ назад», «по дням». Без рамки, при наведении — инверсия. */
+QPushButton[link="true"] {
+    background: transparent;
+    border: none;
+    color: %(text)s;
+    padding: 0 6px;
+}
+QPushButton[link="true"]:hover, QPushButton[link="true"]:focus,
+QPushButton[link="true"][active="true"] {
+    background: %(accent)s;
+    color: %(slab_ink)s;
+}
+QPushButton[link="true"]:disabled { color: %(faint)s; background: transparent; }
+
+/* Поле «что сделано» под строкой задачи: подложка и черта снизу. */
+QLineEdit[note="true"] {
+    background: %(ghost)s;
+    color: %(bright)s;
+    border: none;
+    border-bottom: 2px solid %(faint)s;
+    padding: 3px 6px;
+}
+QLineEdit[note="true"]:focus { border: none; border-bottom: 2px solid %(bright)s; }
+
+/* Текст и таблица отчёта прямо на экране, без поля вокруг. */
+QTextEdit[plain="true"] { background: transparent; border: none; padding: 0; }
+
 /* Поле, которое выглядит как текст: правка названия подпункта на месте. */
 QLineEdit[seamless="true"] {
     background: transparent;

@@ -46,8 +46,18 @@ from ..models import (
 from ..reports import fmt_date_long
 from ..storage import Storage
 from . import theme
+from .terminal import (
+    BlockBar,
+    ElidedLabel,
+    TitledPanel,
+    cell_width,
+    glyph_label,
+    link_button,
+)
 from .widgets import (
     CheckCircle,
+    clear_background,
+    table_due,
     DueField,
     GoalResultList,
     PriorityBars,
@@ -894,8 +904,129 @@ class TaskDialog(QDialog):
             self.done(2)  # особый код: список нужно перечитать
 
 
+class _DayRow(QWidget):
+    """Строка отчёта за день: [x] ключ задача срок, а под ней — «> что сделано».
+
+    Поле записи видно только у отмеченной задачи: отметили — оно раскрылось и
+    ждёт текста; начали печатать — задача отметилась сама.
+    """
+
+    def __init__(self, task: Task, note: str, checked: bool, colors: dict,
+                 show_key: bool, parent=None) -> None:
+        super().__init__(parent)
+        self.task = task
+        self.colors = colors
+        self._hover = False
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        cell = cell_width()
+
+        column = QVBoxLayout(self)
+        column.setContentsMargins(theme.px(6), theme.px(3), theme.px(6), theme.px(3))
+        column.setSpacing(theme.px(4))
+
+        top = QHBoxLayout()
+        top.setSpacing(cell)
+        self.check = CheckCircle(checked, colors)
+        self.check.setToolTip("Была работа в этот день")
+        holder = QWidget()
+        clear_background(holder)
+        holder.setFixedWidth(cell * 3)
+        holder_row = QHBoxLayout(holder)
+        holder_row.setContentsMargins(0, 0, 0, 0)
+        holder_row.addWidget(self.check, 0, Qt.AlignmentFlag.AlignVCenter)
+        holder_row.addStretch(1)
+        top.addWidget(holder)
+
+        self.key = QLabel(task.jira_key or "\u00b7" * 8)
+        self.key.setFixedWidth(cell * 8)
+        self.key.setVisible(show_key)
+        top.addWidget(self.key)
+
+        self.title = ElidedLabel(task.title)
+        self.title.setToolTip(task.title)
+        top.addWidget(self.title, 1)
+
+        self.due = QLabel(table_due(task))
+        self.due.setFixedWidth(cell * 12)
+        top.addWidget(self.due)
+        column.addLayout(top)
+
+        self.note_row = QWidget()
+        clear_background(self.note_row)
+        note_line = QHBoxLayout(self.note_row)
+        note_line.setContentsMargins(cell * 4, 0, 0, 0)
+        note_line.setSpacing(cell)
+        note_line.addWidget(glyph_label(">", colors["text_dim"]))
+        self.comment = QLineEdit()
+        self.comment.setProperty("note", "true")
+        self.comment.setPlaceholderText("что сделано")
+        self.comment.setText(note)
+        # Длинная запись иначе видна «с хвоста»: поле прокручено к курсору.
+        self.comment.setCursorPosition(0)
+        note_line.addWidget(self.comment, 1)
+        column.addWidget(self.note_row)
+        self.note_row.setVisible(checked)
+
+        self.check.toggled.connect(self._toggled)
+        self.comment.textEdited.connect(
+            lambda text: self.check.setChecked(True) if text else None
+        )
+        self._restyle()
+
+    def _toggled(self, checked: bool) -> None:
+        self.note_row.setVisible(checked)
+        if checked and not self.comment.text():
+            self.comment.setFocus()
+        self._restyle()
+
+    def _restyle(self) -> None:
+        c = self.colors
+        task = self.task
+        if task.is_overdue and not task.is_done:
+            ink = c["danger"]
+        elif self.check.isChecked():
+            ink = c["text"]
+        else:
+            ink = c["text_dim"]
+        for label in (self.key, self.title):
+            label.setStyleSheet("color: %s; background: transparent;" % ink)
+        if not task.jira_key:
+            self.key.setStyleSheet("color: %s; background: transparent;" % c["faint"])
+        due_ink = c["danger"] if task.is_overdue and not task.is_done else c["text_dim"]
+        self.due.setStyleSheet("color: %s; background: transparent;" % due_ink)
+
+    def enterEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        self._hover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        self._hover = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        if not self._hover:
+            return
+        from PySide6.QtGui import QPainter
+
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), theme.qcolor(self.colors["ghost"]))
+        painter.end()
+
+
+def _bottom_rule(colors: dict) -> QFrame:
+    """Черта над кнопками окна — как в текстовом экране."""
+    line = QFrame()
+    line.setFixedHeight(theme.px(2))
+    line.setStyleSheet("background: %s; border: none;" % colors["faint"])
+    return line
+
+
 class DailyReportDialog(QDialog):
     """Отчёт за день: отметки по задачам плюс свободный комментарий."""
+
+    WEEKDAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
 
     def __init__(
         self,
@@ -912,98 +1043,115 @@ class DailyReportDialog(QDialog):
         self.setWindowTitle("Отчёт за день")
         self._build()
         self._load()
-        manage_window(self, settings, "daily", 700, 640)
+        manage_window(self, settings, "daily", 960, 780)
 
     def _build(self) -> None:
         colors = theme.palette(self.settings.get("theme", theme.DEFAULT_THEME))
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(22, 20, 22, 18)
-        layout.setSpacing(12)
+        self._colors = colors
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(theme.px(18), theme.px(14), theme.px(18), theme.px(14))
+        self.panel = TitledPanel("Отчёт за день", colors)
+        outer.addWidget(self.panel)
+        layout = self.panel.box
+        layout.setSpacing(theme.px(12))
 
-        head_row = QHBoxLayout()
-        head_row.setSpacing(8)
-        self.header = QLabel()
-        self.header.setFont(theme.ui_font(13, bold=True))
-        head_row.addWidget(self.header)
-        head_row.addStretch(1)
-        self.today_button = _button("Сегодня", "flat")
-        self.today_button.clicked.connect(lambda: self._set_day(date.today()))
-        head_row.addWidget(self.today_button)
-        self.prev_button = _button("←", "flat")
-        self.prev_button.setToolTip("Предыдущий день")
+        # Листание дней — на правом краю рамки: «◄ │ сегодня │ ►».
+        corner = QWidget()
+        corner_row = QHBoxLayout(corner)
+        corner_row.setContentsMargins(theme.px(6), 0, theme.px(6), 0)
+        corner_row.setSpacing(theme.px(4))
+        self.prev_button = link_button("\u25c4 день", "Предыдущий день")
         self.prev_button.clicked.connect(lambda: self._shift(-1))
-        head_row.addWidget(self.prev_button)
-        self.next_button = _button("→", "flat")
-        self.next_button.setToolTip("Следующий день")
+        corner_row.addWidget(self.prev_button)
+        corner_row.addWidget(glyph_label("\u2502", colors["faint"]))
+        self.today_button = link_button("сегодня", "Вернуться к сегодняшнему дню")
+        self.today_button.clicked.connect(lambda: self._set_day(date.today()))
+        corner_row.addWidget(self.today_button)
+        corner_row.addWidget(glyph_label("\u2502", colors["faint"]))
+        self.next_button = link_button("день \u25ba", "Следующий день")
         self.next_button.clicked.connect(lambda: self._shift(1))
-        head_row.addWidget(self.next_button)
-        layout.addLayout(head_row)
+        corner_row.addWidget(self.next_button)
+        self.panel.set_corner(corner)
 
-        hint = QLabel("Отметьте задачи, по которым в этот день была работа, и коротко опишите что сделано.")
-        hint.setProperty("dim", "true")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
+        summary = QHBoxLayout()
+        summary.setSpacing(theme.px(18))
+        self.summary = QLabel()
+        summary.addWidget(self.summary)
+        self.day_bar = BlockBar(colors)
+        self.day_bar.setMinimumWidth(cell_width() * 8)
+        self.day_bar.setMaximumWidth(cell_width() * 32)
+        summary.addWidget(self.day_bar, 2)
+        hint = ElidedLabel("отметьте, по чему была работа, и в двух словах — что сделано")
+        hint.setToolTip(hint.text())
+        hint.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        hint.setStyleSheet("color: %s; background: transparent;" % colors["text_dim"])
+        summary.addWidget(hint, 3)
+        layout.addLayout(summary)
 
-        layout.addWidget(hline())
         layout.addWidget(section_label("задачи"))
 
         area = QScrollArea()
         area.setWidgetResizable(True)
         area.setFrameShape(QFrame.Shape.NoFrame)
         container = QWidget()
-        # Сетка, а не отдельные строки: так поля «что сделано» выстраиваются
-        # в одну колонку независимо от длины названий и меток.
-        self.rows_layout = QGridLayout(container)
-        self.rows_layout.setContentsMargins(0, 0, 8, 0)
-        self.rows_layout.setHorizontalSpacing(10)
-        self.rows_layout.setVerticalSpacing(7)
-        self.rows_layout.setColumnStretch(4, 1)
+        self.rows_layout = QVBoxLayout(container)
+        self.rows_layout.setContentsMargins(0, 0, theme.px(8), 0)
+        self.rows_layout.setSpacing(theme.px(2))
         self._row_count = 0
         area.setWidget(container)
-        layout.addWidget(area, 1)
+        layout.addWidget(area, 3)
 
-        layout.addWidget(section_label("свободный комментарий"))
+        layout.addWidget(section_label("про день"))
         self.note_edit = QPlainTextEdit()
         self.note_edit.setPlaceholderText(
             "Как прошёл день: встречи, помехи, договорённости, что осталось на завтра"
         )
-        self.note_edit.setMinimumHeight(70)
-        self.note_edit.setMaximumHeight(150)
-        layout.addWidget(self.note_edit)
+        self.note_edit.setMinimumHeight(theme.px(70))
+        layout.addWidget(self.note_edit, 1)
 
         self.status = QLabel("")
-        self.status.setProperty("faint", "true")
-        self.status.setFont(theme.mono_font(8))
+        self.status.setStyleSheet("color: %s; background: transparent;" % colors["text_dim"])
         layout.addWidget(self.status)
 
+        layout.addWidget(_bottom_rule(colors))
         buttons = QHBoxLayout()
-        copy_button = _button("Скопировать", "flat")
+        buttons.setSpacing(theme.px(10))
+        copy_button = _button("[ Скопировать ]", "flat")
         copy_button.clicked.connect(self._copy)
         buttons.addWidget(copy_button)
-        self.export_button = _button("В Obsidian", "flat")
+        self.export_button = _button("[ В Obsidian ]", "flat")
         self.export_button.clicked.connect(self._export)
         buttons.addWidget(self.export_button)
         buttons.addStretch(1)
         later = _button("Позже", "flat")
+        later.setToolTip("Закрыть, не сохраняя — отчёт можно заполнить потом")
         later.clicked.connect(self.reject)
         buttons.addWidget(later)
-        save = _button("Сохранить отчёт", "accent")
+        save = _button("[ Сохранить отчёт ]", "accent")
         save.clicked.connect(self._save)
         save.setDefault(True)
         buttons.addWidget(save)
         layout.addLayout(buttons)
 
         self.export_button.setEnabled(bool(self.settings.get("obsidian.vault_path", "")))
-        self._colors = colors
 
     def _sync_header(self) -> None:
-        self.header.setText("Отчёт за %s" % fmt_date_long(self.day))
+        stamp = "%s %s" % (self.WEEKDAYS[self.day.weekday()], self.day.strftime("%d.%m.%Y"))
+        self.panel.set_title("Отчёт за день \u00b7 %s" % stamp)
+        self.setWindowTitle("Отчёт за %s" % fmt_date_long(self.day))
         today = date.today()
         self.next_button.setEnabled(self.day < today)
-        self.today_button.setVisible(self.day != today)
+        self.today_button.setEnabled(self.day != today)
         self.status.setText(
             "" if self.day == today else "Вы заполняете прошедший день — записи уйдут в его отчёт."
         )
+
+    def _sync_summary(self) -> None:
+        """«Отмечено 4 из 8» и шкала — сразу, по ходу отметок."""
+        done = sum(1 for _, check, _ in self.rows if check.isChecked())
+        total = len(self.rows)
+        self.summary.setText("Отмечено %d из %d" % (done, total) if total else "Задач нет")
+        self.day_bar.set_share(done / total if total else 0.0)
 
     def _shift(self, days: int) -> None:
         self._set_day(self.day + timedelta(days=days))
@@ -1025,7 +1173,6 @@ class DailyReportDialog(QDialog):
 
     def _clear_rows(self) -> None:
         self.rows = []
-        self.rows_layout.setRowStretch(self._row_count, 0)
         self._row_count = 0
         while self.rows_layout.count():
             item = self.rows_layout.takeAt(0)
@@ -1053,54 +1200,28 @@ class DailyReportDialog(QDialog):
         tasks.sort(key=lambda t: (t.id not in existing, -t.priority))
 
         if not tasks:
-            empty = QLabel("Активных задач нет — опишите день в свободном комментарии.")
-            empty.setProperty("faint", "true")
-            self.rows_layout.addWidget(empty, 0, 0, 1, 5)
+            empty = QLabel("Активных задач нет — опишите день ниже.")
+            empty.setStyleSheet(
+                "color: %s; background: transparent;" % self._colors["text_dim"]
+            )
+            self.rows_layout.addWidget(empty)
         for index, task in enumerate(tasks):
             self._task_row(task, existing, index)
         self._row_count = len(tasks)
-        self.rows_layout.setRowStretch(self._row_count, 1)
+        self.rows_layout.addStretch(1)
+        self._sync_summary()
 
     def _task_row(self, task: Task, existing: dict, row: int) -> None:
-        c = self._colors
-        grid = self.rows_layout
-        top = Qt.AlignmentFlag.AlignTop
-
-        check = CheckCircle(task.id in existing, c)
-        grid.addWidget(check, row, 0, top)
-
-        label = QLabel(task.title)
-        label.setMinimumWidth(190)
-        label.setMaximumWidth(280)
-        label.setWordWrap(True)
-        if task.is_done:
-            label.setStyleSheet("color: %s;" % c["success"])
-        grid.addWidget(label, row, 1, top)
-
-        if task.product:
-            pill = ProductPill(
-                task.product,
-                products_module.color_for(
-                    products_module.load(self.settings), task.product, c["info"]
-                ),
-            )
-            grid.addWidget(pill, row, 2, top)
-
-        if task.jira_key and self.settings.get("jira.enabled", True):
-            key = QLabel(task.jira_key)
-            key.setFont(theme.mono_font(8))
-            key.setStyleSheet("color: %s;" % c["info"])
-            grid.addWidget(key, row, 3, top)
-
-        comment = QLineEdit()
-        comment.setPlaceholderText("что сделано")
-        comment.setText(existing.get(task.id, ""))
-        # Длинная запись иначе видна «с хвоста»: поле прокручено к курсору.
-        comment.setCursorPosition(0)
-        comment.textEdited.connect(lambda text, box=check: box.setChecked(True) if text else None)
-        grid.addWidget(comment, row, 4)
-
-        self.rows.append((task.id, check, comment))
+        line = _DayRow(
+            task,
+            existing.get(task.id, ""),
+            task.id in existing,
+            self._colors,
+            bool(self.settings.get("jira.enabled", True)),
+        )
+        line.check.toggled.connect(lambda _on: self._sync_summary())
+        self.rows_layout.addWidget(line)
+        self.rows.append((task.id, line.check, line.comment))
 
     # --- Действия -------------------------------------------------------------
 
