@@ -8,7 +8,11 @@ import subprocess
 from PySide6.QtCore import QTime, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
+    QAbstractButton,
     QApplication,
+    QFrame,
+    QGridLayout,
+    QStackedWidget,
     QCheckBox,
     QScrollArea,
     QColorDialog,
@@ -49,7 +53,15 @@ from ..integrations.jira import (
 )
 from ..reports import GROUPING_BY_DAYS, GROUPING_LABELS, WEEKDAY_NAMES
 from . import theme
-from .terminal import NOISE_LABELS, SCANLINE_MODES
+from .terminal import (
+    FillGlyph,
+    LeaderRow,
+    Segmented,
+    TitledPanel,
+    cell_width,
+    glyph_label,
+    link_button,
+)
 from .widgets import manage_window, hline, section_label
 
 
@@ -61,6 +73,61 @@ def _button(text: str, kind: str = "") -> QPushButton:
     return button
 
 
+class ThemeTile(QAbstractButton):
+    """Плитка темы — нарисована цветами самой темы: видно, что выбираешь."""
+
+    SWATCH = 46
+
+    def __init__(self, key: str, colors: dict[str, str], parent=None) -> None:
+        super().__init__(parent)
+        self.key = key
+        self.colors = colors
+        self.theme_colors = theme.palette(key)
+        self.setCheckable(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(theme.PALETTE_LABELS.get(key, key))
+        self.setFont(theme.mono_font())
+        height = theme.px(self.SWATCH) + self.fontMetrics().height() + theme.px(18)
+        self.setFixedHeight(height)
+        self.setMinimumWidth(cell_width() * 8)
+
+    def sizeHint(self):  # noqa: N802 (Qt naming)
+        from PySide6.QtCore import QSize
+
+        return QSize(cell_width() * 13, self.height())
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        c, t = self.colors, self.theme_colors
+        painter = QPainter(self)
+        painter.setFont(self.font())
+        metrics = self.fontMetrics()
+        line = theme.px(2)
+        frame = theme.qcolor(c["bright"] if self.isChecked() or self.underMouse() else c["faint"])
+        width, height = self.width(), self.height()
+        painter.fillRect(0, 0, width, line, frame)
+        painter.fillRect(0, height - line, width, line, frame)
+        painter.fillRect(0, 0, line, height, frame)
+        painter.fillRect(width - line, 0, line, height, frame)
+
+        pad = theme.px(6)
+        swatch = theme.px(self.SWATCH)
+        painter.fillRect(pad, pad, width - pad * 2, swatch, theme.qcolor(t["bg"]))
+        # \u0414\u0432\u0435 \u0441\u0442\u0440\u043e\u043a\u0438 \u043e\u0431\u0440\u0430\u0437\u0446\u0430: \u0447\u0435\u0440\u043d\u0438\u043b\u0430 \u0438 \u0442\u0443\u0441\u043a\u043b\u0430\u044f \u0448\u043a\u0430\u043b\u0430 \u2014 \u043f\u043e \u0446\u0435\u043d\u0442\u0440\u0443 \u043f\u043e\u0434\u043b\u043e\u0436\u043a\u0438.
+        top = pad + max(0, (swatch - metrics.height() * 2) // 2)
+        left = pad + theme.px(6)
+        painter.setPen(theme.qcolor(t["text"]))
+        painter.drawText(left, top + metrics.ascent(), "\u2588" * 6)
+        painter.setPen(theme.qcolor(t["text_dim"]))
+        painter.drawText(left, top + metrics.height() + metrics.ascent(),
+                         "\u2588\u2588" + "\u2591" * 4)
+
+        name = theme.PALETTE_LABELS.get(self.key, self.key)
+        name = metrics.elidedText(name, Qt.TextElideMode.ElideRight, width - pad * 2)
+        painter.setPen(theme.qcolor(c["bright"] if self.isChecked() else c["text"]))
+        painter.drawText(pad, pad + swatch + theme.px(4) + metrics.ascent(), name)
+        painter.end()
+
+
 class SettingsDialog(QDialog):
     def __init__(self, settings: Settings, parent=None, storage=None) -> None:
         super().__init__(parent)
@@ -70,43 +137,86 @@ class SettingsDialog(QDialog):
         self.setWindowTitle("Настройки")
         self._build()
         self._load()
-        manage_window(self, settings, "settings", 680, 640)
+        manage_window(self, settings, "settings_v2", 1000, 820)
 
     # --- Построение -----------------------------------------------------------
 
-    def _build(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(22, 18, 22, 16)
-        layout.setSpacing(12)
+    PAGES = ("Общее", "Интеграции", "Напоминания", "Продукты", "Обновления")
 
-        tabs = QTabWidget()
-        # Каждая вкладка прокручивается: на невысоком экране содержимое длиннее
+    def _build(self) -> None:
+        c = theme.palette(self.settings.get("theme", theme.DEFAULT_THEME))
+        self.colors = c
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(theme.px(18), theme.px(14), theme.px(18), theme.px(14))
+        panel = TitledPanel("Настройки", c)
+        outer.addWidget(panel)
+        layout = panel.box
+        layout.setSpacing(theme.px(14))
+
+        # Разделы — строкой слов, как меню текстовой программы.
+        tabs_row = QHBoxLayout()
+        tabs_row.setSpacing(theme.px(4))
+        self.page_buttons: list[QPushButton] = []
+        for index, title in enumerate(self.PAGES):
+            if index:
+                tabs_row.addWidget(glyph_label("\u2502", c["faint"]))
+            button = link_button(title)
+            button.clicked.connect(lambda _=False, i=index: self.show_page(i))
+            self.page_buttons.append(button)
+            tabs_row.addWidget(button)
+        tabs_row.addStretch(1)
+        layout.addLayout(tabs_row)
+        layout.addWidget(self._rule())
+
+        # Каждая страница прокручивается: на невысоком экране содержимое длиннее
         # окна, а кнопки сохранения должны оставаться на виду.
-        tabs.addTab(self._scrollable(self._general_tab()), "Общее")
-        tabs.addTab(self._scrollable(self._reminders_tab()), "Напоминания")
-        tabs.addTab(self._scrollable(self._products_tab()), "Продукты")
-        tabs.addTab(self._scrollable(self._integrations_tab()), "Интеграции")
-        layout.addWidget(tabs, 1)
+        self.pages = QStackedWidget()
+        for page in (
+            self._general_tab(),
+            self._integrations_tab(),
+            self._reminders_tab(),
+            self._products_tab(),
+            self._program_tab(),
+        ):
+            self.pages.addWidget(self._scrollable(page))
+        layout.addWidget(self.pages, 1)
+        self.show_page(0)
 
         self.status = QLabel("")
-        self.status.setProperty("faint", "true")
-        self.status.setFont(theme.mono_font(8))
         self.status.setWordWrap(True)
+        self.status.setStyleSheet("color: %s; background: transparent;" % c["text_dim"])
         layout.addWidget(self.status)
 
+        layout.addWidget(self._rule())
         buttons = QHBoxLayout()
-        data_button = _button("Открыть папку с данными", "flat")
-        data_button.clicked.connect(self._open_data_dir)
-        buttons.addWidget(data_button)
+        buttons.setSpacing(theme.px(10))
+        from ..version import describe
+
+        self.version_label = QLabel("TaskManager %s" % describe())
+        self.version_label.setStyleSheet("color: %s; background: transparent;" % c["text_dim"])
+        buttons.addWidget(self.version_label)
         buttons.addStretch(1)
         cancel = _button("Отмена", "flat")
         cancel.clicked.connect(self.reject)
         buttons.addWidget(cancel)
-        save = _button("Сохранить", "accent")
+        save = _button("[ Сохранить ]", "accent")
         save.clicked.connect(self._save)
         save.setDefault(True)
         buttons.addWidget(save)
         layout.addLayout(buttons)
+
+    def show_page(self, index: int) -> None:
+        self.pages.setCurrentIndex(index)
+        for number, button in enumerate(self.page_buttons):
+            button.setProperty("active", "true" if number == index else "false")
+            button.style().unpolish(button)
+            button.style().polish(button)
+
+    def _rule(self) -> QFrame:
+        line = QFrame()
+        line.setFixedHeight(theme.px(2))
+        line.setStyleSheet("background: %s; border: none;" % self.colors["faint"])
+        return line
 
     @staticmethod
     def _scrollable(page: QWidget) -> QScrollArea:
@@ -117,176 +227,217 @@ class SettingsDialog(QDialog):
         area.setWidget(page)
         return area
 
+    def _note(self, text: str = "") -> QLabel:
+        label = QLabel(text)
+        label.setWordWrap(True)
+        label.setStyleSheet("color: %s; background: transparent;" % self.colors["text_dim"])
+        return label
+
     def _general_tab(self) -> QWidget:
+        c = self.colors
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(4, 14, 4, 4)
-        layout.setSpacing(12)
+        layout.setContentsMargins(0, theme.px(4), theme.px(8), theme.px(4))
+        layout.setSpacing(theme.px(16))
 
-        form = QFormLayout()
-        form.setSpacing(10)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        # --- Тема: плитки её собственными цветами ---
+        theme_box = QVBoxLayout()
+        theme_box.setSpacing(theme.px(8))
+        theme_box.addWidget(section_label("тема"))
+        tiles = QGridLayout()
+        tiles.setSpacing(theme.px(10))
+        self.theme_tiles: dict[str, ThemeTile] = {}
+        for index, key in enumerate(theme.PALETTES):
+            tile = ThemeTile(key, c)
+            tile.clicked.connect(lambda _=False, k=key: self._pick_theme(k))
+            self.theme_tiles[key] = tile
+            tiles.addWidget(tile, index // 7, index % 7)
+        theme_box.addLayout(tiles)
+        layout.addLayout(theme_box)
 
-        self.theme_box = QComboBox()
-        for key, title in theme.PALETTE_LABELS.items():
-            self.theme_box.addItem(title, key)
-        form.addRow("Оформление", self.theme_box)
+        # --- Масштаб ---
+        scale_box = QVBoxLayout()
+        scale_box.setSpacing(theme.px(8))
+        scale_box.addWidget(section_label("масштаб"))
+        scale_row = QHBoxLayout()
+        self.scale_box = Segmented([(step, "%d%%" % step) for step in theme.SCALE_STEPS])
+        scale_row.addWidget(self.scale_box)
+        scale_row.addSpacing(theme.px(14))
+        scale_row.addWidget(self._note("за ноутбуком — мельче, за монитором — крупнее"), 1)
+        scale_box.addLayout(scale_row)
+        layout.addLayout(scale_box)
 
-        self.scale_box = QComboBox()
-        for step in theme.SCALE_STEPS:
-            self.scale_box.addItem("%d%%" % step, step)
-        self.scale_box.setToolTip(
-            "Размер всего интерфейса. За ноутбуком удобнее мельче, "
-            "за большим монитором — крупнее."
-        )
-        form.addRow("Масштаб", self.scale_box)
+        # --- Шрифт и фон — в две колонки ---
+        columns = QHBoxLayout()
+        columns.setSpacing(theme.px(40))
 
-        # Фон экрана: шум из знаков, его движение и полосы развёртки.
-        self.noise_box = QComboBox()
-        for key, title in NOISE_LABELS.items():
-            self.noise_box.addItem(title, key)
+        font_col = QVBoxLayout()
+        font_col.setSpacing(theme.px(8))
+        font_col.addWidget(section_label("шрифт"))
+        heading_row = QHBoxLayout()
+        heading_row.setSpacing(theme.px(6))
+        heading_row.addWidget(QLabel("заголовки"))
+        heading_row.addWidget(FillGlyph(".", c["faint"]), 1)
+        self.pixel_font_box = QComboBox()
+        self.pixel_font_box.setMinimumWidth(cell_width() * 24)
+        heading_row.addWidget(self.pixel_font_box)
+        font_col.addLayout(heading_row)
+        text_row = LeaderRow("текст", c)
+        text_row.key.setStyleSheet("color: %s; background: transparent;" % c["text"])
+        text_row.set_value("IBM VGA 8\u00d716", c["bright"])
+        font_col.addWidget(text_row)
+        add_font = link_button("+ добавить свой шрифт\u2026",
+                               "Скопировать .ttf в папку программы и использовать его")
+        add_font.clicked.connect(self._add_font)
+        add_row = QHBoxLayout()
+        add_row.addWidget(add_font)
+        add_row.addStretch(1)
+        font_col.addLayout(add_row)
+        self.font_note = self._note()
+        font_col.addWidget(self.font_note)
+        font_col.addStretch(1)
+        columns.addLayout(font_col, 1)
+
+        back_col = QVBoxLayout()
+        back_col.setSpacing(theme.px(8))
+        back_col.addWidget(section_label("фон"))
+        noise_row = QHBoxLayout()
+        noise_row.addWidget(QLabel("шум"))
+        noise_row.addSpacing(theme.px(10))
+        self.noise_box = Segmented([("off", "выкл"), ("quiet", "тихо"), ("loud", "заметно")])
         self.noise_box.setToolTip("Знаки · : ░ 0 1 на фоне, между панелями")
-        form.addRow("Шум на фоне", self.noise_box)
-
-        self.motion_check = QCheckBox("Фон мерцает, строка в шапке бежит")
+        noise_row.addWidget(self.noise_box, 1)
+        back_col.addLayout(noise_row)
+        scan_row = QHBoxLayout()
+        scan_row.addWidget(QLabel("развёртка"))
+        scan_row.addSpacing(theme.px(10))
+        self.scanlines_box = Segmented(
+            [("theme", "как у темы"), ("on", "вкл"), ("off", "выкл")]
+        )
+        self.scanlines_box.setToolTip("Тонкие тёмные полосы, как на стекле старого монитора")
+        scan_row.addWidget(self.scanlines_box, 1)
+        back_col.addLayout(scan_row)
+        self.motion_check = QCheckBox("бегущая строка и мерцание")
         self.motion_check.setToolTip(
             "Выключите, если движение отвлекает: всё останется на месте"
         )
-        form.addRow("Движение", self.motion_check)
+        back_col.addWidget(self.motion_check)
+        back_col.addStretch(1)
+        columns.addLayout(back_col, 1)
+        layout.addLayout(columns)
 
-        self.scanlines_box = QComboBox()
-        for key, title in SCANLINE_MODES.items():
-            self.scanlines_box.addItem(title, key)
-        self.scanlines_box.setToolTip(
-            "Тонкие тёмные полосы, как на стекле старого монитора"
-        )
-        form.addRow("Полосы развёртки", self.scanlines_box)
-
+        # --- Работа ---
+        work = QVBoxLayout()
+        work.setSpacing(theme.px(8))
+        work.addWidget(section_label("работа"))
+        stale_row = QHBoxLayout()
+        stale_row.setSpacing(theme.px(10))
+        stale_row.addWidget(QLabel("считать задачу «без движения» через"))
         self.stale_spin = QSpinBox()
         self.stale_spin.setRange(1, 60)
         self.stale_spin.setSuffix(" дн.")
-        form.addRow("Считать задачу «без движения» через", self.stale_spin)
-
-        layout.addLayout(form)
-
-        font_row = QHBoxLayout()
-        font_row.setSpacing(8)
-        font_row.addWidget(QLabel("Шрифт заголовков"))
-        self.pixel_font_box = QComboBox()
-        self.pixel_font_box.setMinimumWidth(180)
-        font_row.addWidget(self.pixel_font_box, 1)
-        add_font = _button("Добавить файл…", "flat")
-        add_font.setToolTip("Скопировать .ttf в папку программы и использовать его")
-        add_font.clicked.connect(self._add_font)
-        font_row.addWidget(add_font)
-        layout.addLayout(font_row)
-
-        self.font_note = QLabel()
-        self.font_note.setWordWrap(True)
-        self.font_note.setProperty("faint", "true")
-        layout.addWidget(self.font_note)
-
-        self.confirm_check = QCheckBox("Спрашивать подтверждение при отметке «выполнено»")
-        layout.addWidget(self.confirm_check)
+        self.stale_spin.setFixedWidth(cell_width() * 10)
+        stale_row.addWidget(self.stale_spin)
+        stale_row.addStretch(1)
+        work.addLayout(stale_row)
+        self.confirm_check = QCheckBox("спрашивать подтверждение при отметке «выполнено»")
+        work.addWidget(self.confirm_check)
         self.ask_result_check = QCheckBox(
-            "Спрашивать, что сделано, если по задаче нет ни одной отметки"
+            "спрашивать, что сделано, если по задаче нет ни одной отметки"
         )
         self.ask_result_check.setToolTip(
             "Иначе такая задача попадёт в недельный отчёт строкой «ничего не отмечено»"
         )
-        layout.addWidget(self.ask_result_check)
-        self.tray_check = QCheckBox("Сворачивать в трей вместо закрытия")
-        layout.addWidget(self.tray_check)
-        self.autostart_check = QCheckBox("Запускать при входе в Windows")
-        layout.addWidget(self.autostart_check)
-
-        note = QLabel(
-            "Автозапуск создаёт обычный ярлык в папке «Автозагрузка» вашего профиля — "
-            "права администратора не нужны."
+        work.addWidget(self.ask_result_check)
+        self.tray_check = QCheckBox("сворачивать в трей при закрытии")
+        work.addWidget(self.tray_check)
+        self.autostart_check = QCheckBox("запускать вместе с Windows")
+        self.autostart_check.setToolTip(
+            "Создаёт обычный ярлык в папке «Автозагрузка» вашего профиля — "
+            "права администратора не нужны"
         )
-        note.setWordWrap(True)
-        note.setProperty("faint", "true")
-        layout.addWidget(note)
+        work.addWidget(self.autostart_check)
+        layout.addLayout(work)
 
-        layout.addWidget(hline())
-        layout.addWidget(section_label("задачи-примеры"))
-        demo_row = QHBoxLayout()
-        demo_row.setSpacing(8)
-        self.demo_button = _button("Добавить задачи-примеры", "flat")
-        self.demo_button.clicked.connect(self._add_demo)
-        demo_row.addWidget(self.demo_button)
-        demo_row.addStretch(1)
-        layout.addLayout(demo_row)
+        layout.addStretch(1)
+        return page
 
-        demo_note = QLabel(
-            "Несколько задач, показывающих сроки, приоритеты, продукты и плановый "
-            "старт. Убрать их можно кнопкой над списком задач."
-        )
-        demo_note.setWordWrap(True)
-        demo_note.setProperty("faint", "true")
-        layout.addWidget(demo_note)
+    def _pick_theme(self, key: str) -> None:
+        self._theme = key
+        for name, tile in self.theme_tiles.items():
+            tile.setChecked(name == key)
+            tile.update()
 
-        layout.addWidget(hline())
+    def _program_tab(self) -> QWidget:
+        """Обновления, ярлыки, задачи-примеры и где лежат данные."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, theme.px(4), theme.px(8), theme.px(4))
+        layout.setSpacing(theme.px(12))
+
         layout.addWidget(section_label("обновление"))
         update_row = QHBoxLayout()
-        update_row.setSpacing(8)
-        self.update_button = _button("Проверить обновления")
+        update_row.setSpacing(theme.px(10))
+        self.update_button = _button("[ Проверить обновления ]", "flat")
         self.update_button.clicked.connect(self._run_update)
         update_row.addWidget(self.update_button)
-
-        self.update_check_box = QCheckBox("Проверять обновления при запуске")
+        self.update_check_box = QCheckBox("проверять обновления при запуске")
         self.update_check_box.setToolTip("Раз в сутки, в фоне; без интернета просто молчит")
         update_row.addWidget(self.update_check_box)
         update_row.addStretch(1)
         layout.addLayout(update_row)
-
-        self.version_note = QLabel()
-        self.version_note.setWordWrap(True)
-        self.version_note.setProperty("faint", "true")
+        self.version_note = self._note()
         layout.addWidget(self.version_note)
 
-        layout.addWidget(hline())
         layout.addWidget(section_label("ярлыки"))
         shortcut_row = QHBoxLayout()
-        shortcut_row.setSpacing(8)
-        desktop_button = _button("Ярлык на рабочий стол")
+        shortcut_row.setSpacing(theme.px(10))
+        desktop_button = _button("[ На рабочий стол ]", "flat")
         desktop_button.clicked.connect(lambda: self._make_shortcut(shortcut.DESKTOP))
         shortcut_row.addWidget(desktop_button)
-        menu_button = _button("Добавить в меню «Пуск»", "flat")
+        menu_button = _button("[ В меню «Пуск» ]", "flat")
         menu_button.clicked.connect(lambda: self._make_shortcut(shortcut.START_MENU))
         shortcut_row.addWidget(menu_button)
-        folder_button = _button("Ярлык в папке программы", "flat")
+        folder_button = _button("[ В папку программы ]", "flat")
         folder_button.setToolTip("Положить ярлык рядом с run.py — запускать оттуда")
         folder_button.clicked.connect(lambda: self._make_shortcut(shortcut.APP_FOLDER))
         shortcut_row.addWidget(folder_button)
         shortcut_row.addStretch(1)
         layout.addLayout(shortcut_row)
-
-        shortcut_note = QLabel(
+        layout.addWidget(self._note(
             "Ярлык запускает программу двойным кликом по значку — без консоли и "
             "без прав администратора."
-        )
-        shortcut_note.setWordWrap(True)
-        shortcut_note.setProperty("faint", "true")
-        layout.addWidget(shortcut_note)
+        ))
 
-        layout.addWidget(hline())
+        layout.addWidget(section_label("задачи-примеры"))
+        demo_row = QHBoxLayout()
+        self.demo_button = _button("[ Добавить задачи-примеры ]", "flat")
+        self.demo_button.clicked.connect(self._add_demo)
+        demo_row.addWidget(self.demo_button)
+        demo_row.addStretch(1)
+        layout.addLayout(demo_row)
+        layout.addWidget(self._note(
+            "Несколько задач, показывающих сроки, приоритеты, продукты и плановый "
+            "старт. Убрать их можно кнопкой над списком задач."
+        ))
+
         layout.addWidget(section_label("где лежат данные"))
         path_label = QLabel(str(data_dir()))
-        path_label.setFont(theme.mono_font(8))
-        path_label.setProperty("dim", "true")
         path_label.setWordWrap(True)
         path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(path_label)
-        mode = QLabel(
+        layout.addWidget(self._note(
             "Портативный режим включён (файл portable.flag)."
             if is_portable()
-            else "Чтобы носить программу с собой, положите рядом с run.py пустой файл portable.flag — "
-            "данные переедут в папку приложения."
-        )
-        mode.setWordWrap(True)
-        mode.setProperty("faint", "true")
-        layout.addWidget(mode)
+            else "Чтобы носить программу с собой, положите рядом с run.py пустой файл "
+            "portable.flag — данные переедут в папку приложения."
+        ))
+        data_row = QHBoxLayout()
+        data_button = _button("[ Открыть папку с данными ]", "flat")
+        data_button.clicked.connect(self._open_data_dir)
+        data_row.addWidget(data_button)
+        data_row.addStretch(1)
+        layout.addLayout(data_row)
 
         layout.addStretch(1)
         return page
@@ -952,15 +1103,14 @@ class SettingsDialog(QDialog):
         s = self.settings
         self._sync_version()
         self.update_check_box.setChecked(bool(s.get("updates.check_on_start", True)))
-        index = self.theme_box.findData(theme.theme_name(s.get("theme", theme.DEFAULT_THEME)))
-        self.theme_box.setCurrentIndex(max(index, 0))
-        index = self.scale_box.findData(s.get_int("ui_scale", theme.DEFAULT_SCALE))
-        self.scale_box.setCurrentIndex(max(index, 0))
-        index = self.noise_box.findData(s.get("ui.noise", "quiet"))
-        self.noise_box.setCurrentIndex(max(index, 0))
+        self._pick_theme(theme.theme_name(s.get("theme", theme.DEFAULT_THEME)))
+        scale = s.get_int("ui_scale", theme.DEFAULT_SCALE)
+        if scale not in theme.SCALE_STEPS:
+            scale = theme.DEFAULT_SCALE
+        self.scale_box.set_value(scale)
+        self.noise_box.set_value(s.get("ui.noise", "quiet"))
         self.motion_check.setChecked(bool(s.get("ui.motion", True)))
-        index = self.scanlines_box.findData(s.get("ui.scanlines", "theme"))
-        self.scanlines_box.setCurrentIndex(max(index, 0))
+        self.scanlines_box.set_value(s.get("ui.scanlines", "theme"))
         self._fill_fonts()
         self.stale_spin.setValue(s.get_int("stale_days", 5))
         self.confirm_check.setChecked(bool(s.get("confirm_done", True)))
@@ -1029,35 +1179,37 @@ class SettingsDialog(QDialog):
             return default_h, default_m
 
     def _fill_fonts(self) -> None:
-        """Список шрифтов: свои файлы, найденные системные и «подобрать самим»."""
+        """Шрифты для заголовков: из поставки, свои файлы и найденные в системе."""
         from PySide6.QtGui import QFontDatabase
 
         installed = set(QFontDatabase.families())
         current = self.settings.get("pixel_font", "")
 
         self.pixel_font_box.clear()
-        self.pixel_font_box.addItem("Как весь текст — IBM VGA", "")
-        own = fonts_module.loaded_families()
+        self.pixel_font_box.addItem("IBM VGA", "")
+        listed = {"", theme.TERMINAL_FAMILY}
+        shipped = [f for f in fonts_module.shipped_families() if f not in listed]
+        own = [f for f in fonts_module.loaded_families() if f not in listed and f not in shipped]
+        for family in shipped:
+            self.pixel_font_box.addItem(family, family)
+            listed.add(family)
         for family in own:
-            self.pixel_font_box.addItem("%s — из папки программы" % family, family)
+            self.pixel_font_box.addItem("%s · свой" % family, family)
+            listed.add(family)
         for family in theme.PIXEL_CANDIDATES:
-            if family in installed and family not in own:
-                self.pixel_font_box.addItem("%s — из системы" % family, family)
+            if family in installed and family not in listed:
+                self.pixel_font_box.addItem("%s · из системы" % family, family)
+                listed.add(family)
         if current and self.pixel_font_box.findData(current) < 0:
-            self.pixel_font_box.addItem("%s — не найден" % current, current)
+            self.pixel_font_box.addItem("%s · не найден" % current, current)
 
         index = self.pixel_font_box.findData(current)
         self.pixel_font_box.setCurrentIndex(max(index, 0))
 
-        if own:
-            head = "Свои шрифты: %s." % ", ".join(own)
-        else:
-            head = "Своих шрифтов пока нет — заголовки набраны тем же IBM VGA."
         self.font_note.setText(
-            "%s Весь текст набран шрифтом IBM VGA 8×16 — он едет с программой. "
-            "Для заголовков можно взять свой: пиксельный с кириллицей, файлом "
-            ".ttf. Он ляжет в папку %s, подключится без установки в Windows и "
-            "переживёт обновление." % (head, fonts_module.fonts_dir())
+            "Заголовки — название программы и задачи в карточке. Свой шрифт "
+            "(.ttf с кириллицей) ляжет в папку %s и переживёт обновление."
+            % fonts_module.fonts_dir()
         )
 
     def _add_font(self) -> None:
@@ -1126,7 +1278,7 @@ class SettingsDialog(QDialog):
 
     def _save(self) -> None:
         s = self.settings
-        s.set("theme", self.theme_box.currentData())
+        s.set("theme", self._theme)
         s.set("ui_scale", self.scale_box.currentData())
         s.set("ui.noise", self.noise_box.currentData())
         s.set("ui.motion", self.motion_check.isChecked())

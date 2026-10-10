@@ -1043,7 +1043,7 @@ class DailyReportDialog(QDialog):
         self.setWindowTitle("Отчёт за день")
         self._build()
         self._load()
-        manage_window(self, settings, "daily", 960, 780)
+        manage_window(self, settings, "daily_v2", 960, 780)
 
     def _build(self) -> None:
         colors = theme.palette(self.settings.get("theme", theme.DEFAULT_THEME))

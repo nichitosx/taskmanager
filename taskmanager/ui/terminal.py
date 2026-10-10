@@ -909,3 +909,48 @@ def glyph_label(char: str, color: str) -> QLabel:
     label = QLabel(char)
     label.setStyleSheet("color: %s; background: transparent;" % color)
     return label
+
+
+class Segmented(QWidget):
+    """Переключатель словами: «выкл тихо заметно» — выбранное инверсией."""
+
+    changed = Signal(object)
+
+    def __init__(self, options: list[tuple[object, str]], separators: bool = False,
+                 colors: dict[str, str] | None = None, parent=None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(theme.px(4))
+        self._value = options[0][0] if options else None
+        self.buttons: dict[object, QWidget] = {}
+        for index, (value, label) in enumerate(options):
+            if separators and index and colors:
+                layout.addWidget(glyph_label("│", colors["faint"]))
+            button = link_button(label)
+            button.clicked.connect(lambda _=False, v=value: self.set_value(v, True))
+            self.buttons[value] = button
+            layout.addWidget(button)
+        layout.addStretch(1)
+        self._sync()
+
+    def value(self):
+        return self._value
+
+    def currentData(self):  # noqa: N802 (как у QComboBox)
+        return self._value
+
+    def set_value(self, value, emit: bool = False) -> None:
+        if value not in self.buttons:
+            return
+        self._value = value
+        self._sync()
+        if emit:
+            self.changed.emit(value)
+
+    def _sync(self) -> None:
+        for value, button in self.buttons.items():
+            button.setProperty("active", "true" if value == self._value else "false")
+            button.style().unpolish(button)
+            button.style().polish(button)

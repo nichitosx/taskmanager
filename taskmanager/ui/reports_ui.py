@@ -274,7 +274,7 @@ class WeeklyReportDialog(QDialog):
         self._build()
         self.refresh()
         self.load_jira_done()
-        manage_window(self, settings, "weekly", 1360, 860)
+        manage_window(self, settings, "weekly_v2", 1360, 860)
 
     def _build(self) -> None:
         c = self.colors
