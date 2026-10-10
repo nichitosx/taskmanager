@@ -87,6 +87,7 @@ from .dialogs import (
 from .reports_ui import HistoryDialog, WeeklyReportDialog
 from .settings_dialog import SettingsDialog
 from .widgets import (
+    clear_background,
     ascii_chart,
     ascii_frame,
     ascii_readout,
@@ -235,9 +236,9 @@ class TaskDetail(QWidget):
         layout.setContentsMargins(18, 16, 4, 12)
         layout.setSpacing(10)
 
-        colors = theme.palette(self.settings.get("theme", "dark"))
+        colors = theme.palette(self.settings.get("theme", theme.DEFAULT_THEME))
         self.placeholder = QWidget()
-        self.placeholder.setStyleSheet("background: transparent;")
+        clear_background(self.placeholder)
         hint_layout = QVBoxLayout(self.placeholder)
         hint_layout.setContentsMargins(0, 30, 0, 0)
         hint_layout.setSpacing(14)
@@ -285,11 +286,11 @@ class TaskDetail(QWidget):
         self.body_scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
-        self.body_scroll.setStyleSheet("background: transparent;")
+        clear_background(self.body_scroll)
         layout.addWidget(self.body_scroll, 1)
 
         self.body = QWidget()
-        self.body.setStyleSheet("background: transparent;")
+        clear_background(self.body)
         body_layout = QVBoxLayout(self.body)
         body_layout.setContentsMargins(0, 0, 10, 0)
         body_layout.setSpacing(10)
@@ -317,7 +318,7 @@ class TaskDetail(QWidget):
 
         self.subtasks = SubtaskList(
             self.storage,
-            theme.palette(self.settings.get("theme", "dark")),
+            theme.palette(self.settings.get("theme", theme.DEFAULT_THEME)),
             compact=True,
         )
         self.subtasks.changed.connect(self._subtasks_changed)
@@ -393,7 +394,7 @@ class TaskDetail(QWidget):
         )
 
         holder = QWidget()
-        holder.setStyleSheet("background: transparent;")
+        clear_background(holder)
         column = QVBoxLayout(holder)
         column.setContentsMargins(0, 0, 10, 0)
         column.setSpacing(10)
@@ -421,7 +422,7 @@ class TaskDetail(QWidget):
         column.addWidget(self.goal_comment)
 
         self.goal_results = GoalResultList(
-            self.storage, theme.palette(self.settings.get("theme", "dark"))
+            self.storage, theme.palette(self.settings.get("theme", theme.DEFAULT_THEME))
         )
         self.goal_results.changed.connect(self._goal_results_changed)
         column.addWidget(self.goal_results)
@@ -505,7 +506,7 @@ class TaskDetail(QWidget):
 
     def _build_reminder_page(self, colors: dict[str, str]) -> QWidget:
         self.reminder_page = QWidget()
-        self.reminder_page.setStyleSheet("background: transparent;")
+        clear_background(self.reminder_page)
         column = QVBoxLayout(self.reminder_page)
         column.setContentsMargins(0, 0, 10, 0)
         column.setSpacing(10)
@@ -709,10 +710,9 @@ class MainWindow(QMainWindow):
         self._jira_loaded_at = None
         self._jira_thread: JiraFetch | None = None
         self._shown_filter = ""
-        theme.set_style(settings.get("ui_style", theme.STYLE_SOFT))
         theme.set_scale(settings.get("ui_scale", theme.DEFAULT_SCALE))
         theme.set_preferred_pixel(settings.get("pixel_font", ""))
-        self.colors = theme.palette(settings.get("theme", "dark"))
+        self.colors = theme.palette(settings.get("theme", theme.DEFAULT_THEME))
         self._force_quit = False
 
         self.setWindowTitle("TaskManager")
@@ -833,7 +833,7 @@ class MainWindow(QMainWindow):
         center_layout.addWidget(self.list, 1)
 
         self.empty_box = QWidget()
-        self.empty_box.setStyleSheet("background: transparent;")
+        clear_background(self.empty_box)
         empty_layout = QVBoxLayout(self.empty_box)
         empty_layout.setContentsMargins(0, 40, 0, 0)
         empty_layout.setSpacing(16)
@@ -842,7 +842,7 @@ class MainWindow(QMainWindow):
         self.empty_art = QLabel()
         self.empty_art.setPixmap(make_watermark(112, self.colors["text_faint"], 40))
         self.empty_art.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.empty_art.setStyleSheet("background: transparent;")
+        clear_background(self.empty_art)
         empty_layout.addWidget(self.empty_art)
 
         self.empty_label = QLabel()
@@ -1244,7 +1244,7 @@ class MainWindow(QMainWindow):
             line = QWidget()
             # Без этого строка красится общим фоном окна и на подложке окошка
             # получаются тёмные полосы.
-            line.setStyleSheet("background: transparent;")
+            clear_background(line)
             row = QHBoxLayout(line)
             row.setContentsMargins(0, 0, 0, 0)
             row.setSpacing(8)
@@ -2677,14 +2677,13 @@ class MainWindow(QMainWindow):
 
     def apply_theme(self) -> None:
         """Перекрашивает приложение после смены темы или стиля в настройках."""
-        name = self.settings.get("theme", "dark")
-        theme.set_style(self.settings.get("ui_style", theme.STYLE_SOFT))
+        name = self.settings.get("theme", theme.DEFAULT_THEME)
         theme.set_scale(self.settings.get("ui_scale", theme.DEFAULT_SCALE))
         theme.set_preferred_pixel(self.settings.get("pixel_font", ""))
         self.colors = theme.palette(name)
         app = QApplication.instance()
         if app is not None:
-            app.setStyleSheet(theme.stylesheet(name, theme.current_style()))
+            app.setStyleSheet(theme.stylesheet(name))
         icon = self._icon()
         self.setWindowIcon(icon)
         self.tray.setIcon(icon)

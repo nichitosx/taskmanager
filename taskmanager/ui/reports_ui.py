@@ -55,7 +55,7 @@ from ..reports import (
 )
 from ..storage import Storage
 from . import theme
-from .widgets import manage_window, hline, section_label
+from .widgets import clear_background, manage_window, hline, section_label
 
 
 def _button(text: str, kind: str = "") -> QPushButton:
@@ -146,7 +146,7 @@ class WeeklyReportDialog(QDialog):
         self.grouping = settings.get("weekly.grouping", GROUPING_BY_DAYS)
         if self.grouping not in GROUPING_LABELS:
             self.grouping = GROUPING_BY_DAYS
-        self.colors = theme.palette(settings.get("theme", "dark"))
+        self.colors = theme.palette(settings.get("theme", theme.DEFAULT_THEME))
         self.setWindowTitle("Недельный отчёт")
         self._build()
         self.refresh()
@@ -504,7 +504,7 @@ class WeeklyReportDialog(QDialog):
         title = QLabel(task.title)
         title.setWordWrap(True)
         title.setFont(theme.ui_font(10, bold=True))
-        title.setStyleSheet("background: transparent;")
+        clear_background(title)
         layout.addWidget(title)
 
         meta_parts = [PRIORITY_LABELS.get(task.priority, "обычный")]

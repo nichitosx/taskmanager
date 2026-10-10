@@ -393,7 +393,7 @@ class CalendarDialog(QDialog):
         self.settings = settings
         # Встречи из внешнего календаря: их читает главное окно и передаёт сюда.
         self.events = list(events or [])
-        self.colors = theme.palette(settings.get("theme", "dark"))
+        self.colors = theme.palette(settings.get("theme", theme.DEFAULT_THEME))
         self.month = date.today().replace(day=1)
         self.selected = date.today()
         self.show_weekends = bool(settings.get("calendar.show_weekends", False))

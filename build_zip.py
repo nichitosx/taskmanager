@@ -36,9 +36,12 @@ INCLUDE = [
 
 # Что не должно попасть в архив ни при каких условиях.
 SKIP_DIRS = {"__pycache__", ".git", "dist", "data", ".idea", ".vscode"}
-# Шрифты не распространяем: у файлов свои лицензии, а свой шрифт пользователь
-# кладёт в папку fonts сам.
-SKIP_SUFFIXES = {".pyc", ".pyo", ".db", ".lnk", ".ico", ".log", ".ttf", ".otf", ".ttc"}
+# Чужие шрифты не распространяем: у файлов свои лицензии, а свой шрифт
+# пользователь кладёт в папку fonts сам. Едут только шрифты поставки — они под
+# свободной лицензией, которая это разрешает.
+SKIP_SUFFIXES = {".pyc", ".pyo", ".db", ".lnk", ".ico", ".log"}
+FONT_SUFFIXES = {".ttf", ".otf", ".ttc"}
+SHIPPED_FONTS = ("taskmanager", "assets", "fonts")
 SKIP_NAMES = {"settings.json", "portable.flag"}
 
 
@@ -47,6 +50,9 @@ def keep(path: Path) -> bool:
         return False
     if path.suffix.lower() in SKIP_SUFFIXES:
         return False
+    if path.suffix.lower() in FONT_SUFFIXES:
+        parts = path.relative_to(ROOT).parts if path.is_absolute() else path.parts
+        return tuple(parts[:3]) == SHIPPED_FONTS
     return path.name not in SKIP_NAMES
 
 
@@ -88,9 +94,16 @@ def verify(archive: Path) -> bool:
     problems = [
         name for name in names if Path(name).suffix.lower() in SKIP_SUFFIXES
     ]
+    problems += [
+        name for name in names
+        if Path(name).suffix.lower() in FONT_SUFFIXES
+        and not name.startswith("TaskManager/taskmanager/assets/fonts/")
+    ]
     problems += [name for name in names if Path(name).name in SKIP_NAMES]
     required = [
         "TaskManager/fonts/README.md",
+        "TaskManager/taskmanager/assets/fonts/PxPlus_IBM_VGA_8x16.ttf",
+        "TaskManager/taskmanager/assets/fonts/LICENSE-IBM-VGA.txt",
         "TaskManager/run.py",
         "TaskManager/install.py",
         "TaskManager/update.py",

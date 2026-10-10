@@ -140,11 +140,6 @@ class SettingsDialog(QDialog):
         )
         form.addRow("Масштаб", self.scale_box)
 
-        self.style_box = QComboBox()
-        for key, title in theme.STYLE_LABELS.items():
-            self.style_box.addItem(title, key)
-        form.addRow("Стиль", self.style_box)
-
         self.stale_spin = QSpinBox()
         self.stale_spin.setRange(1, 60)
         self.stale_spin.setSuffix(" дн.")
@@ -154,7 +149,7 @@ class SettingsDialog(QDialog):
 
         font_row = QHBoxLayout()
         font_row.setSpacing(8)
-        font_row.addWidget(QLabel("Пиксельный шрифт"))
+        font_row.addWidget(QLabel("Шрифт заголовков"))
         self.pixel_font_box = QComboBox()
         self.pixel_font_box.setMinimumWidth(180)
         font_row.addWidget(self.pixel_font_box, 1)
@@ -168,15 +163,6 @@ class SettingsDialog(QDialog):
         self.font_note.setWordWrap(True)
         self.font_note.setProperty("faint", "true")
         layout.addWidget(self.font_note)
-
-        style_note = QLabel(
-            "«Мягкий» — скруглённые карточки и системный шрифт. «Пиксельный» — "
-            "прямые углы, моноширинный шрифт и жёсткие рамки. Применяется сразу "
-            "после сохранения."
-        )
-        style_note.setWordWrap(True)
-        style_note.setProperty("faint", "true")
-        layout.addWidget(style_note)
 
         self.confirm_check = QCheckBox("Спрашивать подтверждение при отметке «выполнено»")
         layout.addWidget(self.confirm_check)
@@ -944,12 +930,10 @@ class SettingsDialog(QDialog):
         s = self.settings
         self._sync_version()
         self.update_check_box.setChecked(bool(s.get("updates.check_on_start", True)))
-        index = self.theme_box.findData(s.get("theme", "dark"))
+        index = self.theme_box.findData(theme.theme_name(s.get("theme", theme.DEFAULT_THEME)))
         self.theme_box.setCurrentIndex(max(index, 0))
         index = self.scale_box.findData(s.get_int("ui_scale", theme.DEFAULT_SCALE))
         self.scale_box.setCurrentIndex(max(index, 0))
-        index = self.style_box.findData(s.get("ui_style", theme.STYLE_SOFT))
-        self.style_box.setCurrentIndex(max(index, 0))
         self._fill_fonts()
         self.stale_spin.setValue(s.get_int("stale_days", 5))
         self.confirm_check.setChecked(bool(s.get("confirm_done", True)))
@@ -1025,7 +1009,7 @@ class SettingsDialog(QDialog):
         current = self.settings.get("pixel_font", "")
 
         self.pixel_font_box.clear()
-        self.pixel_font_box.addItem("Подобрать автоматически", "")
+        self.pixel_font_box.addItem("Как весь текст — IBM VGA", "")
         own = fonts_module.loaded_families()
         for family in own:
             self.pixel_font_box.addItem("%s — из папки программы" % family, family)
@@ -1039,19 +1023,14 @@ class SettingsDialog(QDialog):
         self.pixel_font_box.setCurrentIndex(max(index, 0))
 
         if own:
-            head = "Найдены свои шрифты: %s." % ", ".join(own)
+            head = "Свои шрифты: %s." % ", ".join(own)
         else:
-            head = (
-                "Своего пиксельного шрифта пока нет, поэтому пиксельный стиль "
-                "выглядит обычным моноширинным."
-            )
+            head = "Своих шрифтов пока нет — заголовки набраны тем же IBM VGA."
         self.font_note.setText(
-            "%s Шрифт в поставку не входит — скачайте любой пиксельный с "
-            "кириллицей и добавьте кнопкой рядом. Подойдут бесплатные Tiny5, "
-            "Handjet или Pixeloid (ищутся по названию на fonts.google.com и "
-            "dafont.com), либо свой файл Minecraft из папки шрифтов Windows. Файл "
-            "ляжет в папку %s, подключится без установки в Windows и переживёт "
-            "обновление." % (head, fonts_module.fonts_dir())
+            "%s Весь текст набран шрифтом IBM VGA 8×16 — он едет с программой. "
+            "Для заголовков можно взять свой: пиксельный с кириллицей, файлом "
+            ".ttf. Он ляжет в папку %s, подключится без установки в Windows и "
+            "переживёт обновление." % (head, fonts_module.fonts_dir())
         )
 
     def _add_font(self) -> None:
@@ -1122,7 +1101,6 @@ class SettingsDialog(QDialog):
         s = self.settings
         s.set("theme", self.theme_box.currentData())
         s.set("ui_scale", self.scale_box.currentData())
-        s.set("ui_style", self.style_box.currentData())
         s.set("pixel_font", self.pixel_font_box.currentData() or "")
         s.set("stale_days", self.stale_spin.value())
         s.set("updates.check_on_start", self.update_check_box.isChecked())
@@ -1192,7 +1170,7 @@ class ProductDialog(QDialog):
         self.setWindowTitle("Продукт")
         self.setMinimumWidth(520)
         owner = parent.settings if parent is not None and hasattr(parent, "settings") else None
-        self.settings_theme = owner.get("theme", "dark") if owner is not None else "dark"
+        self.settings_theme = owner.get("theme", theme.DEFAULT_THEME) if owner is not None else theme.DEFAULT_THEME
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 20, 22, 18)

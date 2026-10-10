@@ -1,15 +1,15 @@
 """Шрифты, которые лежат рядом с программой.
 
-Пиксельное оформление имеет смысл только с пиксельным шрифтом, а ставить его в
-систему на рабочем компьютере не всегда можно и не всегда хочется. Поэтому файлы
+Терминальный вид держится на шрифте, а ставить шрифты в систему на рабочем
+компьютере не всегда можно и не всегда хочется. Поэтому файлы
 шрифтов кладутся в папку ``fonts`` рядом с программой: при запуске они
 подключаются к приложению и доступны только ему. Установка в Windows не нужна,
 права администратора тоже.
 
-Готовых шрифтов в поставке нет: чужие файлы распространять нельзя, а те
-свободные, что подходили по лицензии, на разных компьютерах вели себя
-по-разному. Поэтому шрифт каждый кладёт себе сам — любой .ttf/.otf. Где его
-взять, написано в настройках и в ``fonts/README.md``.
+В поставке один шрифт — IBM VGA 8×16 (The Ultimate Oldschool PC Font Pack,
+CC BY-SA 4.0): на нём набран весь интерфейс. Он лежит в
+``taskmanager/assets/fonts``. Свой шрифт для заголовков пользователь кладёт
+в папку ``fonts``: его можно выбрать в настройках.
 """
 
 from __future__ import annotations
@@ -23,6 +23,30 @@ SUFFIXES = (".ttf", ".otf", ".ttc")
 
 # Семейства, подключённые из папки fonts за время работы программы.
 _loaded: list[str] = []
+# Семейства шрифтов поставки — они есть всегда, но уступают своим.
+_shipped: list[str] = []
+
+
+def shipped_dir() -> Path:
+    """Папка со шрифтами, которые едут вместе с программой."""
+    return Path(__file__).resolve().parent / "assets" / "fonts"
+
+
+def shipped_families() -> list[str]:
+    return list(_shipped)
+
+
+def _add(path: Path, into: list[str]) -> list[str]:
+    from PySide6.QtGui import QFontDatabase
+
+    identifier = QFontDatabase.addApplicationFont(str(path))
+    if identifier < 0:
+        return []
+    families = QFontDatabase.applicationFontFamilies(identifier)
+    for family in families:
+        if family not in into:
+            into.append(family)
+    return families
 
 
 def fonts_dir() -> Path:
@@ -42,17 +66,17 @@ def loaded_families() -> list[str]:
 
 
 def load_bundled() -> list[str]:
-    """Подключает все шрифты из папки. Вызывается один раз при запуске."""
-    from PySide6.QtGui import QFontDatabase
+    """Подключает шрифты поставки и свои. Вызывается один раз при запуске."""
+    _shipped.clear()
+    folder = shipped_dir()
+    if folder.is_dir():
+        for path in sorted(folder.iterdir()):
+            if path.suffix.lower() in SUFFIXES:
+                _add(path, _shipped)
 
     _loaded.clear()
     for path in files():
-        identifier = QFontDatabase.addApplicationFont(str(path))
-        if identifier < 0:
-            continue
-        for family in QFontDatabase.applicationFontFamilies(identifier):
-            if family not in _loaded:
-                _loaded.append(family)
+        _add(path, _loaded)
     return list(_loaded)
 
 

@@ -390,6 +390,19 @@ class SectionLabel(QLabel):
         painter.end()
 
 
+def clear_background(widget: QWidget) -> QWidget:
+    """Прозрачный фон только у самого контейнера.
+
+    Голое «background: transparent» в стилях контейнера наследуют все его
+    дети, и оно перебивает общую таблицу стилей: главная кнопка внутри
+    теряла заливку, а тёмный текст на ней пропадал на тёмном фоне.
+    """
+    if not widget.objectName():
+        widget.setObjectName("clear%d" % id(widget))
+    widget.setStyleSheet("#%s { background: transparent; }" % widget.objectName())
+    return widget
+
+
 def section_label(text: str) -> QLabel:
     label = SectionLabel(text.upper())
     label.setProperty("section", "true")
@@ -1247,7 +1260,7 @@ class SubtaskRow(QWidget):
         self.subtask = subtask
         self.colors = colors
         self.compact = compact
-        self.setStyleSheet("background: transparent;")
+        clear_background(self)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1323,7 +1336,7 @@ class SubtaskList(QWidget):
         self.task_id = task_id
         self.compact = compact
         self._pending: list[str] = []
-        self.setStyleSheet("background: transparent;")
+        clear_background(self)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1343,7 +1356,7 @@ class SubtaskList(QWidget):
         layout.addLayout(head)
 
         rows_host = QWidget()
-        rows_host.setStyleSheet("background: transparent;")
+        clear_background(rows_host)
         self.rows_box = QVBoxLayout(rows_host)
         self.rows_box.setContentsMargins(0, 0, 0, 0)
         self.rows_box.setSpacing(theme.line_extra() + 3)
@@ -1357,7 +1370,7 @@ class SubtaskList(QWidget):
             self._area.setWidgetResizable(True)
             self._area.setFrameShape(QFrame.Shape.NoFrame)
             self._area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-            self._area.setStyleSheet("background: transparent;")
+            clear_background(self._area)
             self._area.setWidget(rows_host)
             layout.addWidget(self._area)
         else:
@@ -1827,7 +1840,7 @@ class GoalResultList(QWidget):
         self.colors = colors
         self.goal_id = goal_id
         self._pending: list[str] = []
-        self.setStyleSheet("background: transparent;")
+        clear_background(self)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1847,7 +1860,7 @@ class GoalResultList(QWidget):
         layout.addLayout(head)
 
         rows_host = QWidget()
-        rows_host.setStyleSheet("background: transparent;")
+        clear_background(rows_host)
         self.rows_box = QVBoxLayout(rows_host)
         self.rows_box.setContentsMargins(0, 0, 0, 0)
         self.rows_box.setSpacing(theme.line_extra() + 3)
@@ -1903,7 +1916,7 @@ class GoalResultList(QWidget):
 
     def _row(self, result) -> QWidget:
         holder = QWidget()
-        holder.setStyleSheet("background: transparent;")
+        clear_background(holder)
         row = QHBoxLayout(holder)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(10)
@@ -1935,7 +1948,7 @@ class GoalResultList(QWidget):
 
     def _pending_row(self, position: int, title: str) -> QWidget:
         holder = QWidget()
-        holder.setStyleSheet("background: transparent;")
+        clear_background(holder)
         row = QHBoxLayout(holder)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(10)

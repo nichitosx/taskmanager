@@ -60,7 +60,7 @@ def main() -> int:
         return 1
 
     app.setStyleSheet(
-        theme.stylesheet(settings.get("theme", "dark"), settings.get("ui_style", "soft"))
+        theme.stylesheet(settings.get("theme", theme.DEFAULT_THEME))
     )
 
     window = MainWindow(storage, settings)

@@ -258,7 +258,7 @@ class GoalDialog(QDialog):
         super().__init__(parent)
         self.storage = storage
         self.settings = settings
-        self.colors = theme.palette(settings.get("theme", "dark"))
+        self.colors = theme.palette(settings.get("theme", theme.DEFAULT_THEME))
         self.is_new = goal is None
         self.goal = goal or goals_module.Goal(quarter=quarter or goals_module.quarter_of())
         self.setWindowTitle("Новая цель" if self.is_new else "Цель квартала")
@@ -447,7 +447,7 @@ class TaskDialog(QDialog):
         self.storage = storage
         self.settings = settings
         self.task = task or Task()
-        self.colors = theme.palette(settings.get("theme", "dark"))
+        self.colors = theme.palette(settings.get("theme", theme.DEFAULT_THEME))
         # Переданная, но ещё не сохранённая задача — тоже новая: так календарь
         # открывает карточку с уже проставленным сроком.
         self.is_new = task is None or task.id is None
@@ -608,7 +608,7 @@ class TaskDialog(QDialog):
 
         self.subtasks = SubtaskList(
             self.storage,
-            theme.palette(self.settings.get("theme", "dark")),
+            theme.palette(self.settings.get("theme", theme.DEFAULT_THEME)),
             None if self.is_new else self.task.id,
             scroll_height=190,
         )
@@ -915,7 +915,7 @@ class DailyReportDialog(QDialog):
         manage_window(self, settings, "daily", 700, 640)
 
     def _build(self) -> None:
-        colors = theme.palette(self.settings.get("theme", "dark"))
+        colors = theme.palette(self.settings.get("theme", theme.DEFAULT_THEME))
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 20, 22, 18)
         layout.setSpacing(12)
@@ -1164,7 +1164,7 @@ class UpcomingTasksDialog(QDialog):
         self.setWindowTitle("Скоро в работу")
         self.setMinimumWidth(420)
 
-        colors = theme.palette(settings.get("theme", "dark"))
+        colors = theme.palette(settings.get("theme", theme.DEFAULT_THEME))
         catalog = products_module.load(settings)
 
         layout = QVBoxLayout(self)
