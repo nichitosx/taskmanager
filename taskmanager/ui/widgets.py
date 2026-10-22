@@ -853,6 +853,16 @@ def _due_text(task: Task) -> str:
     return "до %s" % task.due_date.strftime("%d.%m")
 
 
+def _days_word(days: int) -> str:
+    """«день», «дня» или «дней» — по числу."""
+    tail, hundred = days % 10, days % 100
+    if tail == 1 and hundred != 11:
+        return "день"
+    if tail in (2, 3, 4) and hundred not in (12, 13, 14):
+        return "дня"
+    return "дней"
+
+
 def table_due(task: Task) -> str:
     """Срок в колонке таблицы — коротко и капслоком там, где горит."""
     if task.is_done:
@@ -913,6 +923,10 @@ class TaskRow(QFrame):
     product_requested = Signal(int)   # кликнули по продукту
     priority_requested = Signal(int, int)  # задача и уровень, выбранный на шкале
     warning_clicked = Signal(int)     # кликнули по тревожной метке
+    mark_requested = Signal(int)      # щёлкнули по колонке отметки ♦
+
+    # Знак отмеченной задачи — ромб из набора IBM PC.
+    FLAG = "\u2666"
 
     def __init__(
         self,
@@ -966,6 +980,14 @@ class TaskRow(QFrame):
         holder.addStretch(1)
         layout.addWidget(self.check_cell)
 
+        self.flag = ClickLabel(self.FLAG if task.marked else "")
+        self.flag.setFont(theme.mono_font())
+        self.flag.make_clickable(
+            "Снять отметку (Insert)" if task.marked else "Отметить задачу (Insert)"
+        )
+        self.flag.clicked.connect(lambda: self.mark_requested.emit(task.id))
+        layout.addWidget(self.flag)
+
         self.mark = QLabel(self._mark_text())
         self.mark.setFont(theme.mono_font())
         if self.worked_today and not task.is_done:
@@ -992,6 +1014,7 @@ class TaskRow(QFrame):
         self.extras = QLabel(self._extras_text())
         self.extras.setFont(theme.mono_font())
         self.extras.setVisible(bool(self.extras.text()))
+        self.extras.setToolTip(self._extras_tooltip())
         title_row.addWidget(self.extras)
         layout.addWidget(self.title_cell, 1)
         self.setToolTip(self._tooltip())
@@ -1053,9 +1076,25 @@ class TaskRow(QFrame):
         if task.repeat and not task.is_done and describe_repeat(task.repeat):
             parts.append("\u21bb")
         if not task.is_done and task.is_stale(self.stale_days):
-            parts.append("тишина %dд" % task.days_since_activity)
+            # Коротко: число дней; что это за дни — в подсказке.
+            parts.append("%dд" % task.days_since_activity)
         # Теги в таблицу не идут: место нужнее названию, а теги видны в карточке.
         return " ".join(parts)
+
+    def _extras_tooltip(self) -> str:
+        """Расшифровка коротких пометок после названия."""
+        task = self.task
+        lines = []
+        done, total = self.subtasks
+        if total:
+            lines.append("%d/%d — сделано подпунктов" % (done, total))
+        repeat = describe_repeat(task.repeat)
+        if repeat and not task.is_done:
+            lines.append("\u21bb — повторяется: %s" % repeat)
+        if not task.is_done and task.is_stale(self.stale_days):
+            days = task.days_since_activity
+            lines.append("%dд — без движения %d %s" % (days, days, _days_word(days)))
+        return "\n".join(lines)
 
     def _tooltip(self) -> str:
         task = self.task
@@ -1088,7 +1127,8 @@ class TaskRow(QFrame):
             width - margins.left() - margins.right(), cell_width(self.font())
         )
         for name, widget in (
-            ("check", self.check_cell), ("mark", self.mark), ("key", self.key),
+            ("check", self.check_cell), ("flag", self.flag), ("mark", self.mark),
+            ("key", self.key),
             ("product", self.product), ("due", self.due), ("prio", self.prio_cell),
         ):
             if widths[name] <= 0:
@@ -1142,9 +1182,11 @@ class TaskRow(QFrame):
         base = self.base_color()
         if selected:
             ink = c["slab_ink"]
-            colors = {name: ink for name in ("mark", "key", "title", "extras", "product", "due")}
+            colors = {name: ink for name in
+                      ("flag", "mark", "key", "title", "extras", "product", "due")}
         else:
             colors = {
+                "flag": c["bright"],
                 "mark": c["danger"] if self.warning else c["bright"],
                 "key": (c["bright"] if self._asks_jira()
                         else (base if self.task.jira_key else c["faint"])),

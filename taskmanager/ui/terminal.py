@@ -810,6 +810,7 @@ class FKey(QWidget):
 # оставшееся), продукт, срок, важность. Между колонками — одна клетка.
 TABLE_COLUMNS = (
     ("check", 3),
+    ("flag", 1),
     ("mark", 1),
     ("key", 8),
     ("title", 0),
@@ -819,6 +820,7 @@ TABLE_COLUMNS = (
 )
 TABLE_HEADERS = {
     "check": "",
+    "flag": "",
     "mark": "",
     "key": "ключ",
     "title": "задача",

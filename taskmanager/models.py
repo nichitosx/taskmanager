@@ -78,6 +78,9 @@ class Task:
     # «Как можно скорее»: даты нет, но задача срочнее любой со сроком —
     # в списке она идёт сразу за просроченными.
     asap: bool = False
+    # Отмечена пользователем (Insert, как в Norton Commander): своя подборка
+    # задач в разделе «Отмеченные». Движением по задаче отметка не считается.
+    marked: bool = False
     start_date: Optional[date] = None
     product: str = ""
     # Правило повторения, см. recurrence.py: "", "daily", "weekly:2", "monthly:15".
@@ -158,6 +161,7 @@ class Task:
             priority=row["priority"],
             due_date=_parse_date(row["due_date"]),
             asap=bool(row["asap"]) if "asap" in row.keys() else False,
+            marked=bool(row["marked"]) if "marked" in row.keys() else False,
             start_date=_parse_date(row["start_date"]) if "start_date" in row.keys() else None,
             product=(row["product"] or "") if "product" in row.keys() else "",
             repeat=(row["repeat_rule"] or "") if "repeat_rule" in row.keys() else "",

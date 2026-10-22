@@ -732,6 +732,42 @@ class SettingsDialog(QDialog):
             % (name, way, issues[0].key, issues[0].summary)
         )
 
+    # --- Свои разделы из Jira ------------------------------------------------------
+
+    def _fill_sections(self) -> None:
+        self.sections_list.clear()
+        for section in self.sections:
+            item = QListWidgetItem("%s  \u2014  %s" % (section["name"], section["jql"]))
+            item.setToolTip(section["jql"])
+            self.sections_list.addItem(item)
+
+    def _add_section(self) -> None:
+        dialog = JiraSectionDialog({"name": "", "jql": ""}, self)
+        if dialog.exec() == dialog.DialogCode.Accepted:
+            self.sections.append(dialog.result_section())
+            self._fill_sections()
+            self.sections_list.setCurrentRow(len(self.sections) - 1)
+
+    def _edit_section(self) -> None:
+        row = self.sections_list.currentRow()
+        if not 0 <= row < len(self.sections):
+            return
+        dialog = JiraSectionDialog(self.sections[row], self)
+        if dialog.exec() == dialog.DialogCode.Accepted:
+            self.sections[row] = dialog.result_section()
+            self._fill_sections()
+            self.sections_list.setCurrentRow(row)
+
+    def _remove_section(self) -> None:
+        row = self.sections_list.currentRow()
+        if not 0 <= row < len(self.sections):
+            return
+        name = self.sections[row]["name"]
+        answer = QMessageBox.question(self, "Свои разделы", "Удалить раздел «%s»?" % name)
+        if answer == QMessageBox.StandardButton.Yes:
+            del self.sections[row]
+            self._fill_sections()
+
     def _sync_integrations(self) -> None:
         """Гасит поля выключенной интеграции, чтобы не сбивали с толку."""
         jira_on = self.jira_check.isChecked()
@@ -744,6 +780,10 @@ class SettingsDialog(QDialog):
             self.jira_jql_active,
             self.jira_jql_done,
             self.jira_check_button,
+            self.sections_list,
+            self.section_add,
+            self.section_edit,
+            self.section_remove,
         ):
             widget.setEnabled(jira_on)
         cf_on = self.cf_check.isChecked()
@@ -961,6 +1001,34 @@ class SettingsDialog(QDialog):
         jql_note.setProperty("faint", "true")
         layout.addWidget(jql_note)
 
+        # Свои разделы: название и JQL — раздел появится слева, в группе «Свои».
+        layout.addWidget(section_label("свои разделы"))
+        self.sections_list = QListWidget()
+        self.sections_list.setMaximumHeight(theme.px(140))
+        self.sections_list.itemDoubleClicked.connect(lambda _item: self._edit_section())
+        layout.addWidget(self.sections_list)
+        sections_row = QHBoxLayout()
+        sections_row.setSpacing(theme.px(10))
+        self.section_add = _button("[ Добавить раздел ]", "flat")
+        self.section_add.clicked.connect(self._add_section)
+        sections_row.addWidget(self.section_add)
+        self.section_edit = _button("[ Изменить ]", "flat")
+        self.section_edit.clicked.connect(self._edit_section)
+        sections_row.addWidget(self.section_edit)
+        self.section_remove = _button("[ Удалить ]", "flat")
+        self.section_remove.clicked.connect(self._remove_section)
+        sections_row.addWidget(self.section_remove)
+        sections_row.addStretch(1)
+        layout.addLayout(sections_row)
+        sections_note = QLabel(
+            "Раздел — свой список задач из Jira: название и фильтр JQL, например "
+            "«project = SEC AND labels = audit AND resolution = Unresolved». "
+            "Разделы появятся слева, в группе «Свои»."
+        )
+        sections_note.setWordWrap(True)
+        sections_note.setProperty("faint", "true")
+        layout.addWidget(sections_note)
+
         layout.addWidget(hline())
         layout.addWidget(section_label("календарь"))
         self.ics_check = QCheckBox("Показывать встречи из внешнего календаря")
@@ -1157,6 +1225,12 @@ class SettingsDialog(QDialog):
         self.jira_token.setText(s.get("jira.token", ""))
         self.jira_jql.setText(s.get("jira.jql", "") or DEFAULT_JQL)
         self.jira_jql_active.setText(s.get("jira.jql_active", "") or DEFAULT_JQL_ACTIVE)
+        self.sections = [
+            {"name": str(raw.get("name", "")), "jql": str(raw.get("jql", ""))}
+            for raw in (s.get("jira.sections", []) or [])
+            if isinstance(raw, dict)
+        ]
+        self._fill_sections()
         self.jira_jql_done.setText(s.get("jira.jql_done", "") or DEFAULT_JQL_DONE)
         self.vault_edit.setText(s.get("obsidian.vault_path", ""))
         self.daily_subdir.setText(s.get("obsidian.daily_subdir", ""))
@@ -1316,6 +1390,7 @@ class SettingsDialog(QDialog):
         s.set("jira.token", self.jira_token.text().strip())
         s.set("jira.jql", self.jira_jql.text().strip() or DEFAULT_JQL)
         s.set("jira.jql_active", self.jira_jql_active.text().strip() or DEFAULT_JQL_ACTIVE)
+        s.set("jira.sections", [dict(section) for section in self.sections])
         s.set("jira.jql_done", self.jira_jql_done.text().strip() or DEFAULT_JQL_DONE)
         s.set("jira.base_url", self.jira_url.text().strip().rstrip("/"))
         s.set("obsidian.vault_path", self.vault_edit.text().strip())
@@ -1342,6 +1417,88 @@ class SettingsDialog(QDialog):
 
         s.save()
         self.accept()
+
+
+class JiraSectionDialog(QDialog):
+    """Свой раздел: название в меню и фильтр JQL, по которому собираются задачи."""
+
+    def __init__(self, section: dict, parent=None) -> None:
+        super().__init__(parent)
+        self.owner = parent
+        self.setWindowTitle("Свой раздел")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(theme.px(18), theme.px(16), theme.px(18), theme.px(14))
+        layout.setSpacing(theme.px(10))
+
+        layout.addWidget(section_label("название"))
+        self.name_edit = QLineEdit(section.get("name", ""))
+        self.name_edit.setPlaceholderText("Аудит, Инциденты, Команда…")
+        layout.addWidget(self.name_edit)
+
+        layout.addWidget(section_label("фильтр jql"))
+        self.jql_edit = QLineEdit(section.get("jql", ""))
+        self.jql_edit.setPlaceholderText(
+            "project = SEC AND labels = audit AND resolution = Unresolved"
+        )
+        layout.addWidget(self.jql_edit)
+
+        self.note = QLabel(
+            "Тот же язык, что в поиске Jira. Удобно собрать фильтр там, "
+            "а сюда скопировать строку JQL."
+        )
+        self.note.setWordWrap(True)
+        self.note.setProperty("faint", "true")
+        layout.addWidget(self.note)
+
+        buttons = QHBoxLayout()
+        check = _button("[ Проверить фильтр ]", "flat")
+        check.clicked.connect(self._check)
+        buttons.addWidget(check)
+        buttons.addStretch(1)
+        cancel = _button("Отмена", "flat")
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+        save = _button("[ Сохранить ]", "accent")
+        save.clicked.connect(self._accept)
+        save.setDefault(True)
+        buttons.addWidget(save)
+        layout.addLayout(buttons)
+        self.resize(theme.px(620), self.sizeHint().height())
+
+    def result_section(self) -> dict:
+        return {"name": self.name_edit.text().strip(), "jql": self.jql_edit.text().strip()}
+
+    def _accept(self) -> None:
+        section = self.result_section()
+        if not section["name"] or not section["jql"]:
+            self.note.setText("Нужны и название, и фильтр.")
+            return
+        self.accept()
+
+    def _check(self) -> None:
+        """Спрашивает Jira по фильтру и говорит, сколько задач нашлось."""
+        jql = self.jql_edit.text().strip()
+        if not jql or self.owner is None:
+            return
+        config = self.owner._jira_config()
+        if not config.is_configured:
+            self.note.setText("Сначала заполните адрес Jira и токен на странице «Интеграции».")
+            return
+        self.note.setText("Спрашиваю Jira…")
+        QApplication.processEvents()
+        try:
+            issues = JiraClient(config).search(jql, limit=100)
+        except JiraError as exc:
+            self.note.setText(str(exc))
+            return
+        if not issues:
+            self.note.setText("Фильтр работает, но задач под него сейчас нет.")
+            return
+        self.note.setText(
+            "Найдено задач: %d%s. Первая: %s — %s"
+            % (len(issues), " и больше" if len(issues) >= 100 else "",
+               issues[0].key, issues[0].summary)
+        )
 
 
 class ProductDialog(QDialog):

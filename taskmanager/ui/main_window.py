@@ -158,6 +158,10 @@ GOALS = "goals"
 # Напоминания живут отдельно от задач: работой не считаются и в отчёт не идут.
 REMINDERS = "reminders"
 
+# Отмеченные задачи — своя подборка: Insert в списке, как в Norton Commander.
+MARKED = "marked"
+MARKED_HINT = "Задачи, отмеченные клавишей Insert или щелчком по колонке \u2666"
+
 # Задачи, закрытые здесь, но всё ещё открытые в Jira: рассинхрон, который
 # видно только когда Jira отвечает, — поэтому пункт появляется не всегда.
 JIRA_SYNC = "jira_sync"
@@ -195,6 +199,26 @@ JIRA_VIEWS = {
     JIRA_DONE: "Из Jira: сделано",
 }
 
+# Свои разделы: название и JQL задаёт пользователь в настройках.
+JIRA_CUSTOM_PREFIX = "jira_custom:"
+
+
+def custom_sections(settings) -> list[tuple[str, str, str]]:
+    """Свои разделы из настроек: (ключ списка, название, JQL).
+
+    Ключ — по номеру раздела: переименование не теряет выбранный список.
+    Разделы без названия или без фильтра пропускаем.
+    """
+    sections = []
+    for index, raw in enumerate(settings.get("jira.sections", []) or []):
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw.get("name", "") or "").strip()
+        jql = str(raw.get("jql", "") or "").strip()
+        if name and jql:
+            sections.append(("%s%d" % (JIRA_CUSTOM_PREFIX, index), name, jql))
+    return sections
+
 # Сколько держим ответ Jira, прежде чем спрашивать снова.
 JIRA_CACHE_SECONDS = 300
 
@@ -205,20 +229,33 @@ class JiraFetch(QThread):
     done = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, config: JiraConfig, parent=None) -> None:
+    def __init__(self, config: JiraConfig, custom=None, parent=None) -> None:
         super().__init__(parent)
         self.config = config
+        # Свои разделы: [(ключ списка, JQL)].
+        self.custom = list(custom or [])
 
     def run(self) -> None:  # noqa: D102 (Qt naming)
         try:
             client = JiraClient(self.config)
             # Один вход, три запроса: у каждого списка свой фильтр.
             start, end = week_bounds()
-            self.done.emit({
+            result = {
                 JIRA_ACTIVE: client.search(self.config.jql_active),
                 JIRA_PLAN: client.search(self.config.jql),
                 JIRA_DONE: client.search_done(start, end),
-            })
+            }
+            # Ошибка в своём фильтре не должна гасить остальные списки:
+            # она остаётся при своём разделе.
+            errors = {}
+            for key, jql in self.custom:
+                try:
+                    result[key] = client.search(jql, limit=100)
+                except JiraError as exc:
+                    result[key] = []
+                    errors[key] = str(exc)
+            result["_errors"] = errors
+            self.done.emit(result)
         except JiraError as exc:
             self.failed.emit(str(exc))
         except Exception as exc:  # неожиданная ошибка не должна ронять приложение
@@ -854,6 +891,8 @@ class MainWindow(QMainWindow):
         self.filter = "active"
         self.selected_id: int | None = None
         self._jira_issues: dict[str, list] = {key: [] for key in JIRA_VIEWS}
+        # Ошибки своих разделов: у каждого раздела своя.
+        self._jira_errors: dict[str, str] = {}
         # Задачи, по которым сегодня была работа: считаются раз на обновление.
         self._worked_today: set | None = None
         # Что выбрано в разделах целей и напоминаний.
@@ -1281,6 +1320,7 @@ class MainWindow(QMainWindow):
         group("когда")
         for key, title in HORIZON_FILTERS:
             layout.addWidget(self._nav_item(key, title, HORIZON_HINTS.get(key, "")))
+        layout.addWidget(self._nav_item(MARKED, "Отмеченные", MARKED_HINT))
         layout.addWidget(
             self._nav_item(
                 JIRA_ACTIVE,
@@ -1302,6 +1342,20 @@ class MainWindow(QMainWindow):
                 "Задачи, закрытые в Jira на этой неделе — вдруг здесь они ещё висят",
             )
         )
+
+        # Свои разделы из Jira — отдельной группой, если они заведены.
+        sections = custom_sections(self.settings)
+        self.custom_group = []
+        if sections:
+            layout.addSpacing(theme.section_gap())
+            caption = section_label("свои")
+            caption.setToolTip("Разделы со своими фильтрами Jira — «Настройки → Интеграции»")
+            layout.addWidget(caption)
+            self.custom_group.append(caption)
+            for key, name, jql in sections:
+                item = self._nav_item(key, name, "Jira: %s" % jql)
+                layout.addWidget(item)
+                self.custom_group.append(item)
 
         layout.addSpacing(theme.section_gap())
         group("состояние")
@@ -1510,6 +1564,14 @@ class MainWindow(QMainWindow):
         self.nav_items[key] = item
         return item
 
+    @property
+    def jira_views(self) -> dict[str, str]:
+        """Все списки из Jira: три встроенных и свои разделы из настроек."""
+        views = dict(JIRA_VIEWS)
+        for key, name, _jql in custom_sections(self.settings):
+            views[key] = name
+        return views
+
     def _jira_config(self) -> JiraConfig:
         return JiraConfig.from_settings(
             self.settings.get("jira", {}) or {},
@@ -1535,28 +1597,30 @@ class MainWindow(QMainWindow):
         if self._jira_fresh() and not force:
             return
         self._jira_error = ""
-        thread = JiraFetch(self._jira_config(), self)
+        custom = [(key, jql) for key, _name, jql in custom_sections(self.settings)]
+        thread = JiraFetch(self._jira_config(), custom, self)
         thread.done.connect(self._on_jira_done)
         thread.failed.connect(self._on_jira_failed)
         self._jira_thread = thread
         thread.start()
-        if self.filter in JIRA_VIEWS:
+        if self.filter in self.jira_views:
             self.refresh(keep_selection=False)
 
     def _on_jira_done(self, issues: dict) -> None:
         self._jira_issues = {
-            key: list(issues.get(key, [])) for key in JIRA_VIEWS
+            key: list(issues.get(key, [])) for key in self.jira_views
         }
+        self._jira_errors = dict(issues.get("_errors", {}) or {})
         self.forget_sync()
         self._jira_error = ""
         self._jira_loaded_at = datetime.now()
-        if self.filter in JIRA_VIEWS:
+        if self.filter in self.jira_views:
             self.refresh(keep_selection=False)
 
     def _on_jira_failed(self, message: str) -> None:
         self._jira_error = message
         self._jira_loaded_at = datetime.now()
-        if self.filter in JIRA_VIEWS:
+        if self.filter in self.jira_views:
             self.refresh(keep_selection=False)
 
     def _fill_jira_plan(self) -> None:
@@ -1575,13 +1639,14 @@ class MainWindow(QMainWindow):
         if loading and not issues:
             self._show_empty("Спрашиваю Jira…")
             return
-        if self._jira_error:
-            self._show_empty(self._jira_error)
+        error = self._jira_error or self._jira_errors.get(self.filter, "")
+        if error:
+            self._show_empty(error)
             return
         if not issues:
             self._show_empty(
                 "Под фильтр «%s» в Jira не попала ни одна задача."
-                % JIRA_VIEWS.get(self.filter, "")
+                % self.jira_views.get(self.filter, "")
             )
             return
 
@@ -1613,7 +1678,7 @@ class MainWindow(QMainWindow):
         self.filter_label.setText(
             "%s: %d%s"
             % (
-                JIRA_VIEWS.get(self.filter, "из jira").lower(),
+                self.jira_views.get(self.filter, "из jira").lower(),
                 len(issues),
                 " · обновляю…" if loading else "",
             )
@@ -1649,6 +1714,7 @@ class MainWindow(QMainWindow):
         row.jira_requested.connect(self._ask_jira_key)
         row.product_requested.connect(self._ask_product)
         row.priority_requested.connect(self._ask_priority)
+        row.mark_requested.connect(self.toggle_mark)
         self.rows[task.id] = row
         return row
 
@@ -1691,7 +1757,8 @@ class MainWindow(QMainWindow):
     def _open_issue_keys(self) -> set[str]:
         """Ключи задач, которые Jira считает незакрытыми."""
         keys: set[str] = set()
-        for view in (JIRA_ACTIVE, JIRA_PLAN):
+        views = [JIRA_ACTIVE, JIRA_PLAN] + [key for key, _n, _j in custom_sections(self.settings)]
+        for view in views:
             for issue in self._jira_issues.get(view, []):
                 if issue.key and not self._is_done_issue(issue):
                     keys.add(issue.key.upper())
@@ -1737,7 +1804,7 @@ class MainWindow(QMainWindow):
     def _issue_by_key(self, key: str):
         """Ищет issue во всех прочитанных списках."""
         key = (key or "").upper()
-        for view in JIRA_VIEWS:
+        for view in self.jira_views:
             for issue in self._jira_issues.get(view, []):
                 if (issue.key or "").upper() == key:
                     return issue
@@ -1843,6 +1910,8 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+K"), self, activated=self.open_calendar)
         QShortcut(QKeySequence("Ctrl+E"), self, activated=self._log_selected)
         QShortcut(QKeySequence("Ctrl+,"), self, activated=self.open_settings)
+        # Insert отмечает задачу и переводит курсор ниже — как в Norton Commander.
+        QShortcut(QKeySequence("Ins"), self, activated=self.mark_selected)
         for index, (_label, name) in enumerate(F_KEYS):
             QShortcut(
                 QKeySequence("F%d" % (index + 1)), self,
@@ -1864,6 +1933,37 @@ class MainWindow(QMainWindow):
         if self.selected_id is None:
             return None
         return self.storage.get_task(self.selected_id)
+
+    def toggle_mark(self, task_id: int) -> None:
+        """Ставит или снимает отметку ♦ — задача попадает в «Отмеченные»."""
+        task = self.storage.get_task(task_id)
+        if task is None:
+            return
+        self.storage.set_marked(task_id, not task.marked)
+        self.selected_id = task_id
+        self.refresh(keep_selection=True)
+        self.statusBar().showMessage(
+            "Снята отметка: %s" % task.title if task.marked
+            else "Отмечено: %s" % task.title, 2500
+        )
+
+    def mark_selected(self) -> None:
+        """Insert: отметить выбранную задачу и шагнуть к следующей."""
+        if self.selected_id is None:
+            return
+        ids = [
+            self.list.item(i).data(Qt.ItemDataRole.UserRole)
+            for i in range(self.list.count())
+        ]
+        ids = [task_id for task_id in ids if task_id in self.rows]
+        current = self.selected_id
+        following = None
+        if current in ids and ids.index(current) + 1 < len(ids):
+            following = ids[ids.index(current) + 1]
+        self.toggle_mark(current)
+        # В «Отмеченных» снятая задача исчезает — курсор встаёт на соседнюю.
+        if following is not None and following in self.rows:
+            self._select_task(following)
 
     def edit_selected(self) -> None:
         if self.selected_id is not None:
@@ -2174,6 +2274,8 @@ class MainWindow(QMainWindow):
             chosen = [t for t in tasks if t.product.lower() == name]
         elif self.filter in HORIZON_LABELS:
             chosen = [t for t in tasks if in_horizon(t, self.filter)]
+        elif self.filter == MARKED:
+            chosen = [t for t in tasks if t.marked]
         elif self.filter == "overdue":
             chosen = [t for t in tasks if t.is_overdue]
         elif self.filter == "stale":
@@ -2196,7 +2298,7 @@ class MainWindow(QMainWindow):
             self.selected_reminder = None
         stale_days = self.settings.get_int("stale_days", 5)
 
-        if self.filter in JIRA_VIEWS and not self.search.text().strip():
+        if self.filter in self.jira_views and not self.search.text().strip():
             self._refresh_chrome(stale_days)
             self._fill_jira_plan()
             self.detail.show_task(None)
@@ -2298,9 +2400,11 @@ class MainWindow(QMainWindow):
         active_tasks = self.storage.list_tasks(include_done=False)
         self._sync_products_nav(active_tasks)
         self._sync_activity_box(stale_days)
-        for key in JIRA_VIEWS:
+        for key in self.jira_views:
             if key in self.nav_items:
                 self.nav_items[key].setVisible(self._jira_ready())
+        for widget in getattr(self, "custom_group", []):
+            widget.setVisible(self._jira_ready())
         # Цели и напоминания — не задачи: ни быстрый ввод задачи, ни поиск по
         # задачам в их разделах не нужны, только своя кнопка «добавить».
         own_section = self.filter in (GOALS, REMINDERS)
@@ -2336,12 +2440,14 @@ class MainWindow(QMainWindow):
     def _filter_title(self) -> str:
         if self.filter.startswith(PRODUCT_PREFIX):
             return self.filter[len(PRODUCT_PREFIX):]
-        if self.filter in JIRA_VIEWS:
-            return JIRA_VIEWS[self.filter]
+        if self.filter in self.jira_views:
+            return self.jira_views[self.filter]
         if self.filter == GOALS:
             return "Цели квартала"
         if self.filter == REMINDERS:
             return "Напоминания"
+        if self.filter == MARKED:
+            return "Отмеченные"
         return dict(FILTERS).get(self.filter, "")
 
     def _nav_count(
@@ -2351,7 +2457,7 @@ class MainWindow(QMainWindow):
         if key.startswith(PRODUCT_PREFIX):
             name = key[len(PRODUCT_PREFIX):].lower()
             return sum(1 for t in tasks if t.product.lower() == name)
-        if key in JIRA_VIEWS:
+        if key in self.jira_views:
             return len(self._jira_issues.get(key, []))
         if key == GOALS:
             return sum(1 for goal in self.goals_now() if not goal.is_done)
@@ -2359,6 +2465,8 @@ class MainWindow(QMainWindow):
             return len(self.storage.list_reminders())
         if key == JIRA_SYNC:
             return len(self.out_of_sync())
+        if key == MARKED:
+            return sum(1 for t in tasks if t.marked)
         if key == "done":
             return 0  # выполненных много, число тут только мешает
         return counters.get(key, 0)
@@ -2500,6 +2608,8 @@ class MainWindow(QMainWindow):
         return {
             "active": "Задач нет. Введите первую в поле сверху.",
             "today": "На сегодня ничего не запланировано.",
+            MARKED: "Отмеченных задач нет. Отметьте задачу клавишей Insert "
+                    "или щелчком по колонке \u2666 в строке.",
             "overdue": "Просроченных задач нет.",
             "stale": "Все задачи в движении.",
             "jira": "По всем задачам вопрос с Jira закрыт.",
@@ -2592,10 +2702,10 @@ class MainWindow(QMainWindow):
 
     def set_filter(self, key: str) -> None:
         # Повторный клик по тому же списку — принудительное обновление из Jira.
-        force = key in JIRA_VIEWS and self.filter == key
+        force = key in self.jira_views and self.filter == key
         self.filter = key
         self.search.clear()
-        if key in JIRA_VIEWS:
+        if key in self.jira_views:
             self.load_jira(force=force)
         self.refresh(keep_selection=False)
 
@@ -2787,6 +2897,10 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         menu.addAction("Открыть карточку", lambda: self.open_task(task_id))
         menu.addAction("Отметить работу", lambda: self.detail._log_work())
+        menu.addAction(
+            "Снять отметку \u2666" if task.marked else "Отметить \u2666  (Insert)",
+            lambda: self.toggle_mark(task_id),
+        )
         self._add_product_menu(menu, task)
         menu.addSeparator()
         if task.is_done:

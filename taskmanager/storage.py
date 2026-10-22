@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     priority         INTEGER DEFAULT 1,
     due_date         TEXT,
     asap             INTEGER DEFAULT 0,
+    marked           INTEGER DEFAULT 0,
     start_date       TEXT,
     product          TEXT DEFAULT '',
     repeat_rule      TEXT DEFAULT '',
@@ -150,6 +151,7 @@ class Storage:
             ("product", "ALTER TABLE tasks ADD COLUMN product TEXT DEFAULT ''"),
             ("repeat_rule", "ALTER TABLE tasks ADD COLUMN repeat_rule TEXT DEFAULT ''"),
             ("asap", "ALTER TABLE tasks ADD COLUMN asap INTEGER DEFAULT 0"),
+            ("marked", "ALTER TABLE tasks ADD COLUMN marked INTEGER DEFAULT 0"),
         ):
             if name not in columns:
                 self.conn.execute(ddl)
@@ -227,6 +229,13 @@ class Storage:
 
     def delete_task(self, task_id: int) -> None:
         self.conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+        self.conn.commit()
+
+    def set_marked(self, task_id: int, marked: bool) -> None:
+        """Отметка задачи. Не правка: ни «обновлено», ни движение не меняются."""
+        self.conn.execute(
+            "UPDATE tasks SET marked=? WHERE id=?", (1 if marked else 0, task_id)
+        )
         self.conn.commit()
 
     def set_status(self, task_id: int, status: str) -> None:
