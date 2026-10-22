@@ -50,6 +50,7 @@ from .. import updates as updates_module
 from .. import products as products_module
 from .. import quickadd
 from .. import recurrence
+from .. import sections as sections_module
 from ..appicon import make_icon, make_watermark
 from ..config import Settings
 from ..horizons import (
@@ -199,25 +200,11 @@ JIRA_VIEWS = {
     JIRA_DONE: "Из Jira: сделано",
 }
 
-# Свои разделы: название и JQL задаёт пользователь в настройках.
-JIRA_CUSTOM_PREFIX = "jira_custom:"
+# Свои разделы — подборки по правилу из настроек (см. taskmanager/sections.py).
+def custom_sections(settings) -> list:
+    """Свои разделы из настроек: продукт, слова, тег, Jira и прочие правила."""
+    return sections_module.load(settings)
 
-
-def custom_sections(settings) -> list[tuple[str, str, str]]:
-    """Свои разделы из настроек: (ключ списка, название, JQL).
-
-    Ключ — по номеру раздела: переименование не теряет выбранный список.
-    Разделы без названия или без фильтра пропускаем.
-    """
-    sections = []
-    for index, raw in enumerate(settings.get("jira.sections", []) or []):
-        if not isinstance(raw, dict):
-            continue
-        name = str(raw.get("name", "") or "").strip()
-        jql = str(raw.get("jql", "") or "").strip()
-        if name and jql:
-            sections.append(("%s%d" % (JIRA_CUSTOM_PREFIX, index), name, jql))
-    return sections
 
 # Сколько держим ответ Jira, прежде чем спрашивать снова.
 JIRA_CACHE_SECONDS = 300
@@ -1024,6 +1011,7 @@ class MainWindow(QMainWindow):
         center_layout.addWidget(self.table_header)
 
         self.list = QListWidget()
+        self.list.setProperty("rows", "true")
         self.list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
         self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.list.customContextMenuRequested.connect(self._context_menu)
@@ -1343,19 +1331,18 @@ class MainWindow(QMainWindow):
             )
         )
 
-        # Свои разделы из Jira — отдельной группой, если они заведены.
+        # Свои разделы — отдельной группой, если они заведены.
         sections = custom_sections(self.settings)
-        self.custom_group = []
+        self.custom_caption = None
         if sections:
             layout.addSpacing(theme.section_gap())
             caption = section_label("свои")
-            caption.setToolTip("Разделы со своими фильтрами Jira — «Настройки → Интеграции»")
+            caption.setToolTip("Свои разделы — «Настройки → Разделы»")
             layout.addWidget(caption)
-            self.custom_group.append(caption)
-            for key, name, jql in sections:
-                item = self._nav_item(key, name, "Jira: %s" % jql)
+            self.custom_caption = caption
+            for section in sections:
+                item = self._nav_item(section.key, section.name, section.describe())
                 layout.addWidget(item)
-                self.custom_group.append(item)
 
         layout.addSpacing(theme.section_gap())
         group("состояние")
@@ -1568,8 +1555,9 @@ class MainWindow(QMainWindow):
     def jira_views(self) -> dict[str, str]:
         """Все списки из Jira: три встроенных и свои разделы из настроек."""
         views = dict(JIRA_VIEWS)
-        for key, name, _jql in custom_sections(self.settings):
-            views[key] = name
+        for section in custom_sections(self.settings):
+            if section.is_jira:
+                views[section.key] = section.name
         return views
 
     def _jira_config(self) -> JiraConfig:
@@ -1597,7 +1585,8 @@ class MainWindow(QMainWindow):
         if self._jira_fresh() and not force:
             return
         self._jira_error = ""
-        custom = [(key, jql) for key, _name, jql in custom_sections(self.settings)]
+        custom = [(section.key, section.value)
+                  for section in custom_sections(self.settings) if section.is_jira]
         thread = JiraFetch(self._jira_config(), custom, self)
         thread.done.connect(self._on_jira_done)
         thread.failed.connect(self._on_jira_failed)
@@ -1757,7 +1746,9 @@ class MainWindow(QMainWindow):
     def _open_issue_keys(self) -> set[str]:
         """Ключи задач, которые Jira считает незакрытыми."""
         keys: set[str] = set()
-        views = [JIRA_ACTIVE, JIRA_PLAN] + [key for key, _n, _j in custom_sections(self.settings)]
+        views = [JIRA_ACTIVE, JIRA_PLAN] + [
+            section.key for section in custom_sections(self.settings) if section.is_jira
+        ]
         for view in views:
             for issue in self._jira_issues.get(view, []):
                 if issue.key and not self._is_done_issue(issue):
@@ -2269,7 +2260,10 @@ class MainWindow(QMainWindow):
             return tasks
 
         tasks = self.storage.list_tasks(include_done=False)
-        if self.filter.startswith(PRODUCT_PREFIX):
+        section = self._local_section(self.filter)
+        if section is not None:
+            chosen = [t for t in tasks if section.matches(t)]
+        elif self.filter.startswith(PRODUCT_PREFIX):
             name = self.filter[len(PRODUCT_PREFIX):].lower()
             chosen = [t for t in tasks if t.product.lower() == name]
         elif self.filter in HORIZON_LABELS:
@@ -2403,8 +2397,13 @@ class MainWindow(QMainWindow):
         for key in self.jira_views:
             if key in self.nav_items:
                 self.nav_items[key].setVisible(self._jira_ready())
-        for widget in getattr(self, "custom_group", []):
-            widget.setVisible(self._jira_ready())
+        # Разделы из Jira прячутся без Jira; подпись группы — если виден хоть один.
+        caption = getattr(self, "custom_caption", None)
+        if caption is not None:
+            caption.setVisible(any(
+                not section.is_jira or self._jira_ready()
+                for section in custom_sections(self.settings)
+            ))
         # Цели и напоминания — не задачи: ни быстрый ввод задачи, ни поиск по
         # задачам в их разделах не нужны, только своя кнопка «добавить».
         own_section = self.filter in (GOALS, REMINDERS)
@@ -2437,7 +2436,19 @@ class MainWindow(QMainWindow):
         self.ticker.set_text(self.ticker_text(counters))
         self._update_tray_tooltip(counters)
 
+    def _local_section(self, key: str):
+        """Свой раздел по своим задачам (не из Jira) — или None."""
+        if not key.startswith(sections_module.PREFIX):
+            return None
+        for section in custom_sections(self.settings):
+            if section.key == key and not section.is_jira:
+                return section
+        return None
+
     def _filter_title(self) -> str:
+        section = self._local_section(self.filter)
+        if section is not None:
+            return section.name
         if self.filter.startswith(PRODUCT_PREFIX):
             return self.filter[len(PRODUCT_PREFIX):]
         if self.filter in self.jira_views:
@@ -2454,6 +2465,9 @@ class MainWindow(QMainWindow):
         self, key: str, tasks: list[Task], stale_days: int, counters: dict[str, int]
     ) -> int:
         """Счётчик рядом с пунктом меню — по тем же правилам, что и сам список."""
+        section = self._local_section(key)
+        if section is not None:
+            return sum(1 for t in tasks if section.matches(t))
         if key.startswith(PRODUCT_PREFIX):
             name = key[len(PRODUCT_PREFIX):].lower()
             return sum(1 for t in tasks if t.product.lower() == name)
@@ -2605,6 +2619,9 @@ class MainWindow(QMainWindow):
             return "Ничего не нашлось"
         if self.filter.startswith(PRODUCT_PREFIX):
             return "По продукту «%s» активных задач нет." % self._filter_title()
+        section = self._local_section(self.filter)
+        if section is not None:
+            return "В разделе «%s» задач нет: %s." % (section.name, section.describe())
         return {
             "active": "Задач нет. Введите первую в поле сверху.",
             "today": "На сегодня ничего не запланировано.",
@@ -2717,6 +2734,10 @@ class MainWindow(QMainWindow):
         # Срок из выбранного списка, если в самой строке его не указали.
         if task.due_date is None and task.start_date is None and not task.asap:
             task.due_date = default_due(self.filter)
+        # Заведённая из своего раздела задача сразу в него и попадает.
+        section = self._local_section(self.filter)
+        if section is not None:
+            sections_module.apply_to_new_task(task, section)
         products_module.apply_to_task(task, self.settings)
         created = self.storage.add_task(task)
         self.quick_add.clear()

@@ -803,8 +803,14 @@ QListWidget {
     border: none;
     outline: none;
 }
-QListWidget::item { border: none; margin: 0; }
-QListWidget::item:selected { background: transparent; }
+/* Строка обычного списка: выбранная — инверсией, как пункт меню. */
+QListWidget::item { border: none; margin: 0; padding: 2px 6px; color: %(text)s; }
+QListWidget::item:hover { background: %(ghost)s; }
+QListWidget::item:selected { background: %(accent)s; color: %(slab_ink)s; }
+/* Список задач рисует строки сам — подложку выделения ему не нужно. */
+QListWidget[rows="true"]::item { padding: 0; }
+QListWidget[rows="true"]::item:hover,
+QListWidget[rows="true"]::item:selected { background: transparent; }
 
 /* --- Прочее --- */
 QLabel[dim="true"] { color: %(text_dim)s; }

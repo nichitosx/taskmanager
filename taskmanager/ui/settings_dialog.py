@@ -39,6 +39,8 @@ from .. import fonts as fonts_module
 from .. import demo
 from .. import products as products_module
 from .. import shortcut
+from .. import sections as sections_module
+from ..models import PRIORITY_LABELS
 from ..config import Settings, data_dir, is_portable
 from ..integrations import ics, net
 from ..integrations.confluence import ConfluenceClient, ConfluenceConfig, ConfluenceError
@@ -141,7 +143,7 @@ class SettingsDialog(QDialog):
 
     # --- Построение -----------------------------------------------------------
 
-    PAGES = ("Общее", "Интеграции", "Напоминания", "Продукты", "Обновления")
+    PAGES = ("Общее", "Разделы", "Интеграции", "Напоминания", "Продукты", "Обновления")
 
     def _build(self) -> None:
         c = theme.palette(self.settings.get("theme", theme.DEFAULT_THEME))
@@ -173,6 +175,7 @@ class SettingsDialog(QDialog):
         self.pages = QStackedWidget()
         for page in (
             self._general_tab(),
+            self._sections_tab(),
             self._integrations_tab(),
             self._reminders_tab(),
             self._products_tab(),
@@ -732,31 +735,90 @@ class SettingsDialog(QDialog):
             % (name, way, issues[0].key, issues[0].summary)
         )
 
-    # --- Свои разделы из Jira ------------------------------------------------------
+    # --- Свои разделы ----------------------------------------------------------------
 
-    def _fill_sections(self) -> None:
+    def _sections_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, theme.px(4), theme.px(8), theme.px(4))
+        layout.setSpacing(theme.px(12))
+
+        layout.addWidget(section_label("свои разделы"))
+        layout.addWidget(self._note(
+            "Раздел — своя подборка задач слева, в группе «Свои». Задачи "
+            "попадают в него по правилу: продукт, ключевые слова, тег, проект "
+            "Jira, важность, близкий срок — или фильтр Jira (JQL), тогда задачи "
+            "читаются прямо из Jira."
+        ))
+        self.sections_list = QListWidget()
+        self.sections_list.setMinimumHeight(theme.px(160))
+        self.sections_list.itemDoubleClicked.connect(lambda _item: self._edit_section())
+        layout.addWidget(self.sections_list, 1)
+
+        row = QHBoxLayout()
+        row.setSpacing(theme.px(10))
+        self.section_add = _button("[ Добавить раздел ]", "flat")
+        self.section_add.clicked.connect(self._add_section)
+        row.addWidget(self.section_add)
+        self.section_edit = _button("[ Изменить ]", "flat")
+        self.section_edit.clicked.connect(self._edit_section)
+        row.addWidget(self.section_edit)
+        self.section_remove = _button("[ Удалить ]", "flat")
+        self.section_remove.clicked.connect(self._remove_section)
+        row.addWidget(self.section_remove)
+        row.addStretch(1)
+        self.section_up = _button("\u2191", "flat")
+        self.section_up.setToolTip("Выше в меню")
+        self.section_up.clicked.connect(lambda: self._move_section(-1))
+        row.addWidget(self.section_up)
+        self.section_down = _button("\u2193", "flat")
+        self.section_down.setToolTip("Ниже в меню")
+        self.section_down.clicked.connect(lambda: self._move_section(1))
+        row.addWidget(self.section_down)
+        layout.addLayout(row)
+        layout.addStretch(1)
+        return page
+
+    def _fill_sections(self, select: int = -1) -> None:
+        """В списке — только названия; правило видно в подсказке."""
         self.sections_list.clear()
-        for section in self.sections:
-            item = QListWidgetItem("%s  \u2014  %s" % (section["name"], section["jql"]))
-            item.setToolTip(section["jql"])
+        for raw in self.sections:
+            section = sections_module.Section("", raw["name"], raw["kind"], raw["value"])
+            item = QListWidgetItem(raw["name"])
+            item.setToolTip("%s: %s" % (
+                sections_module.KINDS.get(raw["kind"], raw["kind"]), section.describe()
+            ))
             self.sections_list.addItem(item)
+        if 0 <= select < self.sections_list.count():
+            self.sections_list.setCurrentRow(select)
+
+    def _move_section(self, step: int) -> None:
+        row = self.sections_list.currentRow()
+        target = row + step
+        if not (0 <= row < len(self.sections) and 0 <= target < len(self.sections)):
+            return
+        self.sections[row], self.sections[target] = self.sections[target], self.sections[row]
+        self._fill_sections(target)
+
+    def _section_dialog(self, raw: dict) -> "SectionDialog":
+        return SectionDialog(raw, self, self.storage)
 
     def _add_section(self) -> None:
-        dialog = JiraSectionDialog({"name": "", "jql": ""}, self)
+        dialog = self._section_dialog(
+            {"name": "", "kind": sections_module.KIND_PRODUCT, "value": ""}
+        )
         if dialog.exec() == dialog.DialogCode.Accepted:
             self.sections.append(dialog.result_section())
-            self._fill_sections()
-            self.sections_list.setCurrentRow(len(self.sections) - 1)
+            self._fill_sections(len(self.sections) - 1)
 
     def _edit_section(self) -> None:
         row = self.sections_list.currentRow()
         if not 0 <= row < len(self.sections):
             return
-        dialog = JiraSectionDialog(self.sections[row], self)
+        dialog = self._section_dialog(self.sections[row])
         if dialog.exec() == dialog.DialogCode.Accepted:
             self.sections[row] = dialog.result_section()
-            self._fill_sections()
-            self.sections_list.setCurrentRow(row)
+            self._fill_sections(row)
 
     def _remove_section(self) -> None:
         row = self.sections_list.currentRow()
@@ -780,10 +842,6 @@ class SettingsDialog(QDialog):
             self.jira_jql_active,
             self.jira_jql_done,
             self.jira_check_button,
-            self.sections_list,
-            self.section_add,
-            self.section_edit,
-            self.section_remove,
         ):
             widget.setEnabled(jira_on)
         cf_on = self.cf_check.isChecked()
@@ -1001,34 +1059,6 @@ class SettingsDialog(QDialog):
         jql_note.setProperty("faint", "true")
         layout.addWidget(jql_note)
 
-        # Свои разделы: название и JQL — раздел появится слева, в группе «Свои».
-        layout.addWidget(section_label("свои разделы"))
-        self.sections_list = QListWidget()
-        self.sections_list.setMaximumHeight(theme.px(140))
-        self.sections_list.itemDoubleClicked.connect(lambda _item: self._edit_section())
-        layout.addWidget(self.sections_list)
-        sections_row = QHBoxLayout()
-        sections_row.setSpacing(theme.px(10))
-        self.section_add = _button("[ Добавить раздел ]", "flat")
-        self.section_add.clicked.connect(self._add_section)
-        sections_row.addWidget(self.section_add)
-        self.section_edit = _button("[ Изменить ]", "flat")
-        self.section_edit.clicked.connect(self._edit_section)
-        sections_row.addWidget(self.section_edit)
-        self.section_remove = _button("[ Удалить ]", "flat")
-        self.section_remove.clicked.connect(self._remove_section)
-        sections_row.addWidget(self.section_remove)
-        sections_row.addStretch(1)
-        layout.addLayout(sections_row)
-        sections_note = QLabel(
-            "Раздел — свой список задач из Jira: название и фильтр JQL, например "
-            "«project = SEC AND labels = audit AND resolution = Unresolved». "
-            "Разделы появятся слева, в группе «Свои»."
-        )
-        sections_note.setWordWrap(True)
-        sections_note.setProperty("faint", "true")
-        layout.addWidget(sections_note)
-
         layout.addWidget(hline())
         layout.addWidget(section_label("календарь"))
         self.ics_check = QCheckBox("Показывать встречи из внешнего календаря")
@@ -1225,11 +1255,7 @@ class SettingsDialog(QDialog):
         self.jira_token.setText(s.get("jira.token", ""))
         self.jira_jql.setText(s.get("jira.jql", "") or DEFAULT_JQL)
         self.jira_jql_active.setText(s.get("jira.jql_active", "") or DEFAULT_JQL_ACTIVE)
-        self.sections = [
-            {"name": str(raw.get("name", "")), "jql": str(raw.get("jql", ""))}
-            for raw in (s.get("jira.sections", []) or [])
-            if isinstance(raw, dict)
-        ]
+        self.sections = sections_module.raw(s)
         self._fill_sections()
         self.jira_jql_done.setText(s.get("jira.jql_done", "") or DEFAULT_JQL_DONE)
         self.vault_edit.setText(s.get("obsidian.vault_path", ""))
@@ -1390,7 +1416,11 @@ class SettingsDialog(QDialog):
         s.set("jira.token", self.jira_token.text().strip())
         s.set("jira.jql", self.jira_jql.text().strip() or DEFAULT_JQL)
         s.set("jira.jql_active", self.jira_jql_active.text().strip() or DEFAULT_JQL_ACTIVE)
-        s.set("jira.sections", [dict(section) for section in self.sections])
+        s.set("sections", [dict(section) for section in self.sections])
+        # Разделы прошлой версии переехали в «sections» — старый список убираем.
+        jira_settings = s.data.get("jira")
+        if isinstance(jira_settings, dict):
+            jira_settings.pop("sections", None)
         s.set("jira.jql_done", self.jira_jql_done.text().strip() or DEFAULT_JQL_DONE)
         s.set("jira.base_url", self.jira_url.text().strip().rstrip("/"))
         s.set("obsidian.vault_path", self.vault_edit.text().strip())
@@ -1419,41 +1449,57 @@ class SettingsDialog(QDialog):
         self.accept()
 
 
-class JiraSectionDialog(QDialog):
-    """Свой раздел: название в меню и фильтр JQL, по которому собираются задачи."""
+class SectionDialog(QDialog):
+    """Свой раздел: название в меню и правило, по которому в него попадают задачи."""
 
-    def __init__(self, section: dict, parent=None) -> None:
+    def __init__(self, raw: dict, parent=None, storage=None) -> None:
         super().__init__(parent)
         self.owner = parent
+        self.storage = storage
         self.setWindowTitle("Свой раздел")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(theme.px(18), theme.px(16), theme.px(18), theme.px(14))
         layout.setSpacing(theme.px(10))
 
         layout.addWidget(section_label("название"))
-        self.name_edit = QLineEdit(section.get("name", ""))
-        self.name_edit.setPlaceholderText("Аудит, Инциденты, Команда…")
+        self.name_edit = QLineEdit(raw.get("name", ""))
+        self.name_edit.setPlaceholderText("Аудит, Биллинг, Срочное на неделе…")
         layout.addWidget(self.name_edit)
 
-        layout.addWidget(section_label("фильтр jql"))
-        self.jql_edit = QLineEdit(section.get("jql", ""))
-        self.jql_edit.setPlaceholderText(
-            "project = SEC AND labels = audit AND resolution = Unresolved"
-        )
-        layout.addWidget(self.jql_edit)
+        layout.addWidget(section_label("что в нём собирать"))
+        self.kind_box = QComboBox()
+        for key, title in sections_module.KINDS.items():
+            self.kind_box.addItem(title, key)
+        layout.addWidget(self.kind_box)
 
-        self.note = QLabel(
-            "Тот же язык, что в поиске Jira. Удобно собрать фильтр там, "
-            "а сюда скопировать строку JQL."
-        )
+        # Под каждый вид правила — своё поле: текст, список или число дней.
+        self.value_edit = QLineEdit()
+        layout.addWidget(self.value_edit)
+        self.product_box = QComboBox()
+        self.product_box.setEditable(True)
+        for name in self._product_names():
+            self.product_box.addItem(name)
+        layout.addWidget(self.product_box)
+        self.priority_box = QComboBox()
+        for level, title in sorted(PRIORITY_LABELS.items()):
+            self.priority_box.addItem(title, level)
+        layout.addWidget(self.priority_box)
+        self.days_spin = QSpinBox()
+        self.days_spin.setRange(0, 365)
+        self.days_spin.setSuffix(" дн.")
+        self.days_spin.setFixedWidth(cell_width() * 12)
+        layout.addWidget(self.days_spin)
+
+        self.note = QLabel()
         self.note.setWordWrap(True)
         self.note.setProperty("faint", "true")
         layout.addWidget(self.note)
 
         buttons = QHBoxLayout()
-        check = _button("[ Проверить фильтр ]", "flat")
-        check.clicked.connect(self._check)
-        buttons.addWidget(check)
+        self.check_button = _button("[ Проверить ]", "flat")
+        self.check_button.setToolTip("Сколько задач сейчас попадает в раздел")
+        self.check_button.clicked.connect(self._check)
+        buttons.addWidget(self.check_button)
         buttons.addStretch(1)
         cancel = _button("Отмена", "flat")
         cancel.clicked.connect(self.reject)
@@ -1463,25 +1509,121 @@ class JiraSectionDialog(QDialog):
         save.setDefault(True)
         buttons.addWidget(save)
         layout.addLayout(buttons)
-        self.resize(theme.px(620), self.sizeHint().height())
+
+        kind = raw.get("kind", sections_module.KIND_PRODUCT)
+        index = self.kind_box.findData(kind)
+        self.kind_box.setCurrentIndex(max(index, 0))
+        self._set_value(kind, raw.get("value", ""))
+        self.kind_box.currentIndexChanged.connect(lambda _i: self._sync_kind())
+        self._sync_kind()
+        self.resize(theme.px(640), self.sizeHint().height())
+
+    HINTS = {
+        sections_module.KIND_PRODUCT: "Все активные задачи этого продукта.",
+        sections_module.KIND_KEYWORD:
+            "Слова через запятую: задача попадёт, если любое из них есть в "
+            "названии, заметках или тегах. Например: аудит, проверка, журнал",
+        sections_module.KIND_TAG: "Задачи с этим тегом — то, что пишется как #тег.",
+        sections_module.KIND_PROJECT:
+            "Ключ проекта Jira: SEC соберёт задачи с ключами SEC-1, SEC-42 и так далее.",
+        sections_module.KIND_PRIORITY: "Задачи этой важности и выше.",
+        sections_module.KIND_DUE:
+            "Задачи со сроком в ближайшие дни — и всё просроченное. 0 — только сегодня.",
+        sections_module.KIND_JIRA:
+            "Фильтр на языке поиска Jira, например «project = SEC AND labels = audit "
+            "AND resolution = Unresolved». Задачи читаются прямо из Jira.",
+    }
+
+    def _product_names(self) -> list[str]:
+        names = []
+        settings = getattr(self.owner, "settings", None)
+        if settings is not None:
+            names = products_module.names(products_module.load(settings))
+        if self.storage is not None:
+            for name in self.storage.products_in_use():
+                if name not in names:
+                    names.append(name)
+        return names
+
+    def kind(self) -> str:
+        return self.kind_box.currentData()
+
+    def _set_value(self, kind: str, value: str) -> None:
+        if kind == sections_module.KIND_PRODUCT:
+            self.product_box.setEditText(value)
+        elif kind == sections_module.KIND_PRIORITY:
+            index = self.priority_box.findData(sections_module._int(value, 2))
+            self.priority_box.setCurrentIndex(max(index, 0))
+        elif kind == sections_module.KIND_DUE:
+            self.days_spin.setValue(sections_module._int(value, 7))
+        else:
+            self.value_edit.setText(value)
+
+    def value(self) -> str:
+        kind = self.kind()
+        if kind == sections_module.KIND_PRODUCT:
+            return self.product_box.currentText().strip()
+        if kind == sections_module.KIND_PRIORITY:
+            return str(self.priority_box.currentData())
+        if kind == sections_module.KIND_DUE:
+            return str(self.days_spin.value())
+        return self.value_edit.text().strip()
+
+    def _sync_kind(self) -> None:
+        kind = self.kind()
+        self.product_box.setVisible(kind == sections_module.KIND_PRODUCT)
+        self.priority_box.setVisible(kind == sections_module.KIND_PRIORITY)
+        self.days_spin.setVisible(kind == sections_module.KIND_DUE)
+        self.value_edit.setVisible(kind in (
+            sections_module.KIND_KEYWORD, sections_module.KIND_TAG,
+            sections_module.KIND_PROJECT, sections_module.KIND_JIRA,
+        ))
+        self.value_edit.setPlaceholderText({
+            sections_module.KIND_KEYWORD: "аудит, проверка, журнал",
+            sections_module.KIND_TAG: "аудит",
+            sections_module.KIND_PROJECT: "SEC",
+            sections_module.KIND_JIRA: "project = SEC AND labels = audit",
+        }.get(kind, ""))
+        self.note.setText(self.HINTS.get(kind, ""))
 
     def result_section(self) -> dict:
-        return {"name": self.name_edit.text().strip(), "jql": self.jql_edit.text().strip()}
+        return {"name": self.name_edit.text().strip(), "kind": self.kind(), "value": self.value()}
 
     def _accept(self) -> None:
         section = self.result_section()
-        if not section["name"] or not section["jql"]:
-            self.note.setText("Нужны и название, и фильтр.")
+        if not section["name"]:
+            self.note.setText("Нужно название — им раздел подписан в меню.")
+            return
+        if not section["value"]:
+            self.note.setText("Заполните правило — иначе в раздел ничего не попадёт.")
             return
         self.accept()
 
     def _check(self) -> None:
-        """Спрашивает Jira по фильтру и говорит, сколько задач нашлось."""
-        jql = self.jql_edit.text().strip()
-        if not jql or self.owner is None:
+        """Сколько задач попадает в раздел прямо сейчас."""
+        raw = self.result_section()
+        if not raw["value"]:
+            self.note.setText("Сначала заполните правило.")
             return
-        config = self.owner._jira_config()
-        if not config.is_configured:
+        if raw["kind"] == sections_module.KIND_JIRA:
+            self._check_jira(raw["value"])
+            return
+        if self.storage is None:
+            self.note.setText("Проверить можно из настроек главного окна.")
+            return
+        section = sections_module.Section("", raw["name"], raw["kind"], raw["value"])
+        found = [t for t in self.storage.list_tasks(include_done=False) if section.matches(t)]
+        if not found:
+            self.note.setText("Сейчас под правило не попадает ни одна активная задача.")
+            return
+        self.note.setText(
+            "Сейчас подходит задач: %d. Например: %s"
+            % (len(found), "; ".join(t.title for t in found[:3]))
+        )
+
+    def _check_jira(self, jql: str) -> None:
+        config = self.owner._jira_config() if self.owner is not None else None
+        if config is None or not config.is_configured:
             self.note.setText("Сначала заполните адрес Jira и токен на странице «Интеграции».")
             return
         self.note.setText("Спрашиваю Jira…")
