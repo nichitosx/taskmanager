@@ -158,9 +158,9 @@ GOALS = "goals"
 # Напоминания живут отдельно от задач: работой не считаются и в отчёт не идут.
 REMINDERS = "reminders"
 
-# Отмеченные задачи — своя подборка: Insert в списке, как в Norton Commander.
+# Отмеченные задачи — своя подборка: звёздочка в строке или Insert.
 MARKED = "marked"
-MARKED_HINT = "Задачи, отмеченные клавишей Insert или щелчком по колонке \u2666"
+MARKED_HINT = "Задачи, отмеченные звёздочкой в строке (или клавишей Insert)"
 
 # Задачи, закрытые здесь, но всё ещё открытые в Jira: рассинхрон, который
 # видно только когда Jira отвечает, — поэтому пункт появляется не всегда.
@@ -2608,8 +2608,8 @@ class MainWindow(QMainWindow):
         return {
             "active": "Задач нет. Введите первую в поле сверху.",
             "today": "На сегодня ничего не запланировано.",
-            MARKED: "Отмеченных задач нет. Отметьте задачу клавишей Insert "
-                    "или щелчком по колонке \u2666 в строке.",
+            MARKED: "Отмеченных задач нет. Щёлкните по звёздочке в строке "
+                    "задачи — или нажмите Insert.",
             "overdue": "Просроченных задач нет.",
             "stale": "Все задачи в движении.",
             "jira": "По всем задачам вопрос с Jira закрыт.",
@@ -2898,7 +2898,7 @@ class MainWindow(QMainWindow):
         menu.addAction("Открыть карточку", lambda: self.open_task(task_id))
         menu.addAction("Отметить работу", lambda: self.detail._log_work())
         menu.addAction(
-            "Снять отметку \u2666" if task.marked else "Отметить \u2666  (Insert)",
+            "Снять отметку" if task.marked else "Отметить звёздочкой  (Insert)",
             lambda: self.toggle_mark(task_id),
         )
         self._add_product_menu(menu, task)

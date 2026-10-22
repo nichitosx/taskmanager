@@ -883,6 +883,106 @@ def table_due(task: Task) -> str:
     return "%s %s" % (WEEKDAYS_SHORT[task.due_date.weekday()], task.due_date.strftime("%d.%m"))
 
 
+class StarToggle(QWidget):
+    """Звёздочка «отметить»: пустая — не отмечена, закрашенная — отмечена.
+
+    Рисуется по пикселям, как знак шрифта IBM VGA: глифов ☆ и ★ в нём нет,
+    а звезда из другого шрифта выбивалась бы из экрана.
+    """
+
+    clicked = Signal()
+
+    # Закрашенная звезда 9×9; контур пустой считается из неё же.
+    SHAPE = (
+        "....#....",
+        "....#....",
+        "...###...",
+        "#########",
+        ".#######.",
+        "..#####..",
+        "..##.##..",
+        ".##...##.",
+        ".#.....#.",
+    )
+
+    def __init__(self, marked: bool, colors: dict[str, str], parent=None) -> None:
+        super().__init__(parent)
+        self.colors = colors
+        self.marked = marked
+        self._hover = False
+        self._ink = ""
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.unit = max(1, round(theme.px(16) / 10))
+        side = self.unit * len(self.SHAPE)
+        self.setFixedSize(side + self.unit * 2, max(side, self.fontMetrics().height()))
+        self._sync_tooltip()
+
+    @classmethod
+    def cells(cls, filled: bool) -> list[tuple[int, int]]:
+        """Клетки звезды: все — у закрашенной, только край — у пустой."""
+        rows = cls.SHAPE
+        solid = {(x, y) for y, row in enumerate(rows) for x, ch in enumerate(row) if ch == "#"}
+        if filled:
+            return sorted(solid)
+        edge = []
+        for x, y in solid:
+            neighbours = ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1))
+            if any(cell not in solid for cell in neighbours):
+                edge.append((x, y))
+        return sorted(edge)
+
+    def set_marked(self, marked: bool) -> None:
+        self.marked = marked
+        self._sync_tooltip()
+        self.update()
+
+    def set_ink(self, color: str) -> None:
+        """Один цвет поверх инверсной строки."""
+        self._ink = color
+        self.update()
+
+    def _sync_tooltip(self) -> None:
+        self.setToolTip(
+            "Снять отметку — задача уйдёт из «Отмеченных»" if self.marked
+            else "Отметить — задача попадёт в «Отмеченные» (Insert)"
+        )
+
+    def enterEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        self._hover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        self._hover = False
+        self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (Qt naming)
+        c = self.colors
+        if self._ink:
+            color = self._ink
+        elif self.marked or self._hover:
+            color = c["bright"]
+        else:
+            color = c["text_dim"]
+        unit = self.unit
+        top = (self.height() - unit * len(self.SHAPE)) // 2
+        painter = QPainter(self)
+        ink = theme.qcolor(color)
+        # Под курсором пустая звезда уже показывает, какой станет.
+        for x, y in self.cells(self.marked or self._hover):
+            painter.fillRect(unit + x * unit, top + y * unit, unit, unit, ink)
+        painter.end()
+
+
 class ClickLabel(ElidedLabel):
     """Ячейка таблицы, по которой можно щёлкнуть: «jira?», продукт, тревога."""
 
@@ -923,10 +1023,7 @@ class TaskRow(QFrame):
     product_requested = Signal(int)   # кликнули по продукту
     priority_requested = Signal(int, int)  # задача и уровень, выбранный на шкале
     warning_clicked = Signal(int)     # кликнули по тревожной метке
-    mark_requested = Signal(int)      # щёлкнули по колонке отметки ♦
-
-    # Знак отмеченной задачи — ромб из набора IBM PC.
-    FLAG = "\u2666"
+    mark_requested = Signal(int)      # щёлкнули по звёздочке
 
     def __init__(
         self,
@@ -980,14 +1077,6 @@ class TaskRow(QFrame):
         holder.addStretch(1)
         layout.addWidget(self.check_cell)
 
-        self.flag = ClickLabel(self.FLAG if task.marked else "")
-        self.flag.setFont(theme.mono_font())
-        self.flag.make_clickable(
-            "Снять отметку (Insert)" if task.marked else "Отметить задачу (Insert)"
-        )
-        self.flag.clicked.connect(lambda: self.mark_requested.emit(task.id))
-        layout.addWidget(self.flag)
-
         self.mark = QLabel(self._mark_text())
         self.mark.setFont(theme.mono_font())
         if self.worked_today and not task.is_done:
@@ -1011,6 +1100,10 @@ class TaskRow(QFrame):
         title_font.setStrikeOut(task.is_done)
         self.title.setFont(title_font)
         title_row.addWidget(self.title, 1)
+        # Звёздочка — сразу перед пометками: щелчок кладёт задачу в «Отмеченные».
+        self.star = StarToggle(task.marked, c)
+        self.star.clicked.connect(lambda: self.mark_requested.emit(task.id))
+        title_row.addWidget(self.star, 0, Qt.AlignmentFlag.AlignVCenter)
         self.extras = QLabel(self._extras_text())
         self.extras.setFont(theme.mono_font())
         self.extras.setVisible(bool(self.extras.text()))
@@ -1127,8 +1220,7 @@ class TaskRow(QFrame):
             width - margins.left() - margins.right(), cell_width(self.font())
         )
         for name, widget in (
-            ("check", self.check_cell), ("flag", self.flag), ("mark", self.mark),
-            ("key", self.key),
+            ("check", self.check_cell), ("mark", self.mark), ("key", self.key),
             ("product", self.product), ("due", self.due), ("prio", self.prio_cell),
         ):
             if widths[name] <= 0:
@@ -1183,10 +1275,9 @@ class TaskRow(QFrame):
         if selected:
             ink = c["slab_ink"]
             colors = {name: ink for name in
-                      ("flag", "mark", "key", "title", "extras", "product", "due")}
+                      ("mark", "key", "title", "extras", "product", "due")}
         else:
             colors = {
-                "flag": c["bright"],
                 "mark": c["danger"] if self.warning else c["bright"],
                 "key": (c["bright"] if self._asks_jira()
                         else (base if self.task.jira_key else c["faint"])),
@@ -1200,6 +1291,7 @@ class TaskRow(QFrame):
             widget = getattr(self, name)
             widget.setStyleSheet("color: %s; background: transparent;" % colors[name])
         self.check.set_ink(c["slab_ink"] if selected else "")
+        self.star.set_ink(c["slab_ink"] if selected else "")
         if self.priority_bars is not None:
             self.priority_bars.set_ink(c["slab_ink"] if selected else "")
         self.update()
